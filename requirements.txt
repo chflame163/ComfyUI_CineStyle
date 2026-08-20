@@ -1,0 +1,17 @@
+# CineStyle video segmentation dependencies.
+# PyTorch, torchvision, transformers and ComfyUI are provided by the
+# portable ComfyUI runtime and are intentionally not pinned here.
+huggingface_hub>=0.20.0
+transformers>=4.42.0
+peft>=0.10.0
+accelerate>=0.21.0
+timm>=0.9.0
+pillow>=8.0.0
+opencv-python-headless>=4.5.0
+scikit-image
+scipy>=1.7.0
+hydra-core>=1.3.0
+omegaconf>=2.1.0
+ninja>=1.11.0
+iopath
+packaging>=21.0

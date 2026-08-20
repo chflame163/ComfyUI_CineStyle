@@ -74,9 +74,7 @@ def _trim_audio(audio: dict[str, Any] | None, start_seconds: float, duration: fl
 
 
 def _read_video_info(filename: str) -> dict[str, Any]:
-    if not folder_paths.exists_annotated_filepath(filename):
-        raise FileNotFoundError(filename)
-    path = folder_paths.get_annotated_filepath(filename)
+    path = _resolve_video_path(filename)
     with av.open(path, mode="r") as container:
         if not container.streams.video:
             raise ValueError(f"No video stream found in '{filename}'")
@@ -102,6 +100,18 @@ def _read_video_info(filename: str) -> dict[str, Any]:
     }
 
 
+def _resolve_video_path(filename: str) -> str:
+    value = str(filename or "").strip()
+    if not value:
+        raise FileNotFoundError(value)
+    if folder_paths.exists_annotated_filepath(value):
+        return folder_paths.get_annotated_filepath(value)
+    candidate = os.path.abspath(os.path.expandvars(os.path.expanduser(value)))
+    if os.path.isfile(candidate):
+        return candidate
+    raise FileNotFoundError(value)
+
+
 async def _video_info_route(request: web.Request) -> web.Response:
     filename = request.query.get("filename", "")
     if not filename:
@@ -112,6 +122,14 @@ async def _video_info_route(request: web.Request) -> web.Response:
         return web.json_response({"error": "video file not found"}, status=404)
     except (OSError, ValueError, av.error.FFmpegError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
+
+
+async def _video_source_route(request: web.Request) -> web.StreamResponse:
+    try:
+        path = _resolve_video_path(request.query.get("filename", ""))
+    except FileNotFoundError:
+        return web.json_response({"error": "video file not found"}, status=404)
+    return web.FileResponse(path=path, headers={"Cache-Control": "no-store"})
 
 
 class CSLoadVideo(io.ComfyNode):
@@ -487,6 +505,7 @@ class CineStyleVideoExtension(ComfyExtension):
         server_instance = getattr(PromptServer, "instance", None)
         if server_instance is not None:
             server_instance.routes.get("/cinestyle/video-info")(_video_info_route)
+            server_instance.routes.get("/cinestyle/video-source")(_video_source_route)
             _ROUTE_REGISTERED = True
 
     @override

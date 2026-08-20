@@ -23,6 +23,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
 * 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在任意视频帧用语义、点或框定义对象，并自动传播 mask。
+* 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
 
 ## 节点说明
@@ -89,15 +90,28 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 ### CS Video Segment (SAM3.1)
 使用 ComfyUI 官方 SAM3 Detect 推理内核，把视频中定义在任意锚点帧的对象 mask 传播到整段视频。节点不包含 SAMMatte 的 mask refine 部分。
 
-- 在 `video` 控件中选择视频后，点击节点上的 `Open Selector`，即可打开帧预览和标注窗口。
+- 将视频输入连接到节点后，点击节点上的 `Open Selector`，即可打开与实际输入帧范围一致的预览和标注窗口。Selector 会递归沿 `VIDEO`/`IMAGE` 上游连接查找官方或第三方视频 Load 节点，不限定为 `CS Load Video`。
+- 如果上游来源是运行后才生成的 `VIDEO`/`IMAGE` 张量，先运行一次工作流；节点会把实际收到的输入帧缓存到临时目录，之后 Selector 使用这份缓存预览和执行交互式 Preview。
 - `Points` 模式：左键点击空白处添加正点；悬停已有点时显示移动光标，按住左键可拖动该点，未移动直接释放不会产生操作；右键点击空白处添加负点，右键点击已有点可删除该点或切换正负属性。
 - `Bounding box` 模式：在预览画布中拖出对象框；拖动四角可同时调整宽高，拖动四条边可单独调整对应边的位置。
 - `Semantic` 模式：直接输入文字提示；节点会使用 `CheckpointLoaderSimple` 加载的 SAM3 checkpoint 内置文本编码器，不需要额外连接 `CLIP` 或 `CONDITIONING`。
 - 点击 `Preview current frame`，只对当前帧执行一次 SAM3 Detect，并在窗口中叠加显示分割结果。Preview 会识别连接到 `MODEL` 的 `CheckpointLoaderSimple` 或 `Load Diffusion Model`。
-- 标注窗口中的帧号就是 `anchor_frame`，前后传播方向可在高级选项中设置。
-- 执行时优先使用 `images`，否则使用 `video_input`；节点内的视频选择框主要用于 GUI 预览和无连接时的兜底解码。
+- 标注窗口中的帧号就是实际输入 batch 的 `anchor_frame`，前后传播方向可在高级选项中设置；`CS Load Video` 的裁剪范围会自动换算为源视频帧。
+- 节点不再单独持有视频文件选择框，执行和 Selector 使用同一个上游视频输入；对于运行时生成的输入，Selector 使用最近一次执行缓存。
 
 输出 `mask` 为 `[帧数, 高, 宽]` 的视频 mask，`anchor_mask` 为锚点帧 mask，`video_info` 包含帧数、尺寸、锚点帧和对象数量。
+
+### CS Video Segment (SeC-4B)
+使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在任意锚点帧用点或框定义对象并传播 mask。节点不需要 `CLIP` 或 `CONDITIONING`；SeC 会在场景变化时自动重新提取对象概念。
+
+- 推荐连接 `CS SeC-4B Model Loader`，它会从 `models/sams/SeC-4B` 加载已经下载的权重，并登记一个可复用的 Preview 模型 token；如果没有执行 Loader，首次 Preview 会按默认配置自动冷加载并登记模型。
+- 将视频输入连接到节点后点击 `Open Selector`；SeC Selector 只提供 `Points` 和 `Bounding box` 两种方式。Selector 会递归查找官方或第三方视频 Load 节点；运行时生成的输入需要先运行一次工作流以建立缓存。
+- `input_mask` 是可选外部 MASK 输入，可和点提示一起用于锚点初始化。
+- `tracking_direction` 支持 `forward`、`backward` 和 `bidirectional`；`mllm_memory_size` 控制场景变化时使用的历史关键帧数量。
+- Preview 只运行锚点帧的 LongSAM2.1 初始化，不执行整段视频传播；优先使用 Loader 登记的模型 token，没有 token 时才自动冷加载默认 SeC-4B，后续请求复用注册模型。
+- 默认 `auto_unload_model` 会在节点执行后释放 SeC-4B 的视觉、语言和 LongSAM2.1 子模型，但保留加载元数据；下一次执行或 Preview 会按 token 自动重载。
+
+SeC-4B 的 Python 推理模块和 LongSAM2.1 配置位于 `py/sec_inference` 与 `py/sec_configs`，依赖声明位于项目根目录 `requirements.txt`。该模型快照约 14.15 GiB，请确保 `models/sams/SeC-4B` 已存在。
 
 ### CS Save Video
 基于 ComfyUI 官方 `Save Video` 节点，增加save metadata和H264 bitrate选项。

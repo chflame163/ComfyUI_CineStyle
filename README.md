@@ -13,10 +13,10 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ### 如何找到本节点组
 * 在ComfyUI画布点击右键 - Add Node, 找到 "😺dzNodes/CineStyle"。    
-![image](images/node-menu.jpg)    
+<img src="images/node-menu.jpg" alt="CineStyle 节点菜单" width="480">
 
 * 或者在ComfyUI画布双击, 在搜索框输入"cinestyle"。
-![image](images/node-search.jpg)    
+<img src="images/node-search.jpg" alt="CineStyle 节点搜索" width="480">
 
 
 ## 更新说明

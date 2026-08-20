@@ -1,0 +1,16 @@
+# Python caches and local tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tests and local development artifacts
+tests/
+.idea/
+.vscode/
+
+# Local ComfyUI/server output
+*.log
+*.tmp
+*.bak

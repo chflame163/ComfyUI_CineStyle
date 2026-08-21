@@ -1,6 +1,6 @@
 import { api } from "../../../scripts/api.js";
 import { app } from "../../../scripts/app.js";
-import { registerVideoSelector } from "./video_selector.js";
+import { registerVideoSelector } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Video_Segment_SeC";
 
@@ -35,25 +35,18 @@ registerVideoSelector({
     title: "SeC-4B Video Selector",
     previewRoute: "/cinestyle/sec-video-segment-preview",
     previewLabel: "Loading SeC-4B if needed and running...",
-    semantic: false,
-    modes: [
-        { value: "points", label: "Points" },
-        { value: "bbox", label: "Bounding box" },
-    ],
-    removeWidgets: ["video"],
+    widgets: { prompt: "prompt_data" },
+    removeInputs: ["input_mask"],
+    removeWidgets: ["video", "selection_mode", "points", "bbox"],
     note: {},
-    preview: async ({ node, filename, previewFrame, mode, points, box, fetchPreview }) => fetchPreview({
+    preview: async ({ node, filename, previewFrame, promptData, fetchPreview }) => fetchPreview({
         video: filename,
         frame: previewFrame,
-        mode,
-        points: JSON.stringify(points),
-        bbox: JSON.stringify(box || {}),
+        prompt_data: promptData,
         model_token: await modelToken(node),
     }),
-    apply: ({ node, frame, mode, points, box, setWidgetValue }) => {
-        setWidgetValue(node, "selection_mode", mode);
+    apply: ({ node, frame, promptData, setWidgetValue }) => {
         setWidgetValue(node, "anchor_frame", frame);
-        setWidgetValue(node, "points", JSON.stringify(points));
-        setWidgetValue(node, "bbox", JSON.stringify(box || {}));
+        setWidgetValue(node, "prompt_data", promptData);
     },
 });

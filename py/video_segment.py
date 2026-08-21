@@ -1,10 +1,4 @@
-"""Interactive SAM 3.1 video segmentation for CineStyle.
-
-The node deliberately delegates the anchor-frame segmentation to ComfyUI's
-official ``SAM3_Detect`` node.  Video propagation uses the same official SAM3
-model's ``forward_video`` implementation; the only extra work here is running
-it from an arbitrary anchor frame in both temporal directions.
-"""
+"""Interactive multi-object SAM3.1 and SeC-4B video segmentation."""
 
 from __future__ import annotations
 
@@ -40,11 +34,10 @@ from comfy_api.latest import ComfyExtension, io
 
 
 NODE_ID = "CS_Video_Segment_SAM3"
-_VIDEO_MODE_OPTIONS = ["semantic", "points", "bbox"]
+PROMPT_VERSION = 2
 _PROPAGATION_OPTIONS = ["both", "forward", "backward"]
 _PREVIEW_ROUTE_REGISTERED = False
 _LAST_MODEL: Any = None
-_SEMANTIC_CLIP_CACHE: dict[str, Any] = {}
 # SAM3.1 preview models are keyed by source path. ComfyUI's ModelPatcher
 # remains responsible for GPU residency; this cache only avoids loading a
 # second Python model object when Preview is clicked repeatedly.
@@ -478,43 +471,70 @@ def _parse_bbox(value: str | None, width: int, height: int) -> dict[str, float]:
     return {"x": x, "y": y, "width": box_width, "height": box_height}
 
 
-def _model_checkpoint_path(model: Any) -> str | None:
-    """Get the source checkpoint from ComfyUI's model reload metadata."""
-    cached = getattr(model, "cached_patcher_init", None)
-    if not cached or len(cached) < 2:
+def _decode_prompt_mask(value: Any, width: int, height: int) -> torch.Tensor | None:
+    """Decode a Selector PNG mask into a soft ``[H, W]`` tensor."""
+    if not value:
         return None
-    factory, args = cached[:2]
-    name = getattr(factory, "__name__", "")
-    if "load_checkpoint" not in name or not args:
+    if isinstance(value, dict):
+        encoded = value.get("data") or value.get("png") or value.get("base64")
+    else:
+        encoded = value
+    text = str(encoded or "").strip()
+    if not text:
         return None
-    path = args[0]
-    return str(path) if path else None
+    if "," in text and text.lower().startswith("data:"):
+        text = text.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode(text, validate=True)
+        with Image.open(py_io.BytesIO(image_bytes)) as image:
+            rgba = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255.0
+    except Exception as exc:
+        raise ValueError("prompt_data contains an invalid mask PNG.") from exc
+    alpha = rgba[..., 3]
+    if alpha.size == 0 or float(alpha.max()) <= 0.0:
+        alpha = rgba[..., :3].mean(axis=-1)
+    mask = torch.from_numpy(alpha.copy()).float()
+    if tuple(mask.shape) != (height, width):
+        mask = F.interpolate(mask[None, None], size=(height, width), mode="bilinear", align_corners=False)[0, 0]
+    if not bool((mask > 0.01).any()):
+        return None
+    return mask.clamp_(0.0, 1.0)
 
 
-def _semantic_conditioning(model: Any, prompt: str) -> Any:
-    """Encode a semantic prompt using the CLIP bundled in the SAM3 checkpoint."""
-    prompt = str(prompt or "").strip()
-    if not prompt:
-        raise ValueError("Semantic mode requires a semantic_prompt.")
-    checkpoint = _model_checkpoint_path(model)
-    if not checkpoint:
-        raise ValueError(
-            "Semantic mode needs a SAM3 checkpoint loaded by CheckpointLoaderSimple; "
-            "the connected MODEL does not expose its text encoder source."
-        )
-    clip = _SEMANTIC_CLIP_CACHE.get(checkpoint)
-    if clip is None:
-        _, clip, _, _ = comfy.sd.load_checkpoint_guess_config(
-            checkpoint,
-            output_vae=False,
-            output_clip=True,
-            output_clipvision=False,
-            output_model=False,
-        )
-        if clip is None:
-            raise ValueError("The SAM3 checkpoint does not contain a text encoder.")
-        _SEMANTIC_CLIP_CACHE[checkpoint] = clip
-    return clip.encode_from_tokens_scheduled(clip.tokenize(prompt), show_pbar=False)
+def _parse_prompt_data(value: str | None, width: int, height: int) -> list[dict[str, Any]]:
+    """Parse the Selector's versioned per-object mask/box/point protocol."""
+    raw = _parse_json(value, "prompt_data")
+    if raw is None:
+        raise ValueError("prompt_data is empty. Open the Selector and define at least one object.")
+    objects = raw.get("objects") if isinstance(raw, dict) else raw
+    if not isinstance(objects, list):
+        raise ValueError("prompt_data must contain an objects list.")
+    parsed_objects: list[dict[str, Any]] = []
+    for index, item in enumerate(objects):
+        if not isinstance(item, dict):
+            raise ValueError(f"prompt_data.objects[{index}] must be an object.")
+        raw_points = item.get("points") or []
+        points: list[dict[str, float | int]] = []
+        if raw_points:
+            positive, negative = _parse_points(json.dumps(raw_points), width, height)
+            points = [{**point, "label": 1} for point in positive] + [{**point, "label": 0} for point in negative]
+        box = None
+        raw_box = item.get("bbox") or item.get("box")
+        if raw_box:
+            box = _parse_bbox(json.dumps(raw_box), width, height)
+        mask = _decode_prompt_mask(item.get("mask"), width, height)
+        if not points and box is None and mask is None:
+            raise ValueError(f"prompt_data.objects[{index}] has no mask, bbox, or point prompt.")
+        parsed_objects.append({"points": points, "bbox": box, "mask": mask})
+    if not parsed_objects:
+        raise ValueError("prompt_data must contain at least one prompted object.")
+    return parsed_objects
+
+
+def _sam3_mask_logits(mask: torch.Tensor, device: Any, dtype: torch.dtype) -> torch.Tensor:
+    """Convert a ComfyUI 0..1 brush mask into a coarse SAM3 prompt logit."""
+    # SAM3 receives decoder-style logits rather than a binary output mask.
+    return torch.logit(mask.to(device=device, dtype=dtype).clamp(0.05, 0.95))[None, None]
 
 
 def _preview_model(source: Any) -> Any:
@@ -528,7 +548,7 @@ def _preview_model(source: Any) -> Any:
         path = folder_paths.get_full_path_or_raise("checkpoints", name)
         model = _PREVIEW_MODEL_CACHE.get(path)
         if model is None:
-            model, clip, _, _ = comfy.sd.load_checkpoint_guess_config(
+            model, _, _, _ = comfy.sd.load_checkpoint_guess_config(
                 path,
                 output_vae=False,
                 output_clip=True,
@@ -538,8 +558,6 @@ def _preview_model(source: Any) -> Any:
             if model is None:
                 raise ValueError(f"Unable to load SAM3 checkpoint: {name}")
             _PREVIEW_MODEL_CACHE[path] = model
-            if clip is not None:
-                _SEMANTIC_CLIP_CACHE[path] = clip
         return model
     if kind == "diffusion_model":
         path = folder_paths.get_full_path_or_raise("diffusion_models", name)
@@ -551,49 +569,66 @@ def _preview_model(source: Any) -> Any:
     return _LAST_MODEL
 
 
-def _anchor_masks(
-    model: Any,
-    image: torch.Tensor,
-    mode: str,
-    semantic_prompt: str,
-    points: str | None,
-    bbox: str | None,
-    threshold: float,
-) -> torch.Tensor:
-    """Run the official SAM3 Detect node on one frame and return [N, H, W]."""
-    from comfy_extras.nodes_sam3 import SAM3_Detect
-
+def _sam3_anchor_masks(model: Any, image: torch.Tensor, prompt_data: str | None) -> torch.Tensor:
+    """Run SAM3.1's official model kernel with one mixed prompt per object."""
     _, height, width, _ = image.shape
-    positive_coords: list[dict[str, float]] = []
-    negative_coords: list[dict[str, float]] = []
-    boxes = None
-    conditioning = None
-    if mode == "semantic":
-        conditioning = _semantic_conditioning(model, semantic_prompt)
-    elif mode == "points":
-        positive_coords, negative_coords = _parse_points(points, width, height)
-    elif mode == "bbox":
-        boxes = [_parse_bbox(bbox, width, height)]
-    else:
-        raise ValueError(f"Unsupported selection mode: {mode}")
+    prompts = _parse_prompt_data(prompt_data, width, height)
+    comfy.model_management.load_model_gpu(model)
+    device = comfy.model_management.get_torch_device()
+    dtype = model.model.get_dtype()
+    sam3_model = model.model.diffusion_model
+    image_in = comfy.utils.common_upscale(
+        image[..., :3].movedim(-1, 1), 1008, 1008, "bilinear", crop="disabled"
+    ).to(device=device, dtype=dtype)
+    masks: list[torch.Tensor] = []
+    for prompt in prompts:
+        points = prompt["points"]
+        point_inputs = None
+        if points:
+            point_inputs = {
+                "point_coords": torch.tensor(
+                    [[[point["x"] / width * 1008, point["y"] / height * 1008] for point in points]],
+                    dtype=dtype,
+                    device=device,
+                ),
+                "point_labels": torch.tensor(
+                    [[int(point["label"]) for point in points]],
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            }
+        box_inputs = None
+        if prompt["bbox"] is not None:
+            box = prompt["bbox"]
+            box_inputs = torch.tensor(
+                [[
+                    [box["x"] / width * 1008, box["y"] / height * 1008],
+                    [(box["x"] + box["width"]) / width * 1008, (box["y"] + box["height"]) / height * 1008],
+                ]],
+                dtype=dtype,
+                device=device,
+            )
+        mask_inputs = None
+        if prompt["mask"] is not None:
+            mask_inputs = _sam3_mask_logits(prompt["mask"], device, dtype)
 
-    result = SAM3_Detect.execute(
-        model=model,
-        image=image,
-        conditioning=conditioning if mode == "semantic" else None,
-        bboxes=boxes,
-        positive_coords=json.dumps(positive_coords),
-        negative_coords=json.dumps(negative_coords),
-        threshold=float(threshold),
-        # No external mask refinement is part of this node.  The official
-        # detector still performs its normal prompt decoding.
-        refine_iterations=0,
-        individual_masks=True,
-    )
-    masks = result[0]
-    if not isinstance(masks, torch.Tensor) or masks.ndim != 3 or masks.shape[0] == 0:
-        raise ValueError("SAM3 Detect did not find a segmentation object on the anchor frame.")
-    return masks.float()
+        with torch.no_grad():
+            mask_logits = sam3_model.forward_segment(
+                image_in,
+                point_inputs=point_inputs,
+                box_inputs=box_inputs,
+                mask_inputs=mask_inputs,
+            )
+            # Match the official Detect node's default interactive refinement pass.
+            mask_logits = sam3_model.forward_segment(
+                image_in,
+                point_inputs=point_inputs,
+                box_inputs=box_inputs,
+                mask_inputs=mask_logits,
+            )
+        resized = F.interpolate(mask_logits, size=(height, width), mode="bilinear", align_corners=False)
+        masks.append((resized[0, 0] > 0).float().to("cpu"))
+    return torch.stack(masks, dim=0)
 
 
 def _preview_data_url(frame: torch.Tensor, mask: torch.Tensor) -> str:
@@ -632,15 +667,7 @@ async def _video_segment_preview_route(request: web.Request) -> web.Response:
                 "Connect a CheckpointLoaderSimple or Load Diffusion Model node to MODEL, "
                 "or run this SAM3 node once before using Preview."
             )
-        masks = _anchor_masks(
-            model,
-            frame,
-            str(payload.get("mode") or "points"),
-            str(payload.get("semantic_prompt") or ""),
-            payload.get("points", "[]"),
-            payload.get("bbox", "{}"),
-            float(payload.get("threshold", 0.5)),
-        )
+        masks = _sam3_anchor_masks(model, frame, payload.get("prompt_data"))
         mask = masks.amax(dim=0).to("cpu").float().clamp_(0.0, 1.0)
         return web.json_response(
             {
@@ -907,32 +934,8 @@ def _sec_frame_dir(images: torch.Tensor) -> str:
     return temp_dir
 
 
-def _sec_prompt_arrays(
-    points: str | None,
-    bbox: str | None,
-    width: int,
-    height: int,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
-    positive, negative = [], []
-    if points and str(points).strip():
-        parsed = _parse_json(points, "points")
-        raw_points = parsed.get("points") if isinstance(parsed, dict) else parsed
-        if raw_points:
-            positive, negative = _parse_points(points, width, height)
-    point_values = positive + negative
-    point_array = np.asarray([[item["x"], item["y"]] for item in point_values], dtype=np.float32) if point_values else None
-    labels = np.asarray([1] * len(positive) + [0] * len(negative), dtype=np.int32) if point_values else None
-    box = None
-    if bbox and str(bbox).strip():
-        parsed_box = _parse_json(bbox, "bbox")
-        if parsed_box:
-            box = _parse_bbox(bbox, width, height)
-    box_array = None if box is None else np.asarray([box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]], dtype=np.float32)
-    return point_array, labels, box_array
-
-
 def _sec_mask_2d(mask: Any) -> np.ndarray:
-    """Reduce a SeC mask/logit result to the single selected object's HxW mask."""
+    """Reduce a SeC mask/logit result to one object's HxW mask."""
     array = mask.detach().cpu().numpy() if isinstance(mask, torch.Tensor) else np.asarray(mask)
     while array.ndim > 2:
         # SeC returns an object dimension (and some model versions add a
@@ -943,14 +946,45 @@ def _sec_mask_2d(mask: Any) -> np.ndarray:
     return array
 
 
+def _sec_mask_for_object(mask: Any, object_ids: Any, object_id: int) -> np.ndarray:
+    """Select one object's mask from SeC's consolidated multi-object output."""
+    array = mask.detach().cpu().numpy() if isinstance(mask, torch.Tensor) else np.asarray(mask)
+    ids = list(object_ids or [])
+    try:
+        object_index = ids.index(object_id)
+    except ValueError:
+        object_index = 0
+    if array.ndim == 4 and array.shape[1] == 1:
+        array = array[:, 0]
+    if array.ndim == 3:
+        array = array[object_index if array.shape[0] > object_index else 0]
+    while array.ndim > 2:
+        array = array[0]
+    if array.ndim != 2:
+        raise ValueError("SeC returned a mask with an unsupported shape.")
+    return array
+
+
 def _sec_add_prompt(model: Any, state: dict[str, Any], frame_index: int, object_id: int, points, labels, box, init_mask):
     if init_mask is not None:
-        model.grounding_encoder.add_new_mask(
-            inference_state=state,
-            frame_idx=frame_index,
-            obj_id=object_id,
-            mask=_sec_mask_2d(init_mask),
-        )
+        # The bundled SeC/SAM2 configs enable mask-as-output for video
+        # conditioning. Temporarily disable that shortcut on the anchor so a
+        # rough brush mask is actually passed through the SAM decoder.
+        encoder = model.grounding_encoder
+        previous_mask_mode = getattr(encoder, "use_mask_input_as_output_without_sam", None)
+        if previous_mask_mode is not None:
+            encoder.use_mask_input_as_output_without_sam = False
+        try:
+            _, object_ids, mask_logits = encoder.add_new_mask(
+                inference_state=state,
+                frame_idx=frame_index,
+                obj_id=object_id,
+                mask=_sec_mask_2d(init_mask),
+            )
+        finally:
+            if previous_mask_mode is not None:
+                encoder.use_mask_input_as_output_without_sam = previous_mask_mode
+        init_mask = _sec_mask_for_object(mask_logits > 0.0, object_ids, object_id)
     if points is not None or box is not None:
         _, object_ids, logits = model.grounding_encoder.add_new_points_or_box(
             inference_state=state,
@@ -960,15 +994,13 @@ def _sec_add_prompt(model: Any, state: dict[str, Any], frame_index: int, object_
             labels=labels,
             box=box,
         )
-        init_mask = _sec_mask_2d(logits > 0.0)
+        init_mask = _sec_mask_for_object(logits > 0.0, object_ids, object_id)
     return init_mask
 
 
-def _sec_anchor_preview(model: Any, frame: torch.Tensor, mode: str, points: str, bbox: str) -> torch.Tensor:
+def _sec_anchor_preview(model: Any, frame: torch.Tensor, prompt_data: str | None) -> torch.Tensor:
     height, width = map(int, frame.shape[1:3])
-    point_array, labels, box_array = _sec_prompt_arrays(points if mode == "points" else "", bbox if mode == "bbox" else "", width, height)
-    if point_array is None and box_array is None:
-        raise ValueError("Add at least one point or draw a bounding box before Preview.")
+    prompts = _parse_prompt_data(prompt_data, width, height)
     temp_dir = _sec_frame_dir(frame)
     try:
         states = getattr(model.grounding_encoder, "_states", None)
@@ -976,10 +1008,30 @@ def _sec_anchor_preview(model: Any, frame: torch.Tensor, mode: str, points: str,
             states.clear()
         state = model.grounding_encoder.init_state(video_path=temp_dir, offload_video_to_cpu=False, offload_state_to_cpu=False)
         model.grounding_encoder.reset_state(state)
-        init_mask = _sec_add_prompt(model, state, 0, 1, point_array, labels, box_array, None)
-        if init_mask is None:
-            raise ValueError("SeC did not produce a mask for the supplied prompt.")
-        return torch.from_numpy((_sec_mask_2d(init_mask) > 0).astype(np.float32))
+        masks = []
+        for object_index, prompt in enumerate(prompts, start=1):
+            point_values = prompt["points"]
+            point_array = np.asarray([[item["x"], item["y"]] for item in point_values], dtype=np.float32) if point_values else None
+            labels = np.asarray([int(item["label"]) for item in point_values], dtype=np.int32) if point_values else None
+            box = prompt["bbox"]
+            box_array = None if box is None else np.asarray(
+                [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
+                dtype=np.float32,
+            )
+            init_mask = _sec_add_prompt(
+                model,
+                state,
+                0,
+                object_index,
+                point_array,
+                labels,
+                box_array,
+                prompt["mask"].numpy() if isinstance(prompt["mask"], torch.Tensor) else prompt["mask"],
+            )
+            if init_mask is None:
+                raise ValueError(f"SeC did not produce a mask for object {object_index}.")
+            masks.append(torch.from_numpy((_sec_mask_2d(init_mask) > 0).astype(np.float32)))
+        return torch.stack(masks, dim=0).amax(dim=0)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1008,13 +1060,7 @@ async def _sec_video_segment_preview_route(request: web.Request) -> web.Response
         frame_index = max(0, int(payload.get("frame", 0)))
         frame = _decode_selector_frame(payload, frame_index)
         model = _sec_model_for_token(payload.get("model_token"))
-        mask = _sec_anchor_preview(
-            model,
-            frame,
-            str(payload.get("mode") or "points"),
-            str(payload.get("points") or "[]"),
-            str(payload.get("bbox") or "{}"),
-        )
+        mask = _sec_anchor_preview(model, frame, payload.get("prompt_data"))
         return web.json_response({
             "frame": frame_index,
             "image": _preview_data_url(frame[0], mask),
@@ -1088,11 +1134,8 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 SEC_MODEL.Input("model", tooltip="Loaded SeC-4B model."),
                 io.Image.Input("images", optional=True, tooltip="Video frames as an IMAGE batch."),
                 io.Video.Input("video_input", optional=True, tooltip="Optional VIDEO input."),
-                io.Combo.Input("selection_mode", options=["points", "bbox"], default="points"),
                 io.Int.Input("anchor_frame", default=0, min=0, max=10000000, step=1),
-                io.String.Input("points", default="[]", multiline=True, optional=True),
-                io.String.Input("bbox", default="{}", optional=True),
-                io.Mask.Input("input_mask", optional=True, tooltip="Optional initial mask at the anchor frame."),
+                io.String.Input("prompt_data", default='{"version":2,"objects":[]}', multiline=True, optional=True, tooltip="Selector multi-object mask, bbox, and point prompts."),
                 io.Combo.Input("tracking_direction", options=["forward", "backward", "bidirectional"], default="bidirectional", advanced=True),
                 io.Int.Input("max_frames_to_track", default=-1, min=-1, max=10000000, step=1, advanced=True),
                 io.Int.Input("mllm_memory_size", default=12, min=1, max=20, step=1, advanced=True),
@@ -1112,11 +1155,8 @@ class CSVideoSegmentSeC(io.ComfyNode):
         model: Any,
         images: torch.Tensor | None = None,
         video_input: Any = None,
-        selection_mode: str = "points",
         anchor_frame: int = 0,
-        points: str = "[]",
-        bbox: str = "{}",
-        input_mask: torch.Tensor | None = None,
+        prompt_data: str = '{"version":2,"objects":[]}',
         tracking_direction: str = "bidirectional",
         max_frames_to_track: int = -1,
         mllm_memory_size: int = 12,
@@ -1141,31 +1181,9 @@ class CSVideoSegmentSeC(io.ComfyNode):
         anchor = int(anchor_frame)
         if not 0 <= anchor < frame_count:
             raise ValueError(f"anchor_frame must be between 0 and {frame_count - 1}.")
-        if selection_mode not in {"points", "bbox"}:
-            raise ValueError("selection_mode must be points or bbox.")
         if tracking_direction not in {"forward", "backward", "bidirectional"}:
             raise ValueError("tracking_direction must be forward, backward, or bidirectional.")
-        if selection_mode == "points":
-            point_array, labels, box_array = _sec_prompt_arrays(points, "", width, height)
-        else:
-            point_array, labels, box_array = _sec_prompt_arrays("", bbox, width, height)
-        init_mask = None
-        if input_mask is not None:
-            mask_value = input_mask
-            if mask_value.ndim == 3 and mask_value.shape[0] == frame_count:
-                mask_value = mask_value[anchor]
-            elif mask_value.ndim == 3:
-                mask_value = mask_value[0]
-            if mask_value.ndim != 2:
-                raise ValueError("input_mask must be [H,W] or [frames,H,W].")
-            init_mask = (mask_value.detach().cpu().numpy() > 0.5).astype(np.bool_)
-            # Treat an empty placeholder mask like a disconnected optional
-            # input. This keeps stale workflow links from overriding point or
-            # box prompts with an all-zero mask.
-            if not init_mask.any():
-                init_mask = None
-        if point_array is None and box_array is None and init_mask is None:
-            raise ValueError("No selection prompt was provided. Click Apply to node after placing points or drawing a bounding box, or connect input_mask.")
+        prompts = _parse_prompt_data(prompt_data, width, height)
 
         temp_dir = _sec_frame_dir(images)
         state = None
@@ -1176,10 +1194,36 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 offload_state_to_cpu=str(model._sec_loading_metadata.get("device")) == "cpu",
             )
             model.grounding_encoder.reset_state(state)
-            init_mask = _sec_add_prompt(model, state, anchor, 1, point_array, labels, box_array, init_mask)
-            if init_mask is None:
-                raise RuntimeError("SeC did not produce an initial mask.")
-            initial_union = torch.from_numpy((_sec_mask_2d(init_mask) > 0).astype(np.float32))
+            object_masks: list[np.ndarray] = []
+
+            def add_all_prompts() -> list[np.ndarray]:
+                added: list[np.ndarray] = []
+                for object_index, prompt in enumerate(prompts, start=1):
+                    point_values = prompt["points"]
+                    point_array = np.asarray([[item["x"], item["y"]] for item in point_values], dtype=np.float32) if point_values else None
+                    labels = np.asarray([int(item["label"]) for item in point_values], dtype=np.int32) if point_values else None
+                    box = prompt["bbox"]
+                    box_array = None if box is None else np.asarray(
+                        [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
+                        dtype=np.float32,
+                    )
+                    init_mask = _sec_add_prompt(
+                        model,
+                        state,
+                        anchor,
+                        object_index,
+                        point_array,
+                        labels,
+                        box_array,
+                        prompt["mask"].numpy() if isinstance(prompt["mask"], torch.Tensor) else prompt["mask"],
+                    )
+                    if init_mask is None:
+                        raise RuntimeError(f"SeC did not produce an initial mask for object {object_index}.")
+                    added.append(_sec_mask_2d(init_mask))
+                return added
+
+            object_masks = add_all_prompts()
+            initial_union = torch.from_numpy(np.asarray(object_masks).astype(np.float32).max(axis=0))
             limit = frame_count if int(max_frames_to_track) < 0 else max(1, int(max_frames_to_track))
             segments: dict[int, torch.Tensor] = {}
 
@@ -1189,7 +1233,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
                     start_frame_idx=anchor,
                     max_frame_num_to_track=limit,
                     reverse=reverse,
-                    init_mask=init_mask,
+                    init_mask=initial_union.numpy(),
                     tokenizer=None,
                     mllm_memory_size=max(1, int(mllm_memory_size)),
                 ):
@@ -1200,7 +1244,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 collect(False)
             if tracking_direction == "bidirectional":
                 model.grounding_encoder.reset_state(state)
-                _sec_add_prompt(model, state, anchor, 1, point_array, labels, box_array, init_mask)
+                object_masks = add_all_prompts()
                 collect(True)
             elif tracking_direction == "backward":
                 collect(True)
@@ -1215,9 +1259,8 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 "height": height,
                 "width": width,
                 "anchor_frame": anchor,
-                "selection_mode": selection_mode,
                 "tracking_direction": tracking_direction,
-                "object_count": 1,
+                "object_count": len(prompts),
             }
             return io.NodeOutput(output, initial_union, info)
         finally:
@@ -1312,8 +1355,8 @@ class CSVideoSegmentSAM3(io.ComfyNode):
             essentials_category="Video Tools",
             search_aliases=["video segment", "sam3.1", "sam3 video", "propagate mask"],
             description=(
-                "Select a semantic object, points, or a hand-drawn box on an arbitrary "
-                "video frame, then propagate the mask through the video."
+                "Define multiple mask, bounding-box, and positive/negative point prompts "
+                "on any video frame, then propagate them in both directions."
             ),
             inputs=[
                 io.Model.Input("model", tooltip="Official ComfyUI SAM3/SAM3.1 model."),
@@ -1327,12 +1370,6 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                     optional=True,
                     tooltip="Optional VIDEO input from CS Load Video.",
                 ),
-                io.Combo.Input(
-                    "selection_mode",
-                    options=_VIDEO_MODE_OPTIONS,
-                    default="points",
-                    tooltip="Prompt type used on the anchor frame.",
-                ),
                 io.Int.Input(
                     "anchor_frame",
                     default=0,
@@ -1342,33 +1379,11 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                     tooltip="Frame where the selector prompt is defined.",
                 ),
                 io.String.Input(
-                    "semantic_prompt",
-                    default="",
-                    placeholder="person, hair, dress",
-                    optional=True,
-                    tooltip="Semantic object description. The node uses the text encoder bundled in the SAM3 checkpoint.",
-                ),
-                io.String.Input(
-                    "points",
-                    default="[]",
+                    "prompt_data",
+                    default='{"version":2,"objects":[]}',
                     multiline=True,
                     optional=True,
-                    tooltip="Selector data: [{\"x\":0.5,\"y\":0.5,\"label\":1}]. Coordinates may be normalized or pixels.",
-                ),
-                io.String.Input(
-                    "bbox",
-                    default="{}",
-                    optional=True,
-                    tooltip="Selector data: {\"x\":0.2,\"y\":0.2,\"w\":0.4,\"h\":0.5}. Coordinates may be normalized or pixels.",
-                ),
-                io.Float.Input(
-                    "threshold",
-                    default=0.5,
-                    min=0.0,
-                    max=1.0,
-                    step=0.01,
-                    advanced=True,
-                    tooltip="SAM3 semantic detection threshold.",
+                    tooltip="Selector multi-object mask, bbox, and point prompts.",
                 ),
                 io.Combo.Input(
                     "propagation_direction",
@@ -1400,12 +1415,8 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         model: Any,
         images: torch.Tensor | None = None,
         video_input: Any = None,
-        selection_mode: str = "points",
         anchor_frame: int = 0,
-        semantic_prompt: str = "",
-        points: str = "[]",
-        bbox: str = "{}",
-        threshold: float = 0.5,
+        prompt_data: str = '{"version":2,"objects":[]}',
         propagation_direction: str = "both",
         max_objects: int = 16,
     ) -> io.NodeOutput:
@@ -1431,8 +1442,6 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         anchor = int(anchor_frame)
         if anchor < 0 or anchor >= frame_count:
             raise ValueError(f"anchor_frame must be between 0 and {frame_count - 1}.")
-        if selection_mode not in _VIDEO_MODE_OPTIONS:
-            raise ValueError(f"selection_mode must be one of {_VIDEO_MODE_OPTIONS}.")
         if propagation_direction not in _PROPAGATION_OPTIONS:
             raise ValueError(f"propagation_direction must be one of {_PROPAGATION_OPTIONS}.")
 
@@ -1441,15 +1450,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         # pass more than the architectural cap to the tracker.
         object_limit = min(16, max(1, int(max_objects)))
 
-        anchor_mask_objects = _anchor_masks(
-            model,
-            images[anchor : anchor + 1],
-            selection_mode,
-            semantic_prompt,
-            points,
-            bbox,
-            float(threshold),
-        )
+        anchor_mask_objects = _sam3_anchor_masks(model, images[anchor : anchor + 1], prompt_data)
         if anchor_mask_objects.shape[0] > object_limit:
             anchor_mask_objects = anchor_mask_objects[:object_limit]
         anchor_mask = anchor_mask_objects.amax(dim=0).to("cpu").float().clamp_(0.0, 1.0)
@@ -1469,9 +1470,8 @@ class CSVideoSegmentSAM3(io.ComfyNode):
             "height": height,
             "width": width,
             "anchor_frame": anchor,
-            "selection_mode": selection_mode,
-            "semantic_prompt": str(semantic_prompt or ""),
             "propagation_direction": propagation_direction,
+            "prompt_version": PROMPT_VERSION,
             "object_count": int(anchor_mask_objects.shape[0]),
         }
         return io.NodeOutput(mask, anchor_mask, info)

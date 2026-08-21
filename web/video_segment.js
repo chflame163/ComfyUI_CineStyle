@@ -1,5 +1,5 @@
 import { app } from "../../../scripts/app.js";
-import { registerVideoSelector } from "./video_selector.js";
+import { registerVideoSelector } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Video_Segment_SAM3";
 
@@ -29,30 +29,18 @@ registerVideoSelector({
     title: "SAM3.1 Video Selector",
     previewRoute: "/cinestyle/video-segment-preview",
     previewLabel: "Running SAM3.1 on this frame...",
-    semantic: true,
-    modes: [
-        { value: "points", label: "Points" },
-        { value: "bbox", label: "Bounding box" },
-        { value: "semantic", label: "Semantic" },
-    ],
-    note: { semantic: "Enter the object description, then preview the current frame." },
+    widgets: { prompt: "prompt_data" },
+    note: {},
     removeInputs: ["clip", "conditioning"],
-    removeWidgets: ["video"],
-    preview: async ({ node, filename, previewFrame, mode, semanticPrompt, points, box, fetchPreview }) => fetchPreview({
+    removeWidgets: ["video", "selection_mode", "semantic_prompt", "points", "bbox", "threshold"],
+    preview: async ({ node, filename, previewFrame, promptData, fetchPreview }) => fetchPreview({
         video: filename,
         frame: previewFrame,
-        mode,
-        semantic_prompt: semanticPrompt,
-        points: JSON.stringify(points),
-        bbox: JSON.stringify(box || {}),
-        threshold: Number(widget(node, "threshold")?.value ?? 0.5),
+        prompt_data: promptData,
         model_source: connectedModelSource(node),
     }),
-    apply: ({ node, frame, mode, semanticPrompt, points, box, setWidgetValue }) => {
-        setWidgetValue(node, "selection_mode", mode);
+    apply: ({ node, frame, promptData, setWidgetValue }) => {
         setWidgetValue(node, "anchor_frame", frame);
-        setWidgetValue(node, "semantic_prompt", semanticPrompt);
-        setWidgetValue(node, "points", JSON.stringify(points));
-        setWidgetValue(node, "bbox", JSON.stringify(box || {}));
+        setWidgetValue(node, "prompt_data", promptData);
     },
 });

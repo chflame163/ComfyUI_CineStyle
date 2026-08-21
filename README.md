@@ -21,7 +21,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ## 更新说明
 
-* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
+* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
@@ -104,24 +104,35 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ### CS SeC-4B Model Loader
 
-加载并登记 SeC-4B 模型，为 `CS Video Segment (SeC-4B)` 节点和 Selector Preview 提供可复用的模型实例。权重目录必须为 `ComfyUI/models/sams/SeC-4B`。如果没有先执行 Loader，Selector Preview 也可以按默认配置冷加载模型，但推荐在工作流中显式使用 Loader。
+加载SeC-4B 模型，为 `CS Video Segment (SeC-4B)` 节点和 Selector Preview 提供可复用的模型实例。节点扫描 `ComfyUI/models/sams/SeC-4B` 目录下的单文件权重。
 
 ![CS SeC-4B Model Loader 节点](images/CS_SeC-4B_Model_Loader_node.jpg)
 
 #### 节点选项说明
 
-- `torch_dtype`：推理精度，默认 `bfloat16`。显存不足或硬件不支持时可改用 `float16` 或 `float32`。
+- `model_file`：支持 `SeC-4B-bf16.safetensors` 和 `SeC-4B-fp16.safetensors`，节点按文件原生精度加载。
 - `device`：运行设备，`auto` 自动选择 CUDA，`cpu` 使用 CPU，也可选择具体的 `gpu0`、`gpu1` 等设备。
+- 选择 `cpu` 时，BF16/FP16 权重会自动转换为 `float32`。
 - `use_flash_attn`：高级选项，默认开启。环境没有 FlashAttention 时会回退到标准注意力。
 - `allow_mask_overlap`：高级选项，默认开启，允许多个对象的 Mask 重叠。
 - `SEC_MODEL`：输出的 SeC-4B 模型连接到 Video Segment 节点的 `model`。
 
-模型快照约 14.15 GiB，依赖声明位于项目根目录 `requirements.txt`，推理代码和配置位于 `py/sec_inference` 与 `py/sec_configs`。
+首次执行 Loader 或首次进行 SeC Preview 时，如果选择的权重文件不存在，节点会自动从 Hugging Face 下载对应的单文件权重到 `ComfyUI/models/sams/SeC-4B`。默认 BF16 文件约 7.35 GiB。自动下载需要当前环境可以访问 Hugging Face；失败时可手动下载：
+
+[BF16 权重下载地址](https://huggingface.co/VeryAladeen/Sec-4B/resolve/main/SeC-4B-bf16.safetensors)
+
+[FP16 权重下载地址](https://huggingface.co/VeryAladeen/Sec-4B/resolve/main/SeC-4B-fp16.safetensors)
+
+将所选文件放置到：
+
+`ComfyUI/models/sams/SeC-4B`
+
+配置和 tokenizer 已随插件放在 `py/sec_model_config`，依赖声明位于项目根目录 `requirements.txt`，推理代码和 SAM2 配置位于 `py/sec_inference` 与 `py/sec_configs`。
 
 
 
 ### CS Video Segment (SeC-4B)
-使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在锚点帧用多个 BBox、多个正负 Point 和粗略 Mask 定义对象，并传播到整段视频。SeC-4B 不需要额外的 `CLIP` 或 `CONDITIONING` 输入。
+使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在锚点帧用多个 BBox、多个正负 Point 和粗略 Mask 定义对象，并传播到整段视频。
 
 ![CS Video Segment (SeC-4B) 节点](images/CS_Video_Segment(Sec-4B)_node.jpg)
 
@@ -141,7 +152,7 @@ Selector 会递归查找上游的官方或第三方视频加载节点。对于�
 - `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
-- `prompt_data`：Selector 序列化的多对象提示数据，不建议手动编辑。
+- `prompt_data`：Selector 序列化的多对象 Mask、BBox 和 Point 提示数据，不建议手动编辑。
 - `tracking_direction`：传播方向，`bidirectional` 双向传播，`forward` 向后传播，`backward` 向前传播。
 - `max_frames_to_track`：每个方向最多传播的帧数，`-1` 表示直到视频边界。
 - `mllm_memory_size`：场景变化时用于提取对象概念的历史关键帧数量，默认 `12`。
@@ -158,11 +169,13 @@ Selector 会递归查找上游的官方或第三方视频加载节点。对于�
 ### CS Video Segment (SAM3.1)
 使用 ComfyUI 官方 SAM3/SAM3.1 模型和推理内核，把 Selector 中定义在锚点帧的多个对象提示传播到整段视频。
 
+SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1)。下载后放入 ComfyUI 的 `models/checkpoints`
+
 ![CS Video Segment (SAM3.1) 节点](images/CS_Video_Segment(SAM3.1)_node.jpg)
 
 #### 使用流程
 
-1. 使用官方 `CheckpointLoaderSimple` 或 `Load Diffusion Model` 加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
+1. 使用官方 `CheckpointLoaderSimple`加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
 2. 将视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。
 3. 点击节点上的 `Open Selector`，在实际输入视频的帧上定义提示。
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
@@ -191,23 +204,22 @@ Selector 会递归查找上游的官方或第三方视频加载节点。如果�
 
 ## Selector 使用说明
 
-SAM3.1 和 SeC-4B 共用同一个 Selector 界面。两者都支持多对象；SAM3.1 由官方模型批量处理对象，SeC-4B 会逐对象建立跟踪条件后合并结果。
+SAM3.1 和 SeC-4B 共用同一个 Selector 框架。两者都支持多对象；SAM3.1 由官方模型批量处理对象，SeC-4B 会逐对象建立跟踪条件后合并结果。Semantic 选项卡仅对 SAM3.1 显示，SeC-4B 使用 Draw Mask、Edit BBox 和 Edit Point。
 
 ![Selector 界面](images/CS_Video_Segment_seletor.jpg)
 
 #### 时间控制和锚点帧
 
 - 时间线上方的 `|<` 和 `>|` 用于逐帧移动，滑杆和帧号输入框用于快速定位。
-- 蓝色倒三角指针表示当前已保存提示的锚点帧，外观与 `CS Load Video` 时间线指针一致。
 - 只允许一个锚点帧存在。第一次在某帧产生有效的 Mask、BBox 或 Point 后，该帧成为锚点。
-- 已存在编辑数据时切换帧，会提示“当前已存在编辑数据，切换锚点帧将自动清除，是否继续？”。确认后会清除全部对象提示和 Undo/Redo 历史，再切换到目标帧；取消则保留当前提示。
+- 已存在编辑数据时切换帧，会提示“当前已存在编辑数据，切换锚点帧将自动清除，是否继续？”。确认后会清除全部对象提示和 Undo/Redo 历史。
 - 切换到新帧后，只有重新添加提示，该帧才会成为新的锚点。
 - 已经点击 `Apply to Node` 的工作流再次打开 Selector 时，会自动跳转到保存的锚点帧并恢复提示。
-- `anchor_frame` 是当前输入帧批次的本地帧号，不一定等于源视频文件的原始帧号。使用 `CS Load Video` 的裁剪或重采样后，Selector 会按当前输入批次显示和保存帧号。
+- `anchor_frame` 是当前输入帧批次的本地帧号。
 
-#### Paint Mask
+#### Draw Mask
 
-- 进入 `Paint Mask` 后，鼠标光标显示当前画笔大小的半透明空心圆。
+- 进入 `Draw Mask` 后，鼠标光标显示当前画笔大小的半透明空心圆。
 - `Brush/Eraser` 切换键在画笔和橡皮擦之间切换；画笔状态为绿色，橡皮擦状态为红色。
 - `Brush Size` 范围为 `2–100`。拖动滑杆或在视频画布上滚动鼠标滚轮快速调整；按住 `Shift` 滚轮可大步调整。
 - `Clear Mask` 清除当前对象的粗略 Mask。

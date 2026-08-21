@@ -27,6 +27,7 @@ from PIL import Image
 from typing_extensions import override
 
 import comfy.model_management
+import comfy.model_detection
 import comfy.sd
 import comfy.utils
 import folder_paths
@@ -42,13 +43,23 @@ _LAST_MODEL: Any = None
 # remains responsible for GPU residency; this cache only avoids loading a
 # second Python model object when Preview is clicked repeatedly.
 _PREVIEW_MODEL_CACHE: dict[str, Any] = {}
+_SAM3_CLIP_CACHE: dict[str, Any] = {}
+_LAST_MODEL_SOURCE: dict[str, Any] | None = None
 _SEC_MODEL_REGISTRY: dict[str, Any] = {}
 _SEC_MODEL_NODE_TOKENS: dict[str, str] = {}
 _SEC_MODEL_LOCK = threading.RLock()
 _SEC_MODEL_LOAD_LOCK = threading.Lock()
+_SEC_MODEL_DOWNLOAD_LOCK = threading.Lock()
 _SEC_PREVIEW_MODEL_TOKEN: str | None = None
 _SEC_PACKAGE_PATH = Path(__file__).resolve().parent / "sec_inference"
 _SEC_CONFIG_PATH = Path(__file__).resolve().parent / "sec_configs"
+_SEC_MODEL_CONFIG_PATH = Path(__file__).resolve().parent / "sec_model_config"
+_SEC_MODEL_FOLDER = "sec_models"
+_SEC_WEIGHT_SPECS = {
+    "SeC-4B-bf16.safetensors": (torch.bfloat16, "https://huggingface.co/VeryAladeen/Sec-4B/resolve/main/SeC-4B-bf16.safetensors"),
+    "SeC-4B-fp16.safetensors": (torch.float16, "https://huggingface.co/VeryAladeen/Sec-4B/resolve/main/SeC-4B-fp16.safetensors"),
+}
+_SEC_DEFAULT_WEIGHT_FILENAME = "SeC-4B-bf16.safetensors"
 _SELECTOR_CACHE_ROOT = Path(tempfile.gettempdir()) / "cinestyle_selector_cache"
 _SELECTOR_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 _SELECTOR_INPUT_CACHE: dict[str, dict[str, Any]] = {}
@@ -523,9 +534,10 @@ def _parse_prompt_data(value: str | None, width: int, height: int) -> list[dict[
         if raw_box:
             box = _parse_bbox(json.dumps(raw_box), width, height)
         mask = _decode_prompt_mask(item.get("mask"), width, height)
-        if not points and box is None and mask is None:
-            raise ValueError(f"prompt_data.objects[{index}] has no mask, bbox, or point prompt.")
-        parsed_objects.append({"points": points, "bbox": box, "mask": mask})
+        text = str(item.get("text") or item.get("semantic") or "").strip()
+        if not text and not points and box is None and mask is None:
+            raise ValueError(f"prompt_data.objects[{index}] has no semantic, mask, bbox, or point prompt.")
+        parsed_objects.append({"text": text, "points": points, "bbox": box, "mask": mask})
     if not parsed_objects:
         raise ValueError("prompt_data must contain at least one prompted object.")
     return parsed_objects
@@ -538,6 +550,9 @@ def _sam3_mask_logits(mask: torch.Tensor, device: Any, dtype: torch.dtype) -> to
 
 
 def _preview_model(source: Any) -> Any:
+    global _LAST_MODEL_SOURCE
+    if isinstance(source, dict) and source.get("name"):
+        _LAST_MODEL_SOURCE = dict(source)
     if not isinstance(source, dict):
         return _LAST_MODEL
     kind = str(source.get("kind") or "")
@@ -548,7 +563,7 @@ def _preview_model(source: Any) -> Any:
         path = folder_paths.get_full_path_or_raise("checkpoints", name)
         model = _PREVIEW_MODEL_CACHE.get(path)
         if model is None:
-            model, _, _, _ = comfy.sd.load_checkpoint_guess_config(
+            model, clip, _, _ = comfy.sd.load_checkpoint_guess_config(
                 path,
                 output_vae=False,
                 output_clip=True,
@@ -558,6 +573,8 @@ def _preview_model(source: Any) -> Any:
             if model is None:
                 raise ValueError(f"Unable to load SAM3 checkpoint: {name}")
             _PREVIEW_MODEL_CACHE[path] = model
+            if clip is not None:
+                _SAM3_CLIP_CACHE[path] = clip
         return model
     if kind == "diffusion_model":
         path = folder_paths.get_full_path_or_raise("diffusion_models", name)
@@ -567,6 +584,93 @@ def _preview_model(source: Any) -> Any:
             _PREVIEW_MODEL_CACHE[path] = model
         return model
     return _LAST_MODEL
+
+
+def _sam3_clip_from_path(path: str) -> Any:
+    """Load the SAM3 text encoder paired with a checkpoint, once per path."""
+    clip = _SAM3_CLIP_CACHE.get(path)
+    if clip is not None:
+        return clip
+    state_dict, metadata = comfy.utils.load_torch_file(path, safe_load=True, return_metadata=True)
+    prefix = comfy.model_detection.unet_prefix_from_state_dict(state_dict)
+    config = comfy.model_detection.model_config_from_unet(state_dict, prefix, metadata=metadata)
+    if config is None:
+        raise ValueError(f"Unable to identify SAM3 checkpoint: {Path(path).name}")
+    # The official ComfyUI SAM3 config stashes its embedded CLIP weights while
+    # normalizing the model state dict. This avoids constructing a duplicate
+    # full SAM3 model just to obtain the text encoder.
+    config.process_unet_state_dict(state_dict)
+    clip_sd = config.process_clip_state_dict({})
+    if not clip_sd:
+        raise ValueError(f"SAM3 checkpoint has no text encoder: {Path(path).name}")
+    clip_target = config.clip_target(state_dict=clip_sd)
+    if clip_target is None:
+        raise ValueError(f"SAM3 checkpoint has no compatible text encoder: {Path(path).name}")
+    clip = comfy.sd.CLIP(
+        clip_target,
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        tokenizer_data=clip_sd,
+        parameters=comfy.utils.calculate_parameters(clip_sd),
+        state_dict=clip_sd,
+    )
+    _SAM3_CLIP_CACHE[path] = clip
+    return clip
+
+
+def _sam3_clip_from_model(model: Any) -> Any:
+    """Build the paired Comfy CLIP from the SAM3 model's stashed text weights."""
+    cache_key = f"model:{id(model)}"
+    if cache_key in _SAM3_CLIP_CACHE:
+        return _SAM3_CLIP_CACHE[cache_key]
+    base = getattr(model, "model", None)
+    config = getattr(base, "model_config", None)
+    stash = getattr(config, "_clip_stash", None)
+    if not stash:
+        return None
+    clip_sd = config.process_clip_state_dict({})
+    if not clip_sd:
+        return None
+    clip_target = config.clip_target(state_dict=clip_sd)
+    if clip_target is None:
+        return None
+    clip = comfy.sd.CLIP(
+        clip_target,
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        tokenizer_data=clip_sd,
+        parameters=comfy.utils.calculate_parameters(clip_sd),
+        state_dict=clip_sd,
+    )
+    _SAM3_CLIP_CACHE[cache_key] = clip
+    return clip
+
+
+def _sam3_text_embeddings(model: Any, text: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Encode a Selector semantic prompt with ComfyUI's official SAM3 CLIP."""
+    attached = None
+    getter = getattr(model, "get_attachment", None)
+    if callable(getter):
+        attached = getter("sam3_clip")
+    clip = attached or _sam3_clip_from_model(model)
+    if clip is None and _LAST_MODEL_SOURCE and _LAST_MODEL_SOURCE.get("kind") == "checkpoint":
+        path = folder_paths.get_full_path_or_raise("checkpoints", str(_LAST_MODEL_SOURCE.get("name")))
+        clip = _sam3_clip_from_path(path)
+    if clip is None:
+        candidates = [
+            name for name in folder_paths.get_filename_list("checkpoints")
+            if "sam3" in str(name).lower()
+        ]
+        if not candidates:
+            raise ValueError("SAM3 Semantic needs a SAM3 checkpoint with its official CLIP text encoder.")
+        clip = _sam3_clip_from_path(folder_paths.get_full_path_or_raise("checkpoints", candidates[0]))
+    setter = getattr(model, "set_attachments", None)
+    if callable(setter):
+        setter("sam3_clip", clip)
+    encoded = clip.encode_from_tokens(clip.tokenize(text), return_dict=True)
+    cond = encoded.get("cond")
+    if cond is None:
+        raise ValueError("SAM3 CLIP did not return text conditioning.")
+    attention = encoded.get("attention_mask")
+    return cond, attention
 
 
 def _sam3_anchor_masks(model: Any, image: torch.Tensor, prompt_data: str | None) -> torch.Tensor:
@@ -613,19 +717,67 @@ def _sam3_anchor_masks(model: Any, image: torch.Tensor, prompt_data: str | None)
             mask_inputs = _sam3_mask_logits(prompt["mask"], device, dtype)
 
         with torch.no_grad():
-            mask_logits = sam3_model.forward_segment(
-                image_in,
-                point_inputs=point_inputs,
-                box_inputs=box_inputs,
-                mask_inputs=mask_inputs,
-            )
-            # Match the official Detect node's default interactive refinement pass.
-            mask_logits = sam3_model.forward_segment(
-                image_in,
-                point_inputs=point_inputs,
-                box_inputs=box_inputs,
-                mask_inputs=mask_logits,
-            )
+            if prompt["text"]:
+                text_embeddings, text_mask = _sam3_text_embeddings(model, prompt["text"])
+                # The official detector consumes normalized cxcywh boxes.  Keep
+                # point prompts on the interactive decoder path below, then use
+                # the highest-scoring text detection as this object's anchor.
+                detector_boxes = None
+                if prompt["bbox"] is not None:
+                    box = prompt["bbox"]
+                    detector_boxes = torch.tensor([[
+                        [(box["x"] + box["width"] / 2) / width,
+                         (box["y"] + box["height"] / 2) / height,
+                         box["width"] / width,
+                         box["height"] / height]
+                    ]], dtype=dtype, device=device)
+                detected = sam3_model(
+                    image_in,
+                    text_embeddings=text_embeddings.to(device=device, dtype=dtype),
+                    text_mask=text_mask.to(device=device) if text_mask is not None else None,
+                    boxes=detector_boxes,
+                    threshold=0.0,
+                    orig_size=(height, width),
+                )
+                scores = detected.get("scores")
+                detected_masks = detected.get("masks")
+                if detected_masks is None or detected_masks.numel() == 0:
+                    raise ValueError(f"SAM3 returned no detection for semantic prompt: {prompt['text']}")
+                score_row = scores[0] if scores is not None and scores.numel() else None
+                best = int(score_row.argmax().item()) if score_row is not None else 0
+                coarse = detected_masks[0, best:best + 1].unsqueeze(1)
+                if point_inputs is not None or box_inputs is not None or mask_inputs is not None:
+                    coarse_1008 = F.interpolate(coarse, size=(1008, 1008), mode="bilinear", align_corners=False)
+                    if mask_inputs is not None:
+                        coarse_1008 = (coarse_1008 + F.interpolate(mask_inputs, size=(1008, 1008), mode="bilinear", align_corners=False)) * 0.5
+                    mask_logits = sam3_model.forward_segment(
+                        image_in,
+                        point_inputs=point_inputs,
+                        box_inputs=box_inputs,
+                        mask_inputs=coarse_1008,
+                    )
+                    mask_logits = sam3_model.forward_segment(
+                        image_in,
+                        point_inputs=point_inputs,
+                        box_inputs=box_inputs,
+                        mask_inputs=mask_logits,
+                    )
+                else:
+                    mask_logits = coarse
+            else:
+                mask_logits = sam3_model.forward_segment(
+                    image_in,
+                    point_inputs=point_inputs,
+                    box_inputs=box_inputs,
+                    mask_inputs=mask_inputs,
+                )
+                # Match the official Detect node's default interactive refinement pass.
+                mask_logits = sam3_model.forward_segment(
+                    image_in,
+                    point_inputs=point_inputs,
+                    box_inputs=box_inputs,
+                    mask_inputs=mask_logits,
+                )
         resized = F.interpolate(mask_logits, size=(height, width), mode="bilinear", align_corners=False)
         masks.append((resized[0, 0] > 0).float().to("cpu"))
     return torch.stack(masks, dim=0)
@@ -680,17 +832,122 @@ async def _video_segment_preview_route(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
 
-def _sec_model_path() -> str:
+def _sec_model_roots() -> list[str]:
     try:
         roots = folder_paths.get_folder_paths("sams")
     except KeyError:
         roots = []
-    roots = list(roots) or [os.path.join(folder_paths.models_dir, "sams")]
-    for root in roots:
-        candidate = os.path.join(root, "SeC-4B")
-        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "config.json")):
-            return candidate
-    raise ValueError("SeC-4B was not found in models/sams/SeC-4B.")
+    return [str(root) for root in (list(roots) or [os.path.join(folder_paths.models_dir, "sams")])]
+
+
+def _sec_sync_model_folder() -> None:
+    roots = [os.path.join(root, "SeC-4B") for root in _sec_model_roots()]
+    extensions = set(getattr(folder_paths, "supported_pt_extensions", {".safetensors", ".bin", ".pth"}))
+    folder_paths.folder_names_and_paths[_SEC_MODEL_FOLDER] = (roots, extensions)
+
+
+def _sec_model_file_options() -> list[str]:
+    """Return supported single-file names using ComfyUI's standard model listing."""
+    _sec_sync_model_folder()
+    try:
+        files = folder_paths.get_filename_list(_SEC_MODEL_FOLDER)
+    except (KeyError, OSError):
+        files = []
+    supported_names = set(_SEC_WEIGHT_SPECS)
+    return [name for name in files if Path(name).name in supported_names]
+
+
+def _sec_download_weights(target: Path, url: str) -> None:
+    import urllib.request
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f"{target.name}.download")
+    print(f"[CineStyle] SeC-4B weights not found; downloading {target.name} to {target}.")
+    print(f"[CineStyle] Download source: {url}")
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "CineStyle-ComfyUI/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as handle:
+            expected = int(response.headers.get("Content-Length") or 0)
+            downloaded = 0
+            next_report = 256 * 1024 * 1024
+            while True:
+                chunk = response.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if downloaded >= next_report:
+                    if expected:
+                        print(f"[CineStyle] SeC-4B download: {downloaded / expected:.0%}")
+                    else:
+                        print(f"[CineStyle] SeC-4B downloaded: {downloaded / (1024 ** 3):.2f} GiB")
+                    next_report += 256 * 1024 * 1024
+        if not partial.is_file() or partial.stat().st_size <= 0:
+            raise RuntimeError("the downloaded file is empty")
+        os.replace(str(partial), str(target))
+    except Exception as exc:
+        try:
+            partial.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Unable to download {target.name} automatically. "
+            f"Download it manually from {url} and place it at {target}. "
+            f"Original error: {exc}"
+        ) from exc
+
+
+def _sec_weight_dtype(weight_path: str) -> torch.dtype:
+    filename = Path(weight_path).name.lower()
+    if filename == "sec-4b-fp16.safetensors":
+        return torch.float16
+    if filename == "sec-4b-bf16.safetensors":
+        return torch.bfloat16
+    raise ValueError(
+        "Unsupported SeC weight file. Choose SeC-4B-bf16.safetensors or SeC-4B-fp16.safetensors."
+    )
+
+
+def _sec_default_weight_filename() -> str:
+    options = _sec_model_file_options()
+    for filename in _SEC_WEIGHT_SPECS:
+        if filename in options:
+            return filename
+    return _SEC_DEFAULT_WEIGHT_FILENAME
+
+
+def _sec_weight_path(filename: str | None = None) -> str:
+    filename = str(filename or _sec_default_weight_filename())
+    basename = Path(filename).name
+    spec = _SEC_WEIGHT_SPECS.get(basename)
+    if spec is None:
+        allowed = ", ".join(_SEC_WEIGHT_SPECS)
+        raise ValueError(f"Unsupported SeC weight file {filename!r}. Supported files: {allowed}.")
+    _, url = spec
+    _sec_sync_model_folder()
+    existing = folder_paths.get_full_path(_SEC_MODEL_FOLDER, filename)
+    if existing:
+        return existing
+    roots = _sec_model_roots()
+    target = Path(roots[0]) / "SeC-4B" / basename
+    with _SEC_MODEL_DOWNLOAD_LOCK:
+        if not target.is_file() or target.stat().st_size <= 0:
+            _sec_download_weights(target, url)
+    return str(target)
+
+
+def _sec_model_config_path() -> str:
+    required = ("config.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt")
+    missing = [name for name in required if not (_SEC_MODEL_CONFIG_PATH / name).is_file()]
+    if missing:
+        raise RuntimeError(
+            "CineStyle SeC model configuration is incomplete: "
+            + ", ".join(missing)
+        )
+    return str(_SEC_MODEL_CONFIG_PATH)
 
 
 def _sec_imports() -> tuple[Any, Any, Any]:
@@ -735,35 +992,47 @@ def _sec_install_dtype_hooks(model: Any) -> None:
 
 
 def _sec_create_model(
-    model_path: str,
+    weight_path: str,
     torch_dtype: torch.dtype,
     device: str,
     use_flash_attn: bool,
     allow_mask_overlap: bool,
 ) -> Any:
     SeCConfig, SeCModel, AutoTokenizer = _sec_imports()
-    config = SeCConfig.from_pretrained(model_path)
+    config_path = _sec_model_config_path()
+    config = SeCConfig.from_pretrained(config_path)
     config.hydra_overrides_extra = [
         f"++model.non_overlap_masks={'false' if allow_mask_overlap else 'true'}"
     ]
-    load_kwargs: dict[str, Any] = {
-        "config": config,
-        "torch_dtype": torch_dtype,
-        "use_flash_attn": use_flash_attn,
-        "low_cpu_mem_usage": True,
-    }
-    if device.startswith("cuda:"):
-        load_kwargs["device_map"] = {"": device}
-    model = SeCModel.from_pretrained(
-        model_path,
-        _fast_init=False,
-        **load_kwargs,
-    ).eval()
-    if device.startswith("cuda:") and torch_dtype != torch.float32:
-        model = model.to(dtype=torch_dtype)
+
+    try:
+        from accelerate import init_empty_weights
+        from accelerate.utils import set_module_tensor_to_device
+    except ImportError:
+        init_empty_weights = None
+        set_module_tensor_to_device = None
+
+    from safetensors.torch import load_file
+
+    if init_empty_weights is not None and set_module_tensor_to_device is not None:
+        with init_empty_weights():
+            model = SeCModel(config, use_flash_attn=use_flash_attn)
+        state_dict = load_file(weight_path, device="cpu")
+        try:
+            for name, value in state_dict.items():
+                set_module_tensor_to_device(model, name, device="cpu", value=value)
+        finally:
+            del state_dict
     else:
-        model = model.to(device=device, dtype=torch_dtype)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        model = SeCModel(config, use_flash_attn=use_flash_attn)
+        state_dict = load_file(weight_path, device="cpu")
+        try:
+            model.load_state_dict(state_dict, strict=True)
+        finally:
+            del state_dict
+
+    model = model.eval().to(device=device, dtype=torch_dtype)
+    tokenizer = AutoTokenizer.from_pretrained(config_path, trust_remote_code=True)
     model.preparing_for_generation(tokenizer=tokenizer, torch_dtype=torch_dtype)
     if use_flash_attn and device.startswith("cuda:"):
         try:
@@ -773,7 +1042,7 @@ def _sec_create_model(
     if device.startswith("cuda:") and torch_dtype != torch.float32:
         _sec_install_dtype_hooks(model)
     model._sec_loading_metadata = {
-        "model_path": model_path,
+        "weight_path": weight_path,
         "torch_dtype": torch_dtype,
         "device": device,
         "use_flash_attn": use_flash_attn,
@@ -867,21 +1136,22 @@ def _sec_cold_load_model() -> Any:
         if existing is not None:
             return _sec_ensure_loaded(existing)
 
-        torch_dtype, device, use_flash_attn, allow_mask_overlap = _sec_default_model_settings()
-        model_path = _sec_model_path()
+        _, device, use_flash_attn, allow_mask_overlap = _sec_default_model_settings()
+        weight_path = _sec_weight_path()
+        torch_dtype = _sec_weight_dtype(weight_path) if device != "cpu" else torch.float32
         print(
             f"[CineStyle] SeC Preview has no registered Loader model; "
-            f"cold-loading default SeC-4B from {model_path} on {device}."
+            f"cold-loading default SeC-4B {Path(weight_path).stem.removeprefix('SeC-4B-').upper()} weights from {weight_path} on {device}."
         )
         model = _sec_create_model(
-            model_path,
+            weight_path,
             torch_dtype,
             device,
             use_flash_attn,
             allow_mask_overlap,
         )
         model._cinestyle_sec_cache_key = (
-            model_path,
+            weight_path,
             str(torch_dtype),
             device,
             bool(use_flash_attn),
@@ -1001,6 +1271,8 @@ def _sec_add_prompt(model: Any, state: dict[str, Any], frame_index: int, object_
 def _sec_anchor_preview(model: Any, frame: torch.Tensor, prompt_data: str | None) -> torch.Tensor:
     height, width = map(int, frame.shape[1:3])
     prompts = _parse_prompt_data(prompt_data, width, height)
+    if any(prompt["text"] for prompt in prompts):
+        raise ValueError("SeC-4B does not support Semantic prompts. Use Point, BBox, or Draw Mask.")
     temp_dir = _sec_frame_dir(frame)
     try:
         states = getattr(model.grounding_encoder, "_states", None)
@@ -1085,7 +1357,12 @@ class CSSeCModelLoader(io.ComfyNode):
             category="😺dzNodes/CineStyle/Video",
             search_aliases=["sec", "segment concept", "seC-4B", "video segmentation"],
             inputs=[
-                io.Combo.Input("torch_dtype", options=["bfloat16", "float16", "float32"], default="bfloat16"),
+                io.Combo.Input(
+                    "model_file",
+                    options=_sec_model_file_options() or list(_SEC_WEIGHT_SPECS),
+                    default=_sec_default_weight_filename(),
+                    tooltip="SeC single-file weights found in ComfyUI/models/sams/SeC-4B.",
+                ),
                 io.Combo.Input("device", options=devices, default="auto"),
                 io.Boolean.Input("use_flash_attn", default=True, advanced=True),
                 io.Boolean.Input("allow_mask_overlap", default=True, advanced=True),
@@ -1094,26 +1371,22 @@ class CSSeCModelLoader(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, torch_dtype="bfloat16", device="auto", use_flash_attn=True, allow_mask_overlap=True) -> io.NodeOutput:
+    def execute(cls, model_file=_SEC_DEFAULT_WEIGHT_FILENAME, device="auto", use_flash_attn=True, allow_mask_overlap=True) -> io.NodeOutput:
         if device == "auto":
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
         elif device.startswith("gpu"):
             device = f"cuda:{int(device[3:])}"
-        dtype = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }[str(torch_dtype)]
+        weight_path = _sec_weight_path(model_file)
+        dtype = _sec_weight_dtype(weight_path) if device != "cpu" else torch.float32
         if device == "cpu":
-            dtype = torch.float32
             use_flash_attn = False
-        model_path = _sec_model_path()
-        key = (model_path, str(dtype), device, bool(use_flash_attn), bool(allow_mask_overlap))
+        key = (weight_path, str(dtype), device, bool(use_flash_attn), bool(allow_mask_overlap))
         with _SEC_MODEL_LOCK:
             model = next((candidate for candidate in _SEC_MODEL_REGISTRY.values() if getattr(candidate, "_cinestyle_sec_cache_key", None) == key), None)
         if model is None:
-            print(f"[CineStyle] Loading SeC-4B from {model_path} on {device}.")
-            model = _sec_create_model(model_path, dtype, device, bool(use_flash_attn), bool(allow_mask_overlap))
+            precision = Path(weight_path).stem.removeprefix("SeC-4B-").upper()
+            print(f"[CineStyle] Loading SeC-4B {precision} weights from {weight_path} on {device}.")
+            model = _sec_create_model(weight_path, dtype, device, bool(use_flash_attn), bool(allow_mask_overlap))
             model._cinestyle_sec_cache_key = key
         else:
             model = _sec_ensure_loaded(model)
@@ -1184,6 +1457,8 @@ class CSVideoSegmentSeC(io.ComfyNode):
         if tracking_direction not in {"forward", "backward", "bidirectional"}:
             raise ValueError("tracking_direction must be forward, backward, or bidirectional.")
         prompts = _parse_prompt_data(prompt_data, width, height)
+        if any(prompt["text"] for prompt in prompts):
+            raise ValueError("SeC-4B does not support Semantic prompts. Use Point, BBox, or Draw Mask.")
 
         temp_dir = _sec_frame_dir(images)
         state = None
@@ -1355,7 +1630,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
             essentials_category="Video Tools",
             search_aliases=["video segment", "sam3.1", "sam3 video", "propagate mask"],
             description=(
-                "Define multiple mask, bounding-box, and positive/negative point prompts "
+                "Define semantic, mask, bounding-box, and positive/negative point prompts "
                 "on any video frame, then propagate them in both directions."
             ),
             inputs=[
@@ -1383,7 +1658,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                     default='{"version":2,"objects":[]}',
                     multiline=True,
                     optional=True,
-                    tooltip="Selector multi-object mask, bbox, and point prompts.",
+                    tooltip="Selector multi-object semantic, mask, bbox, and point prompts.",
                 ),
                 io.Combo.Input(
                     "propagation_direction",

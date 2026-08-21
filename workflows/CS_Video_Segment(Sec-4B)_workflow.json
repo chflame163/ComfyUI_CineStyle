@@ -1,50 +1,9 @@
 {
   "id": "c3c87c25-d813-4da6-b2e5-676dab89712d",
   "revision": 0,
-  "last_node_id": 7,
-  "last_link_id": 6,
+  "last_node_id": 8,
+  "last_link_id": 7,
   "nodes": [
-    {
-      "id": 2,
-      "type": "CS_SeC_ModelLoader",
-      "pos": [
-        2768.8678011849534,
-        7190.542708150281
-      ],
-      "size": [
-        277.033203125,
-        130
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "SEC_MODEL",
-          "type": "SEC_MODEL",
-          "links": [
-            3
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CS_SeC_ModelLoader"
-      },
-      "widgets_values": [
-        "bfloat16",
-        "auto",
-        true,
-        true
-      ],
-      "widgets_values_named": {
-        "torch_dtype": "bfloat16",
-        "device": "auto",
-        "use_flash_attn": true,
-        "allow_mask_overlap": true
-      },
-      "color": "rgba(67, 105, 82, 0.85)"
-    },
     {
       "id": 6,
       "type": "MaskPreview",
@@ -75,14 +34,134 @@
       ],
       "properties": {
         "Node name for S&R": "MaskPreview"
-      }
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 5,
+      "type": "CS_Video_Segment_SeC",
+      "pos": [
+        3116.633003108347,
+        7411.2438265170185
+      ],
+      "size": [
+        390,
+        296
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "SEC_MODEL",
+          "link": 7
+        },
+        {
+          "name": "images",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "video_input",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "anchor_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "DICT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CS_Video_Segment_SeC"
+      },
+      "widgets_values": [
+        30,
+        "bidirectional",
+        -1,
+        12,
+        false,
+        true,
+        "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
+        ""
+      ],
+      "widgets_values_named": {
+        "anchor_frame": 30,
+        "tracking_direction": "bidirectional",
+        "max_frames_to_track": -1,
+        "mllm_memory_size": 12,
+        "offload_video_to_cpu": false,
+        "auto_unload_model": true,
+        "prompt_data": "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
+        "Open Selector": ""
+      },
+      "color": "rgba(67, 105, 82, 0.85)"
+    },
+    {
+      "id": 8,
+      "type": "CS_SeC_ModelLoader",
+      "pos": [
+        2677.035077893699,
+        7218.3457124224915
+      ],
+      "size": [
+        277.033203125,
+        130
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SEC_MODEL",
+          "type": "SEC_MODEL",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CS_SeC_ModelLoader"
+      },
+      "widgets_values": [
+        "SeC-4B-bf16.safetensors",
+        "auto",
+        true,
+        true
+      ],
+      "widgets_values_named": {
+        "model_file": "SeC-4B-bf16.safetensors",
+        "device": "auto",
+        "use_flash_attn": true,
+        "allow_mask_overlap": true
+      },
+      "color": "rgba(67, 105, 82, 0.85)"
     },
     {
       "id": 1,
       "type": "CS_Load_Video",
       "pos": [
-        2558.2929353610166,
-        7455.079203546544
+        2594.369153839268,
+        7455.079203546543
       ],
       "size": [
         360,
@@ -149,94 +228,9 @@
         "Edit Timeline": ""
       },
       "color": "rgba(67, 105, 82, 0.85)"
-    },
-    {
-      "id": 5,
-      "type": "CS_Video_Segment_SeC",
-      "pos": [
-        3116.633003108347,
-        7411.2438265170185
-      ],
-      "size": [
-        390,
-        296
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "SEC_MODEL",
-          "link": 3
-        },
-        {
-          "name": "images",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "name": "video_input",
-          "shape": 7,
-          "type": "VIDEO",
-          "link": 4
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": [
-            5
-          ]
-        },
-        {
-          "name": "anchor_mask",
-          "type": "MASK",
-          "links": null
-        },
-        {
-          "name": "video_info",
-          "type": "DICT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CS_Video_Segment_SeC"
-      },
-      "widgets_values": [
-        30,
-        "bidirectional",
-        -1,
-        12,
-        false,
-        true,
-        "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
-        ""
-      ],
-      "widgets_values_named": {
-        "anchor_frame": 30,
-        "tracking_direction": "bidirectional",
-        "max_frames_to_track": -1,
-        "mllm_memory_size": 12,
-        "offload_video_to_cpu": false,
-        "auto_unload_model": true,
-        "prompt_data": "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
-        "Open Selector": ""
-      },
-      "color": "rgba(67, 105, 82, 0.85)"
     }
   ],
   "links": [
-    [
-      3,
-      2,
-      0,
-      5,
-      0,
-      "SEC_MODEL"
-    ],
     [
       4,
       1,
@@ -252,16 +246,24 @@
       6,
       0,
       "MASK"
+    ],
+    [
+      7,
+      8,
+      0,
+      5,
+      0,
+      "SEC_MODEL"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.8390545288825626,
+      "scale": 1.3513057093106566,
       "offset": [
-        -2037.388172970811,
-        -6908.496080840886
+        -2438.693951044927,
+        -7069.036007221861
       ]
     },
     "frontendVersion": "1.49.6"

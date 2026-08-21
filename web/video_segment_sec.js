@@ -33,6 +33,7 @@ registerVideoSelector({
     nodeId: NODE_ID,
     extensionName: "CineStyle.VideoSegmentSeC",
     title: "SeC-4B Video Selector",
+    semantic: false,
     previewRoute: "/cinestyle/sec-video-segment-preview",
     previewLabel: "Loading SeC-4B if needed and running...",
     widgets: { prompt: "prompt_data" },

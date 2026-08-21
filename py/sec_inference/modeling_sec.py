@@ -576,9 +576,10 @@ class SeCModel(PreTrainedModel):
                     frame_cache[frame_idx] = Image.open(video_paths[frame_idx]).convert('RGB')
                 current_img = frame_cache[frame_idx]
 
-                if frame_idx - 1 not in frame_cache:
-                    frame_cache[frame_idx - 1] = Image.open(video_paths[frame_idx-1]).convert('RGB')
-                last_img = frame_cache[frame_idx - 1]
+                previous_frame_idx = frame_idx + (1 if reverse else -1)
+                if previous_frame_idx not in frame_cache:
+                    frame_cache[previous_frame_idx] = Image.open(video_paths[previous_frame_idx]).convert('RGB')
+                last_img = frame_cache[previous_frame_idx]
                 flags = [is_scene_change_hsv(current_img, last_img)]
                 if len(mllm_memory) > mllm_memory_size:
                     _mllm_memory = [mllm_memory[0]] + mllm_memory[-(mllm_memory_size-1):]
@@ -619,10 +620,13 @@ class SeCModel(PreTrainedModel):
             _, video_res_masks = self.grounding_encoder._get_orig_video_res_output(
                 inference_state, pred_masks
             )
-            if _update_flag and (video_res_masks[0] > 0.0).sum() != 0 and current_out["object_score_logits"].item() > 1:
+            visible_masks = video_res_masks > 0.0
+            has_visible_object = visible_masks.any().item()
+            has_confident_object = (current_out["object_score_logits"] > 1).any().item()
+            if _update_flag and has_visible_object and has_confident_object:
                 mllm_memory.append((
                     frame_idx,
-                    (video_res_masks[0] > 0.0).cpu().numpy()
+                    visible_masks.any(dim=0).cpu().numpy()
                 ))
 
             if len(frame_cache) > 10:

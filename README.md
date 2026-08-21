@@ -21,10 +21,13 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ## 更新说明
 
-* 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
-* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在任意视频帧用语义、点或框定义对象，并自动传播 mask。
+* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
+* 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
+* 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
+
+示例工作流及素材位于插件的 `workflows` 子目录。
 
 ## 节点说明
 
@@ -87,31 +90,6 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - audio: 选定时间范围内的音频。没有音频轨道时输出为空。 
 - video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息。
 
-### CS Video Segment (SAM3.1)
-使用 ComfyUI 官方 SAM3 Detect 推理内核，把视频中定义在任意锚点帧的对象 mask 传播到整段视频。节点不包含 SAMMatte 的 mask refine 部分。
-
-- 将视频输入连接到节点后，点击节点上的 `Open Selector`，即可打开与实际输入帧范围一致的预览和标注窗口。Selector 会递归沿 `VIDEO`/`IMAGE` 上游连接查找官方或第三方视频 Load 节点，不限定为 `CS Load Video`。
-- 如果上游来源是运行后才生成的 `VIDEO`/`IMAGE` 张量，先运行一次工作流；节点会把实际收到的输入帧缓存到临时目录，之后 Selector 使用这份缓存预览和执行交互式 Preview。
-- `Points` 模式：左键点击空白处添加正点；悬停已有点时显示移动光标，按住左键可拖动该点，未移动直接释放不会产生操作；右键点击空白处添加负点，右键点击已有点可删除该点或切换正负属性。
-- `Bounding box` 模式：在预览画布中拖出对象框；拖动四角可同时调整宽高，拖动四条边可单独调整对应边的位置。
-- `Semantic` 模式：直接输入文字提示；节点会使用 `CheckpointLoaderSimple` 加载的 SAM3 checkpoint 内置文本编码器，不需要额外连接 `CLIP` 或 `CONDITIONING`。
-- 点击 `Preview current frame`，只对当前帧执行一次 SAM3 Detect，并在窗口中叠加显示分割结果。Preview 会识别连接到 `MODEL` 的 `CheckpointLoaderSimple` 或 `Load Diffusion Model`。
-- 标注窗口中的帧号就是实际输入 batch 的 `anchor_frame`，前后传播方向可在高级选项中设置；`CS Load Video` 的裁剪范围会自动换算为源视频帧。
-- 节点不再单独持有视频文件选择框，执行和 Selector 使用同一个上游视频输入；对于运行时生成的输入，Selector 使用最近一次执行缓存。
-
-输出 `mask` 为 `[帧数, 高, 宽]` 的视频 mask，`anchor_mask` 为锚点帧 mask，`video_info` 包含帧数、尺寸、锚点帧和对象数量。
-
-### CS Video Segment (SeC-4B)
-使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在任意锚点帧用点或框定义对象并传播 mask。节点不需要 `CLIP` 或 `CONDITIONING`；SeC 会在场景变化时自动重新提取对象概念。
-
-- 推荐连接 `CS SeC-4B Model Loader`，它会从 `models/sams/SeC-4B` 加载已经下载的权重，并登记一个可复用的 Preview 模型 token；如果没有执行 Loader，首次 Preview 会按默认配置自动冷加载并登记模型。
-- 将视频输入连接到节点后点击 `Open Selector`；SeC Selector 只提供 `Points` 和 `Bounding box` 两种方式。Selector 会递归查找官方或第三方视频 Load 节点；运行时生成的输入需要先运行一次工作流以建立缓存。
-- `input_mask` 是可选外部 MASK 输入，可和点提示一起用于锚点初始化。
-- `tracking_direction` 支持 `forward`、`backward` 和 `bidirectional`；`mllm_memory_size` 控制场景变化时使用的历史关键帧数量。
-- Preview 只运行锚点帧的 LongSAM2.1 初始化，不执行整段视频传播；优先使用 Loader 登记的模型 token，没有 token 时才自动冷加载默认 SeC-4B，后续请求复用注册模型。
-- 默认 `auto_unload_model` 会在节点执行后释放 SeC-4B 的视觉、语言和 LongSAM2.1 子模型，但保留加载元数据；下一次执行或 Preview 会按 token 自动重载。
-
-SeC-4B 的 Python 推理模块和 LongSAM2.1 配置位于 `py/sec_inference` 与 `py/sec_configs`，依赖声明位于项目根目录 `requirements.txt`。该模型快照约 14.15 GiB，请确保 `models/sams/SeC-4B` 已存在。
 
 ### CS Save Video
 基于 ComfyUI 官方 `Save Video` 节点，增加save metadata和H264 bitrate选项。
@@ -122,6 +100,154 @@ SeC-4B 的 Python 推理模块和 LongSAM2.1 配置位于 `py/sec_inference` 与
 - `codec`：视频编码方式，默认 `h264`。选择 H.264 时显示码率控件。
 - `H.264 bitrate (Mbps)`：H.264 目标码率，浮点数保留 1 位小数，范围 `1.0–160.0 Mbps`，默认 `8.0 Mbps`。范围覆盖官方建议的低分辨率到 8K 高帧率视频；常见 1080p 视频可从 `8.0 Mbps` 开始，高帧率 1080p 可提高到约 `12.0 Mbps`。
 - `save_metadata`：默认关闭。开启后保存的文件将写入工作流和源视频 metadata。
+
+
+### CS SeC-4B Model Loader
+
+加载并登记 SeC-4B 模型，为 `CS Video Segment (SeC-4B)` 节点和 Selector Preview 提供可复用的模型实例。权重目录必须为 `ComfyUI/models/sams/SeC-4B`。如果没有先执行 Loader，Selector Preview 也可以按默认配置冷加载模型，但推荐在工作流中显式使用 Loader。
+
+![CS SeC-4B Model Loader 节点](images/CS_SeC-4B_Model_Loader_node.jpg)
+
+#### 节点选项说明
+
+- `torch_dtype`：推理精度，默认 `bfloat16`。显存不足或硬件不支持时可改用 `float16` 或 `float32`。
+- `device`：运行设备，`auto` 自动选择 CUDA，`cpu` 使用 CPU，也可选择具体的 `gpu0`、`gpu1` 等设备。
+- `use_flash_attn`：高级选项，默认开启。环境没有 FlashAttention 时会回退到标准注意力。
+- `allow_mask_overlap`：高级选项，默认开启，允许多个对象的 Mask 重叠。
+- `SEC_MODEL`：输出的 SeC-4B 模型连接到 Video Segment 节点的 `model`。
+
+模型快照约 14.15 GiB，依赖声明位于项目根目录 `requirements.txt`，推理代码和配置位于 `py/sec_inference` 与 `py/sec_configs`。
+
+
+
+### CS Video Segment (SeC-4B)
+使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在锚点帧用多个 BBox、多个正负 Point 和粗略 Mask 定义对象，并传播到整段视频。SeC-4B 不需要额外的 `CLIP` 或 `CONDITIONING` 输入。
+
+![CS Video Segment (SeC-4B) 节点](images/CS_Video_Segment(Sec-4B)_node.jpg)
+
+#### 使用流程
+
+1. 先执行 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader)，再把输出的 `SEC_MODEL` 连接到节点的 `model`。
+2. 将同一视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。
+3. 点击 `Open Selector`，在锚点帧中定义一个或多个对象的提示。
+4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
+5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
+
+Selector 会递归查找上游的官方或第三方视频加载节点。对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
+
+#### 节点选项说明
+
+- `model`：`CS SeC-4B Model Loader` 输出的 `SEC_MODEL`，必需输入。
+- `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
+- `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
+- `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
+- `prompt_data`：Selector 序列化的多对象提示数据，不建议手动编辑。
+- `tracking_direction`：传播方向，`bidirectional` 双向传播，`forward` 向后传播，`backward` 向前传播。
+- `max_frames_to_track`：每个方向最多传播的帧数，`-1` 表示直到视频边界。
+- `mllm_memory_size`：场景变化时用于提取对象概念的历史关键帧数量，默认 `12`。
+- `offload_video_to_cpu`：将视频推理状态尽可能放到 CPU，以降低显存占用，但会降低速度。
+- `auto_unload_model`：默认开启。节点执行结束后卸载 SeC-4B 子模型；下次执行或 Preview 时会自动重载。
+- `Open Selector`：打开交互式提示编辑器。
+
+#### 输出说明
+
+- `mask`：形状为 `[帧数, 高, 宽]` 的整段视频 mask。
+- `anchor_mask`：锚点帧的合并分割 mask。
+- `video_info`：包含帧数、尺寸、锚点帧、传播方向和对象数量。
+
+### CS Video Segment (SAM3.1)
+使用 ComfyUI 官方 SAM3/SAM3.1 模型和推理内核，把 Selector 中定义在锚点帧的多个对象提示传播到整段视频。
+
+![CS Video Segment (SAM3.1) 节点](images/CS_Video_Segment(SAM3.1)_node.jpg)
+
+#### 使用流程
+
+1. 使用官方 `CheckpointLoaderSimple` 或 `Load Diffusion Model` 加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
+2. 将视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。
+3. 点击节点上的 `Open Selector`，在实际输入视频的帧上定义提示。
+4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
+5. 执行节点，得到整段视频的 mask。
+
+Selector 会递归查找上游的官方或第三方视频加载节点。如果输入来自中间生成节点、无法在打开 Selector 时直接追溯到文件，先运行一次工作流；节点会缓存最近一次实际收到的帧，Selector 随后使用这份缓存。
+
+#### 节点选项说明
+
+- `model`：官方 SAM3/SAM3.1 模型，必需输入。
+- `images`：可选 `IMAGE` 帧批次。连接后作为执行和 Selector 的首选视频来源。
+- `video_input`：可选 `VIDEO` 输入。仅在 `images` 未连接时使用。
+- `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始。通常由 Selector 自动写入。
+- `prompt_data`：Selector 序列化的 Mask、BBox、Point 和对象列表，不建议手动编辑。
+- `propagation_direction`：传播方向，`both` 双向传播，`forward` 向后传播，`backward` 向前传播。
+- `max_objects`：SAM3.1 的最大对象槽数量，默认 `16`。
+- `Open Selector`：打开交互式提示编辑器。
+
+#### 输出说明
+
+- `mask`：形状为 `[帧数, 高, 宽]` 的整段视频 mask。
+- `anchor_mask`：锚点帧的分割 mask。
+- `video_info`：包含帧数、尺寸、锚点帧、传播方向和对象数量。
+
+
+
+## Selector 使用说明
+
+SAM3.1 和 SeC-4B 共用同一个 Selector 界面。两者都支持多对象；SAM3.1 由官方模型批量处理对象，SeC-4B 会逐对象建立跟踪条件后合并结果。
+
+![Selector 界面](images/CS_Video_Segment_seletor.jpg)
+
+#### 时间控制和锚点帧
+
+- 时间线上方的 `|<` 和 `>|` 用于逐帧移动，滑杆和帧号输入框用于快速定位。
+- 蓝色倒三角指针表示当前已保存提示的锚点帧，外观与 `CS Load Video` 时间线指针一致。
+- 只允许一个锚点帧存在。第一次在某帧产生有效的 Mask、BBox 或 Point 后，该帧成为锚点。
+- 已存在编辑数据时切换帧，会提示“当前已存在编辑数据，切换锚点帧将自动清除，是否继续？”。确认后会清除全部对象提示和 Undo/Redo 历史，再切换到目标帧；取消则保留当前提示。
+- 切换到新帧后，只有重新添加提示，该帧才会成为新的锚点。
+- 已经点击 `Apply to Node` 的工作流再次打开 Selector 时，会自动跳转到保存的锚点帧并恢复提示。
+- `anchor_frame` 是当前输入帧批次的本地帧号，不一定等于源视频文件的原始帧号。使用 `CS Load Video` 的裁剪或重采样后，Selector 会按当前输入批次显示和保存帧号。
+
+#### Paint Mask
+
+- 进入 `Paint Mask` 后，鼠标光标显示当前画笔大小的半透明空心圆。
+- `Brush/Eraser` 切换键在画笔和橡皮擦之间切换；画笔状态为绿色，橡皮擦状态为红色。
+- `Brush Size` 范围为 `2–100`。拖动滑杆或在视频画布上滚动鼠标滚轮快速调整；按住 `Shift` 滚轮可大步调整。
+- `Clear Mask` 清除当前对象的粗略 Mask。
+- 粗略 Mask 只作为模型提示，点击 Preview 后画布会隐藏粗略笔迹，仅显示模型返回的分割结果。
+
+#### Edit BBox
+
+- 点击 `Add BBox` 后，在视频画布上拖出一个新框；松开鼠标后自动退出添加状态。
+- 鼠标移到四角时可拖拽调整宽高，移到水平或垂直边时可单独调整对应边的位置。
+- 鼠标移到框内部时显示手形光标，拖拽可移动整个框。
+- 在框内部点击右键，选择“删除BBox”删除当前对象的框。
+- 使用公共的 `Add Object` 创建更多对象，再为每个对象添加自己的 BBox。
+- `Clear All BBox` 清除所有对象的 BBox，但不会清除 Point 或粗略 Mask。
+
+#### Edit Point
+
+- 空白处左键添加 positive point。
+- 空白处右键添加 negative point。
+- 已有 Point 左键按住并拖动可移动；如果没有实际移动，释放鼠标不会新增或修改 Point。
+- 已有 Point 右键打开菜单，可删除 Point，或在 positive/negative 之间切换。
+- `Clear All Point` 清除所有对象的 Point，但不会清除 BBox 或粗略 Mask。
+
+#### 对象和公共按钮
+
+- `Object` 下拉框选择当前编辑对象。
+- `Add Object` 增加对象；`Delete Object` 删除当前对象。
+- `Undo` / `Redo` 撤销或恢复最近一次提示编辑。
+- `Clear All Prompt` 清除所有对象的 Mask、BBox 和 Point。
+- `Preview Current Frame` 只运行当前锚点帧的模型分割，结果用于检查提示是否合理，不会替代最终整段视频执行。
+- `Cancel` 关闭窗口并放弃本次未应用的修改。
+- `Apply to Node` 将提示数据和锚点帧写入节点。
+
+#### 示例工作流
+
+workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图片仅为示意。
+
+![SAM3.1 示例工作流](images/CS_Video_Segment(SAM3.1)_workflow.jpg)
+
+![SeC-4B 示例工作流](images/CS_Video_Segment(Sec-4B)_workflow.jpg)
+
 
 ##  声明
 ComfyUI_CineStyle节点遵照MIT开源协议，有部分功能代码和模型来自其他开源项目。如果作为商业用途，请查阅原项目授权协议使用。

@@ -1,0 +1,267 @@
+{
+  "id": "a2eed32a-ab99-440a-ae63-5534dca77c0c",
+  "revision": 0,
+  "last_node_id": 15,
+  "last_link_id": 18,
+  "nodes": [
+    {
+      "id": 4,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        2137.425286980356,
+        7222.622589150171
+      ],
+      "size": [
+        401.7554416245489,
+        109.79899477234812
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": null
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "SAM\\sam3.1_multiplex_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "ckpt_name": "SAM\\sam3.1_multiplex_fp16.safetensors"
+      }
+    },
+    {
+      "id": 10,
+      "type": "CS_Video_Segment_SAM3",
+      "pos": [
+        2574.017276769499,
+        7399.857157427223
+      ],
+      "size": [
+        390,
+        224
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 9
+        },
+        {
+          "name": "images",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "video_input",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": [
+            12
+          ]
+        },
+        {
+          "name": "anchor_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "DICT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CS_Video_Segment_SAM3"
+      },
+      "widgets_values": [
+        56,
+        "both",
+        16,
+        "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
+        ""
+      ],
+      "widgets_values_named": {
+        "anchor_frame": 56,
+        "propagation_direction": "both",
+        "max_objects": 16,
+        "prompt_data": "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
+        "Open Selector": ""
+      },
+      "color": "rgba(67, 105, 82, 0.85)"
+    },
+    {
+      "id": 8,
+      "type": "MaskPreview",
+      "pos": [
+        3076.3287756111117,
+        7319.679750862927
+      ],
+      "size": [
+        217.46814749521218,
+        298.62828830045964
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MaskPreview"
+      }
+    },
+    {
+      "id": 2,
+      "type": "CS_Load_Video",
+      "pos": [
+        2001.9335791029555,
+        7445.839494230709
+      ],
+      "size": [
+        360,
+        551.7142857142858
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "DICT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CS_Load_Video"
+      },
+      "widgets_values": [
+        "ComfyUI_00010_.mp4",
+        true,
+        32,
+        48,
+        104,
+        1120,
+        640,
+        24,
+        "image",
+        ""
+      ],
+      "widgets_values_named": {
+        "video": "ComfyUI_00010_.mp4",
+        "keep_aspect_ratio": true,
+        "multiple": 32,
+        "start_frame": 48,
+        "end_frame": 104,
+        "width": 1120,
+        "height": 640,
+        "fps": 24,
+        "upload": "image",
+        "Edit Timeline": ""
+      },
+      "color": "rgba(67, 105, 82, 0.85)"
+    }
+  ],
+  "links": [
+    [
+      9,
+      4,
+      0,
+      10,
+      0,
+      "MODEL"
+    ],
+    [
+      10,
+      2,
+      0,
+      10,
+      2,
+      "VIDEO"
+    ],
+    [
+      12,
+      10,
+      0,
+      8,
+      0,
+      "MASK"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.922959981770819,
+      "offset": [
+        -1579.399193655603,
+        -6967.0173071852505
+      ]
+    },
+    "frontendVersion": "1.49.6"
+  },
+  "version": 0.4
+}

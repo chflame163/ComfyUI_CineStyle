@@ -202,14 +202,22 @@ class SAM2VideoPredictor(_SAM2VideoPredictor):
             _memory_frames = max(self.max_obj_ptrs_in_encoder, self.num_maskmem)
             max_obj_ptrs_in_encoder = min(num_frames, _memory_frames)
             
+            previous_step = 1 if track_in_reverse else -1
+            previous_frame_idx = frame_idx + previous_step
+            candidate_indices = range(
+                previous_frame_idx,
+                start_frame_idx,
+                previous_step,
+            )
             valid_indices = [
-                i for i in range(frame_idx - 1, start_frame_idx, -1)
-                if (output_dict["non_cond_frame_outputs"][i]['ious'].max().item() > iou_thre
-                    and output_dict["non_cond_frame_outputs"][i]['object_score_logits'].item() > 0)
+                i for i in candidate_indices
+                if (output_dict["non_cond_frame_outputs"][i]["ious"].max().item() > iou_thre
+                    and output_dict["non_cond_frame_outputs"][i]["object_score_logits"].max().item() > 0)
             ][:max_obj_ptrs_in_encoder - 1]
-            valid_indices.sort()
-            if frame_idx - 1 not in valid_indices and (frame_idx - 1) != start_frame_idx:
-                valid_indices.append(frame_idx - 1)
+            # Negative indexing below expects the most recently tracked frame last.
+            valid_indices.sort(reverse=track_in_reverse)
+            if previous_frame_idx not in valid_indices and previous_frame_idx != start_frame_idx:
+                valid_indices.append(previous_frame_idx)
 
             for t_pos in range(1, self.num_maskmem):
                 t_rel = t_pos - self.num_maskmem    # how many frames before current frame
@@ -357,9 +365,15 @@ class SAM2VideoPredictor(_SAM2VideoPredictor):
             )
  
             if language_embd is not None:
-                _language_embd = language_embd.reshape(-1, 1, 256 // self.mem_dim, self.mem_dim)
+                batch_size = current_vision_feats[-1].shape[1]
+                _language_embd = language_embd.reshape(
+                    -1, 1, self.hidden_dim // self.mem_dim, self.mem_dim
+                )
                 _language_embd = _language_embd.permute(0, 2, 1, 3).flatten(0, 1)
-                _language_embd_pos = _language_embd.new_zeros(_language_embd.size(0), 1, self.mem_dim)
+                _language_embd = _language_embd.expand(-1, batch_size, -1)
+                _language_embd_pos = _language_embd.new_zeros(
+                    _language_embd.size(0), batch_size, self.mem_dim
+                )
                 pix_feat_with_language = self.token_attn(
                     curr=current_vision_feats[-1:],
                     curr_pos=current_vision_pos_embeds[-1:],
@@ -367,7 +381,9 @@ class SAM2VideoPredictor(_SAM2VideoPredictor):
                     memory_pos=_language_embd_pos,
                     num_obj_ptr_tokens=_language_embd.shape[0],
                 )
-                pix_feat_with_language = pix_feat_with_language.permute(1, 2, 0).view(1, 256, 64, 64)
+                pix_feat_with_language = pix_feat_with_language.permute(1, 2, 0).reshape(
+                    batch_size, self.hidden_dim, *feat_sizes[-1]
+                )
                 pix_feat = (pix_feat_with_language + pix_feat) / 2
 
             if prev_sam_mask_logits is not None:

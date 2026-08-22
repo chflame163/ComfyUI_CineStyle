@@ -19,4 +19,4 @@ Repository = "https://github.com/chflame163/ComfyUI_CineStyle"
 
 [tool.comfy]
 PublisherId = "chflame163"
-DisplayName = "CineStyle"
+DisplayName = "ComfyUI_CineStyle"

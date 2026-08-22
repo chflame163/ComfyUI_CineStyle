@@ -119,7 +119,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 自动肤色估计会把输入缩小到最长边 512 像素，从整段帧批次中抽样并合并候选像素，排除过暗、过亮、低饱和、透明和无效像素，再以 Hue 直方图峰值附近的环形统计和 Saturation/Value 中位数得到一个整段视频稳定的目标颜色。输入合法 Hex 颜色时不会加载 BiSeNet。
 
-节点上的 `VFX Preview` 按钮会打开实时预览窗口。窗口左侧显示原图，右侧显示当前参数下的处理结果；时间线支持拖动和单帧步进，参数以滑块排列，参数变化会重新处理当前帧。预览输入会递归查找上游视频来源，并优先使用最近一次工作流执行缓存的帧批次和 `MASK`。点击 `Apply to Node` 可将预览参数写回节点。
+节点上的 `VFX Preview` 按钮会打开实时预览窗口。窗口左侧显示原图，右侧 `Result` 视口显示当前参数下的处理结果；拖动 Result 中央分界线可以在 Original 与 Result 之间进行左右对比，时间线支持拖动和单帧步进，参数以滑块排列，参数变化会重新处理当前帧。预览输入会递归查找上游视频来源，并优先使用最近一次工作流执行缓存的帧批次和 `MASK`。点击 `Apply to Node` 可将预览参数写回节点。
 
 #### 部署 BiSeNet 权重
 
@@ -184,7 +184,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
 
-Selector 会递归查找上游的官方或第三方视频加载节点。对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
+Selector 会递归查找上游的官方或第三方视频/图片加载节点，包括官方和第三方 `Load Image`。单张图片按单帧输入显示；对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
 
 #### 节点选项说明
 
@@ -221,7 +221,7 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
 
-Selector 会递归查找上游的官方或第三方视频加载节点。如果输入来自中间生成节点、无法在打开 Selector 时直接追溯到文件，先运行一次工作流；节点会缓存最近一次实际收到的帧，Selector 随后使用这份缓存。
+Selector 会递归查找上游的官方或第三方视频/图片加载节点。如果输入来自中间生成节点、无法在打开 Selector 时直接追溯到文件，先运行一次工作流；节点会缓存最近一次实际收到的帧，Selector 随后使用这份缓存。
 
 #### 节点选项说明
 

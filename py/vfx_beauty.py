@@ -1,9 +1,3 @@
-"""Torch implementation of the Matchbox CROK Beauty shader chain.
-
-The original effect is a 19-pass skin cleanup pipeline.  This module keeps
-the pass ordering and parameter names, but evaluates the passes as batched
-Torch tensors so it can run inside a normal ComfyUI workflow.
-"""
 
 from __future__ import annotations
 
@@ -14,6 +8,8 @@ import sys
 import base64
 import io as py_io
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -42,6 +38,9 @@ _VFX_MASK_CACHE: dict[str, torch.Tensor | None] = {}
 _VFX_COLOUR_CACHE: dict[str, torch.Tensor] = {}
 _VFX_CACHE_LOCK = threading.RLock()
 _VFX_ROUTE_REGISTERED = False
+_BISE_NET_DOWNLOAD_LOCK = threading.Lock()
+_BISE_NET_HF_URL = "https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth"
+_BISE_NET_OFFICIAL_URL = "https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth"
 
 
 def _parse_hex_colour(value: Any, name: str = "colour") -> torch.Tensor | None:
@@ -92,12 +91,35 @@ def _bisenet_weights_path() -> Path:
         candidate = Path(folder_paths.models_dir) / "facexlib" / "parsing_bisenet.pth"
     except Exception:
         candidate = Path(__file__).resolve().parents[1] / "models" / "facexlib" / "parsing_bisenet.pth"
-    if not candidate.is_file():
-        raise FileNotFoundError(
-            "BiSeNet weights not found. Download parsing_bisenet.pth and place it at "
-            f"{candidate}."
-        )
-    return candidate
+    if candidate.is_file() and candidate.stat().st_size > 0:
+        return candidate
+    with _BISE_NET_DOWNLOAD_LOCK:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        temporary = candidate.with_name(candidate.name + ".download")
+        errors: list[str] = []
+        for url in (_BISE_NET_OFFICIAL_URL, _BISE_NET_HF_URL):
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-CineStyle/1.0"})
+                with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                if temporary.stat().st_size <= 0:
+                    raise OSError("downloaded file is empty")
+                temporary.replace(candidate)
+                print(f"[CineStyle] Downloaded BiSeNet weights to {candidate}.")
+                return candidate
+            except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+                errors.append(f"{url}: {exc}")
+                temporary.unlink(missing_ok=True)
+    raise FileNotFoundError(
+        "BiSeNet weights are unavailable and automatic download failed. "
+        f"Place parsing_bisenet.pth at {candidate}. Download errors: {'; '.join(errors)}"
+    )
 
 
 def _bisenet_type():

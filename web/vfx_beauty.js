@@ -119,7 +119,7 @@ async function openPreview(node) {
     dialog.className = "cs-vfx-dialog";
     dialog._vfxZoom = 1;
     dialog._vfxPan = { x: 0, y: 0 };
-    dialog._vfxCompare = 50;
+    dialog._vfxCompare = 0;
     dialog.innerHTML = `<div class="cs-vfx-shell">
       <div class="cs-vfx-head"><div><h2 class="cs-vfx-title">VFX Preview</h2><div class="cs-vfx-muted cs-vfx-file"></div></div><button class="cs-vfx-button cs-vfx-close" type="button">&times;</button></div>
       <div class="cs-vfx-view-grid"><div class="cs-vfx-viewport"><span class="cs-vfx-viewport-label">Original</span><img class="cs-vfx-image cs-vfx-original" alt="Original frame"></div><div class="cs-vfx-viewport cs-vfx-compare"><span class="cs-vfx-viewport-label">Result</span><img class="cs-vfx-image cs-vfx-result" alt="Result preview"><div class="cs-vfx-compare-original-clip"><img class="cs-vfx-image cs-vfx-compare-original" alt="Original comparison"></div><div class="cs-vfx-compare-divider" title="Drag to compare Original and Result"><span></span></div></div></div>
@@ -133,7 +133,7 @@ async function openPreview(node) {
       <div class="cs-vfx-actions"><span class="cs-vfx-status">Loading preview...</span><button class="cs-vfx-button cs-vfx-cancel" type="button">Close</button><button class="cs-vfx-button active cs-vfx-apply" type="button">Apply to Node</button></div>
     </div>`;
     document.body.append(dialog);
-    setComparePosition(dialog, 50);
+    setComparePosition(dialog, 0);
     dialog.querySelector(".cs-vfx-file").textContent = `${source.label || source.filename || "Cached input"} · ${info.frames || 1} frames`;
     const maxFrame = Math.max(0, Number(info.frames || 1) - 1);
     const timeline = dialog.querySelector(".cs-vfx-timeline");

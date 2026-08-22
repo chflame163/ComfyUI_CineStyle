@@ -13,20 +13,21 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ### 如何找到本节点组
 * 在ComfyUI画布点击右键 - Add Node, 找到 "😺dzNodes/CineStyle"。    
-<img src="images/node-menu.jpg" alt="CineStyle 节点菜单" width="480">
+<img src="images/node-menu.jpg" alt="CineStyle 节点菜单" width="360">
 
 * 或者在ComfyUI画布双击, 在搜索框输入"cinestyle"。
-<img src="images/node-search.jpg" alt="CineStyle 节点搜索" width="480">
+<img src="images/node-search.jpg" alt="CineStyle 节点搜索" width="360">
 
 
 ## 更新说明
 
+* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理。
 * 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
-* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行 CROK Beauty 皮肤处理。
+
 
 示例工作流及素材位于插件的 `workflows` 子目录。
 
@@ -104,42 +105,68 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 
 ### CS VFX Beauty
-使用 Torch 移植 Matchbox `crok_beauty` 的皮肤处理节点。节点会优先使用输入的 `MASK`，没有输入时临时加载 BiSeNet 生成内部皮肤区域，仅用于估算肤色；BiSeNet 的临时模型和遮罩不会作为节点输出。
+为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动加载 BiSeNet 生成内部皮肤区域，仅用于估算目标肤色，不作为输出。
 
-#### 输入和输出
+![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
 
-- `image`：标准 ComfyUI `IMAGE`，支持单张图像或视频帧批次。
-- `mask`：可选的标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，并同时作为自动肤色估计区域；不再需要额外的 External Matte 开关。
-- `colour`：字符串输入，默认 `auto`。输入 `auto` 时执行自动估色；输入合法的 `#RRGGBB` 时跳过自动估色和 BiSeNet，直接使用该 RGB 颜色。
-- `weights`：HSV Key 权重，默认 `6.0, 0.0, 3.0`。
-- 其余控件对应 CROK Beauty 的 Soften、Preserve Edges、Dark Spots、Highlights、Restore Detail、Shine 和颜色调整参数。
-- 预览窗口中的每个滑块显示默认值，并提供单独的复位按钮；`Saturation` 范围为 `0–300`，默认 `100`。
-- `IMAGE`：RGB 处理结果，不包含 Alpha。
-- `MASK`：本节点最终使用的皮肤处理 Matte。
+#### 使用流程
 
-自动肤色估计会把输入缩小到最长边 512 像素，从整段帧批次中抽样并合并候选像素，排除过暗、过亮、低饱和、透明和无效像素，再以 Hue 直方图峰值附近的环形统计和 Saturation/Value 中位数得到一个整段视频稳定的目标颜色。输入合法 Hex 颜色时不会加载 BiSeNet。
+- 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点。
+- 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
+- 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
+- 直接执行工作流得到处理结果。对于上游由其他节点运行时生成的图片或视频，先执行一次工作流，再打开 `VFX Preview` 建立可预览缓存。
+- 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 将预览参数写回节点，再重新执行工作流。
 
-节点上的 `VFX Preview` 按钮会打开实时预览窗口。窗口左侧显示原图，右侧 `Result` 视口显示当前参数下的处理结果；拖动 Result 中央分界线可以在 Original 与 Result 之间进行左右对比，时间线支持拖动和单帧步进，参数以滑块排列，参数变化会重新处理当前帧。预览输入会递归查找上游视频来源，并优先使用最近一次工作流执行缓存的帧批次和 `MASK`。点击 `Apply to Node` 可将预览参数写回节点。
+#### 节点选项说明
+
+- image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
+- mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域；不需要额外的 External Matte 开关。
+- colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
+- weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时重新写回该字符串。
+- blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
+- sigma / Amount：边缘保持模糊强度，默认 `10.0`。
+- threshold / Preserve Edges：边缘保护阈值，默认 `15.0`。
+- r_spots_blend / Dark Spots：暗斑修复混合比例，默认 `0.8`。
+- r_h_blend / Highlights：高光修复混合比例，默认 `0.5`。
+- strength / Restore Detail：高频细节恢复强度，默认 `0.0`。
+- blur_h / Detail Soften：恢复细节的柔化半径，默认 `0.0`。
+- blur_s / Blur Shine：皮肤高光柔化半径，默认 `30.0`。
+- o_amount / Shine Amount：高光恢复量，默认 `0.2`。
+- sat_amount / Saturation：最终肤色饱和度缩放，范围 `0–300`，默认 `100.0`。
+- hue_amount / Hue Shift：最终肤色色相偏移，范围 `-360–360` 度，默认 `0.0`。
+
+#### VFX Preview 界面
+
+![VFX Preview 界面](images/CS_VFX_Beauty_VFXPreview.jpg)
+
+- **双视口**：左侧 `Original` 显示原始帧，右侧 `Result` 显示当前参数的处理结果。Result 中央的对比条默认在最左侧，因此打开窗口时完整显示 Result；左右拖动对比条可比较 Original 和 Result。
+- **缩放和平移**：点击 `50%`、`100%`、`200%` 或 `Fit` 调整显示比例，也可以在任一视口滚动鼠标滚轮缩放。缩放超过 Fit 后，在任一视口按住鼠标左键拖动，两个视口会同步平移。
+- **时间线**：拖动底部时间线快速定位帧，输入帧号可直接跳转，`|<` 和 `>|` 用于单帧步进。切换帧后只重新计算当前帧的预览结果。
+- **Colour**：输入 `auto` 使用自动肤色；预览首次计算出的颜色会显示在右侧色块和 Hex 数值中。点击色块可以打开标准 RGB 取色器，选择颜色后会切换为固定 `#RRGGBB`。
+- **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
+- **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
+- **Apply to Node**：将当前颜色（如果修改过）、Weights 和所有参数写回节点。未修改 `colour` 时会保留节点原有的 `auto` 或 Hex 值。
+- 预览优先读取节点上一次执行缓存的 IMAGE 和 MASK；直接可追溯到文件时，也可读取上游 Load Image 或视频文件。
+
+#### 自动肤色估计
+
+当 `colour=auto` 时，节点将加载 BiSeNet并计算皮肤区域的目标颜色。在`colour`选项输入 Hex 颜色字符串`#RRGGBB`将跳过自动检测肤色流程。
+
+#### 输出说明
+
+- `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
+- `MASK`：本节点最终使用的皮肤处理 Matte，范围为 `0–1`，可连接到其他 ComfyUI Mask 节点。
 
 #### 部署 BiSeNet 权重
 
-没有连接 `mask` 时，需要放置 `parsing_bisenet.pth`：
+权重文件 `parsing_bisenet.pth`放置于：
 
 ```text
 ComfyUI/models/facexlib/parsing_bisenet.pth
 ```
 
-权重可以从 [facexlib parsing_bisenet.pth](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 下载。若 ComfyUI 使用了 `--models-directory`，请将文件放到该参数指定的 models 目录下的 `facexlib` 子目录。
-
-节点内置与该权重匹配的 BiSeNet 网络结构，不需要额外安装 `facexlib` 或 ONNX Runtime。执行结束后会释放 BiSeNet、临时解析结果和 CUDA 缓存；如果权重不存在且未连接 `mask`，节点会提示权重路径。
-
-#### 运行时兼容性
-
-- Windows、Linux 和 macOS 使用同一份纯 PyTorch 网络代码，没有平台专用的 CUDA、OpenGL 或编译扩展。
-- CUDA 模式使用 ComfyUI 当前的 Torch 设备。节点不要求本机安装 `nvcc`；只要 NVIDIA 驱动支持当前 Torch wheel 自带的 CUDA runtime 即可。
-- CPU、CUDA 和 Apple Silicon 的 MPS 都可以加载同一个 `.pth` state dict。BiSeNet 固定使用 `float32` 推理，不依赖 ComfyUI 的 FP16 累加开关。
-- 自动肤色统计会把候选像素转到 CPU 上做直方图和分位数计算，避开旧版 CUDA/MPS 对 `bincount` 或 `quantile` 支持不一致的问题。
-- 推荐使用 PyTorch 2.x。权重加载对未提供 `weights_only` 参数的旧版 Torch 有兼容回退，但不同版本的 MPS 算子覆盖率和 CPU 性能仍由对应 Torch 版本决定。
+首次运行且本地不存在权重时，节点会自动从 FaceXLib 上游官方的 [GitHub Release 下载地址](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 或者 Hugging Face 上的 [parsing_bisenet.pth 镜像](https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth) 下载权重。
+也可以手动下载后放置到 `ComfyUI/models/facexlib/parsing_bisenet.pth`。
 
 
 ### CS SeC-4B Model Loader

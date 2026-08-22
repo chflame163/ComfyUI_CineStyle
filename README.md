@@ -26,6 +26,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
+* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行 CROK Beauty 皮肤处理。
 
 示例工作流及素材位于插件的 `workflows` 子目录。
 
@@ -100,6 +101,42 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - `codec`：视频编码方式，默认 `h264`。选择 H.264 时显示码率控件。
 - `H.264 bitrate (Mbps)`：H.264 目标码率，浮点数保留 1 位小数，范围 `1.0–160.0 Mbps`，默认 `8.0 Mbps`。范围覆盖官方建议的低分辨率到 8K 高帧率视频；常见 1080p 视频可从 `8.0 Mbps` 开始，高帧率 1080p 可提高到约 `12.0 Mbps`。
 - `save_metadata`：默认关闭。开启后保存的文件将写入工作流和源视频 metadata。
+
+
+### CS VFX Beauty
+使用 Torch 移植 Matchbox `crok_beauty` 的皮肤处理节点。节点会优先使用输入的 `MASK`，没有输入时临时加载 BiSeNet 生成内部皮肤区域，仅用于估算肤色；BiSeNet 的临时模型和遮罩不会作为节点输出。
+
+#### 输入和输出
+
+- `image`：标准 ComfyUI `IMAGE`，支持单张图像或视频帧批次。
+- `mask`：可选的标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，并同时作为自动肤色估计区域；不再需要额外的 External Matte 开关。
+- `colour`：字符串输入，默认 `auto`。输入 `auto` 时执行自动估色；输入合法的 `#RRGGBB` 时跳过自动估色和 BiSeNet，直接使用该 RGB 颜色。
+- `weights`：HSV Key 权重，默认 `6.0, 0.0, 3.0`。
+- 其余控件对应 CROK Beauty 的 Soften、Preserve Edges、Dark Spots、Highlights、Restore Detail、Shine 和颜色调整参数。
+- `IMAGE`：RGB 处理结果，不包含 Alpha。
+- `MASK`：本节点最终使用的皮肤处理 Matte。
+
+自动肤色估计会把输入缩小到最长边 512 像素，从整段帧批次中抽样并合并候选像素，排除过暗、过亮、低饱和、透明和无效像素，再以 Hue 直方图峰值附近的环形统计和 Saturation/Value 中位数得到一个整段视频稳定的目标颜色。输入合法 Hex 颜色时不会加载 BiSeNet。
+
+#### 部署 BiSeNet 权重
+
+没有连接 `mask` 时，需要放置 `parsing_bisenet.pth`：
+
+```text
+ComfyUI/models/facexlib/parsing_bisenet.pth
+```
+
+权重可以从 [facexlib parsing_bisenet.pth](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 下载。若 ComfyUI 使用了 `--models-directory`，请将文件放到该参数指定的 models 目录下的 `facexlib` 子目录。
+
+节点内置与该权重匹配的 BiSeNet 网络结构，不需要额外安装 `facexlib` 或 ONNX Runtime。执行结束后会释放 BiSeNet、临时解析结果和 CUDA 缓存；如果权重不存在且未连接 `mask`，节点会提示权重路径。
+
+#### 运行时兼容性
+
+- Windows、Linux 和 macOS 使用同一份纯 PyTorch 网络代码，没有平台专用的 CUDA、OpenGL 或编译扩展。
+- CUDA 模式使用 ComfyUI 当前的 Torch 设备。节点不要求本机安装 `nvcc`；只要 NVIDIA 驱动支持当前 Torch wheel 自带的 CUDA runtime 即可。
+- CPU、CUDA 和 Apple Silicon 的 MPS 都可以加载同一个 `.pth` state dict。BiSeNet 固定使用 `float32` 推理，不依赖 ComfyUI 的 FP16 累加开关。
+- 自动肤色统计会把候选像素转到 CPU 上做直方图和分位数计算，避开旧版 CUDA/MPS 对 `bincount` 或 `quantile` 支持不一致的问题。
+- 推荐使用 PyTorch 2.x。权重加载对未提供 `weights_only` 参数的旧版 Torch 有兼容回退，但不同版本的 MPS 算子覆盖率和 CPU 性能仍由对应 Torch 版本决定。
 
 
 ### CS SeC-4B Model Loader

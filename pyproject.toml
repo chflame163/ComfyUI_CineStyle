@@ -1,0 +1,22 @@
+[project]
+name = "cinestyle"
+version = "1.0.0"
+description = "A set of ComfyUI custom nodes for video workflows."
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[project.urls]
+Repository = "https://github.com/chflame163/ComfyUI_CineStyle"
+"Bug Tracker" = "https://github.com/chflame163/ComfyUI_CineStyle/issues"
+
+[tool.comfy]
+PublisherId = "chflame163"
+DisplayName = "CineStyle"

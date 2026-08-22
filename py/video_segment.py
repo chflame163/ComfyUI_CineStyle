@@ -123,6 +123,33 @@ def _decode_video_frame(video: str, frame_index: int) -> torch.Tensor:
     raise ValueError(f"Frame {target} is outside the selected video.")
 
 
+def _looks_like_image_file(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if " [" in text:
+        text = text.split(" [", 1)[0]
+    return text.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".avif"))
+
+
+def _resolve_image_path(image: str) -> str:
+    value = str(image or "").strip()
+    if not value:
+        raise ValueError("Choose an image file before requesting a preview.")
+    if folder_paths.exists_annotated_filepath(value):
+        return folder_paths.get_annotated_filepath(value)
+    candidate = Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+    if candidate.is_file():
+        return str(candidate)
+    raise ValueError(f"Image file not found: {value}")
+
+
+def _decode_image_frame(image: str, frame_index: int) -> torch.Tensor:
+    if int(frame_index) != 0:
+        raise ValueError("A Load Image source contains one frame.")
+    with Image.open(_resolve_image_path(image)) as decoded:
+        array = np.asarray(decoded.convert("RGB"), dtype=np.uint8).copy()
+    return torch.from_numpy(array).unsqueeze(0).float().div_(255.0)
+
+
 def _prompt_node(prompt: Any, node_id: Any) -> dict[str, Any] | None:
     if not isinstance(prompt, dict):
         return None
@@ -347,7 +374,10 @@ def _selector_cache_for_token(token: Any) -> dict[str, Any] | None:
 def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.Tensor:
     token = str(payload.get("source_token") or "").strip()
     if not token:
-        return _decode_video_frame(str(payload.get("video") or ""), frame_index)
+        source = str(payload.get("video") or "")
+        if str(payload.get("source_kind") or "").lower() == "image" or _looks_like_image_file(source):
+            return _decode_image_frame(source, frame_index)
+        return _decode_video_frame(source, frame_index)
     entry = _selector_cache_for_token(token)
     if entry is None:
         raise ValueError("The cached Selector input is no longer available. Run the workflow once again.")

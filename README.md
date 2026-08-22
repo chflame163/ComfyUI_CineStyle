@@ -13,19 +13,21 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ### 如何找到本节点组
 * 在ComfyUI画布点击右键 - Add Node, 找到 "😺dzNodes/CineStyle"。    
-<img src="images/node-menu.jpg" alt="CineStyle 节点菜单" width="480">
+<img src="images/node-menu.jpg" alt="CineStyle 节点菜单" width="360">
 
 * 或者在ComfyUI画布双击, 在搜索框输入"cinestyle"。
-<img src="images/node-search.jpg" alt="CineStyle 节点搜索" width="480">
+<img src="images/node-search.jpg" alt="CineStyle 节点搜索" width="360">
 
 
 ## 更新说明
 
+* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理。
 * 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
+
 
 示例工作流及素材位于插件的 `workflows` 子目录。
 
@@ -102,6 +104,71 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - `save_metadata`：默认关闭。开启后保存的文件将写入工作流和源视频 metadata。
 
 
+### CS VFX Beauty
+为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动加载 BiSeNet 生成内部皮肤区域，仅用于估算目标肤色，不作为输出。
+
+![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
+
+#### 使用流程
+
+- 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点。
+- 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
+- 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
+- 直接执行工作流得到处理结果。对于上游由其他节点运行时生成的图片或视频，先执行一次工作流，再打开 `VFX Preview` 建立可预览缓存。
+- 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 将预览参数写回节点，再重新执行工作流。
+
+#### 节点选项说明
+
+- image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
+- mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域；不需要额外的 External Matte 开关。
+- colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
+- weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时重新写回该字符串。
+- blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
+- sigma / Amount：边缘保持模糊强度，默认 `10.0`。
+- threshold / Preserve Edges：边缘保护阈值，默认 `15.0`。
+- r_spots_blend / Dark Spots：暗斑修复混合比例，默认 `0.8`。
+- r_h_blend / Highlights：高光修复混合比例，默认 `0.5`。
+- strength / Restore Detail：高频细节恢复强度，默认 `0.0`。
+- blur_h / Detail Soften：恢复细节的柔化半径，默认 `0.0`。
+- blur_s / Blur Shine：皮肤高光柔化半径，默认 `30.0`。
+- o_amount / Shine Amount：高光恢复量，默认 `0.2`。
+- sat_amount / Saturation：最终肤色饱和度缩放，范围 `0–300`，默认 `100.0`。
+- hue_amount / Hue Shift：最终肤色色相偏移，范围 `-360–360` 度，默认 `0.0`。
+
+#### VFX Preview 界面
+
+![VFX Preview 界面](images/CS_VFX_Beauty_VFXPreview.jpg)
+
+- **双视口**：左侧 `Original` 显示原始帧，右侧 `Result` 显示当前参数的处理结果。Result 中央的对比条默认在最左侧，因此打开窗口时完整显示 Result；左右拖动对比条可比较 Original 和 Result。
+- **缩放和平移**：点击 `50%`、`100%`、`200%` 或 `Fit` 调整显示比例，也可以在任一视口滚动鼠标滚轮缩放。缩放超过 Fit 后，在任一视口按住鼠标左键拖动，两个视口会同步平移。
+- **时间线**：拖动底部时间线快速定位帧，输入帧号可直接跳转，`|<` 和 `>|` 用于单帧步进。切换帧后只重新计算当前帧的预览结果。
+- **Colour**：输入 `auto` 使用自动肤色；预览首次计算出的颜色会显示在右侧色块和 Hex 数值中。点击色块可以打开标准 RGB 取色器，选择颜色后会切换为固定 `#RRGGBB`。
+- **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
+- **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
+- **Apply to Node**：将当前颜色（如果修改过）、Weights 和所有参数写回节点。未修改 `colour` 时会保留节点原有的 `auto` 或 Hex 值。
+- 预览优先读取节点上一次执行缓存的 IMAGE 和 MASK；直接可追溯到文件时，也可读取上游 Load Image 或视频文件。
+
+#### 自动肤色估计
+
+当 `colour=auto` 时，节点将加载 BiSeNet并计算皮肤区域的目标颜色。在`colour`选项输入 Hex 颜色字符串`#RRGGBB`将跳过自动检测肤色流程。
+
+#### 输出说明
+
+- `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
+- `MASK`：本节点最终使用的皮肤处理 Matte，范围为 `0–1`，可连接到其他 ComfyUI Mask 节点。
+
+#### 部署 BiSeNet 权重
+
+权重文件 `parsing_bisenet.pth`放置于：
+
+```text
+ComfyUI/models/facexlib/parsing_bisenet.pth
+```
+
+首次运行且本地不存在权重时，节点会自动从 FaceXLib 上游官方的 [GitHub Release 下载地址](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 或者 Hugging Face 上的 [parsing_bisenet.pth 镜像](https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth) 下载权重。
+也可以手动下载后放置到 `ComfyUI/models/facexlib/parsing_bisenet.pth`。
+
+
 ### CS SeC-4B Model Loader
 
 加载SeC-4B 模型，为 `CS Video Segment (SeC-4B)` 节点和 Selector Preview 提供可复用的模型实例。节点扫描 `ComfyUI/models/sams/SeC-4B` 目录下的单文件权重。
@@ -144,7 +211,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
 
-Selector 会递归查找上游的官方或第三方视频加载节点。对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
+Selector 会递归查找上游的官方或第三方视频/图片加载节点，包括官方和第三方 `Load Image`。单张图片按单帧输入显示；对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
 
 #### 节点选项说明
 
@@ -181,7 +248,7 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
 
-Selector 会递归查找上游的官方或第三方视频加载节点。如果输入来自中间生成节点、无法在打开 Selector 时直接追溯到文件，先运行一次工作流；节点会缓存最近一次实际收到的帧，Selector 随后使用这份缓存。
+Selector 会递归查找上游的官方或第三方视频/图片加载节点。如果输入来自中间生成节点、无法在打开 Selector 时直接追溯到文件，先运行一次工作流；节点会缓存最近一次实际收到的帧，Selector 随后使用这份缓存。
 
 #### 节点选项说明
 

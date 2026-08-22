@@ -915,7 +915,7 @@ class CSVFXBeauty(io.ComfyNode):
                 io.Float.Input("blur_h", default=0.0, min=0.0, max=50.0, step=0.01, display_name="Detail Soften"),
                 io.Float.Input("blur_s", default=30.0, min=0.0, max=100.0, step=0.01, display_name="Blur Shine"),
                 io.Float.Input("o_amount", default=0.2, min=0.0, max=1.0, step=0.001, display_name="Shine Amount"),
-                io.Float.Input("sat_amount", default=100.0, min=0.0, max=1000.0, step=0.1, display_name="Saturation"),
+                io.Float.Input("sat_amount", default=100.0, min=0.0, max=300.0, step=0.1, display_name="Saturation"),
                 io.Float.Input("hue_amount", default=0.0, min=-360.0, max=360.0, step=0.01, display_name="Hue Shift"),
             ],
             outputs=[

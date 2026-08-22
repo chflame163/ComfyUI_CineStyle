@@ -113,6 +113,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - `colour`：字符串输入，默认 `auto`。输入 `auto` 时执行自动估色；输入合法的 `#RRGGBB` 时跳过自动估色和 BiSeNet，直接使用该 RGB 颜色。
 - `weights`：HSV Key 权重，默认 `6.0, 0.0, 3.0`。
 - 其余控件对应 CROK Beauty 的 Soften、Preserve Edges、Dark Spots、Highlights、Restore Detail、Shine 和颜色调整参数。
+- 预览窗口中的每个滑块显示默认值，并提供单独的复位按钮；`Saturation` 范围为 `0–300`，默认 `100`。
 - `IMAGE`：RGB 处理结果，不包含 Alpha。
 - `MASK`：本节点最终使用的皮肤处理 Matte。
 

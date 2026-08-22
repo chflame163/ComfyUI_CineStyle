@@ -118,6 +118,8 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 自动肤色估计会把输入缩小到最长边 512 像素，从整段帧批次中抽样并合并候选像素，排除过暗、过亮、低饱和、透明和无效像素，再以 Hue 直方图峰值附近的环形统计和 Saturation/Value 中位数得到一个整段视频稳定的目标颜色。输入合法 Hex 颜色时不会加载 BiSeNet。
 
+节点上的 `VFX Preview` 按钮会打开实时预览窗口。窗口左侧显示原图，右侧显示当前参数下的处理结果；时间线支持拖动和单帧步进，参数以滑块排列，参数变化会重新处理当前帧。预览输入会递归查找上游视频来源，并优先使用最近一次工作流执行缓存的帧批次和 `MASK`。点击 `Apply to Node` 可将预览参数写回节点。
+
 #### 部署 BiSeNet 权重
 
 没有连接 `mask` 时，需要放置 `parsing_bisenet.pth`：

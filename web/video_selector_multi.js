@@ -215,3 +215,13 @@ export function registerVideoSelector(config) {
         loadedGraphNode(node) { if (node?.type !== config.nodeId) return; removeObsoleteInputs(node, config.removeInputs || []); removeObsoleteWidgets(node, config.removeWidgets || []); node.setSize?.([node.size?.[0] || 390, node.computeSize?.()[1] || node.size?.[1] || 360]); },
     });
 }
+
+// Shared by lightweight preview dialogs that need the same recursive input
+// discovery and Selector cache as the full Video Segment UI.
+export {
+    connectedVideoSource,
+    fetchCachedSource,
+    fetchInfo,
+    prepareInputTimeline,
+    sourceFrameForLocal,
+};

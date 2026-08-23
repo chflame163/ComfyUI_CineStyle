@@ -1,0 +1,8 @@
+This directory contains the MOSS-Transcribe-Diarize model configuration,
+modeling, and processor implementation adapted for local CineStyle loading.
+
+Upstream project:
+https://github.com/OpenMOSS/MOSS-Transcribe-Diarize
+
+The upstream project is distributed under the Apache License 2.0.  See the
+upstream repository for the complete license text and attribution notices.

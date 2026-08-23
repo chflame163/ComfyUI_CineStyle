@@ -10,6 +10,7 @@ import asyncio
 import threading
 import logging
 import time
+import sys
 from fractions import Fraction
 from typing import Any
 
@@ -22,25 +23,17 @@ from typing_extensions import override
 import folder_paths
 from comfy_api.latest import ComfyExtension, Input, InputImpl, Types, io, ui
 
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - portable ComfyUI normally provides tqdm
+    tqdm = None
+
 
 _ROUTE_REGISTERED = False
 _PROXY_TOTAL_PIXELS = 1_000_000
 _PROXY_PROGRESS: dict[str, dict[str, Any]] = {}
 _PROXY_PROGRESS_LOCK = threading.Lock()
 _LOGGER = logging.getLogger("CineStyleVideoTimeline")
-
-
-def _tqdm_message(label: str, current: int, total: int | None, started_at: float, unit: str = "frame") -> str:
-    elapsed = max(0.001, time.perf_counter() - started_at)
-    rate = current / elapsed
-    if total and total > 0:
-        ratio = min(1.0, max(0.0, current / total))
-        percent = int(ratio * 100)
-        filled = int(ratio * 10)
-        bar = "█" * filled + " " * (10 - filled)
-        remaining = max(0.0, (total - current) / rate) if rate > 0 else 0.0
-        return f"{label}: {percent:3d}%|{bar}| {current}/{total} [{elapsed:05.1f}s<{remaining:05.1f}s, {rate:6.1f} {unit}/s]"
-    return f"{label}: {current} {unit} [{elapsed:05.1f}s, {rate:6.1f} {unit}/s]"
 
 
 def _video_files() -> list[str]:
@@ -185,6 +178,7 @@ def _create_proxy_video(
     progress_key: str | None = None,
 ) -> None:
     temporary_path = f"{proxy_path}.{os.getpid()}.mp4"
+    progress_bar = None
     try:
         with av.open(source_path, mode="r") as source:
             video_stream = source.streams.video[0]
@@ -195,8 +189,16 @@ def _create_proxy_video(
                 rate = float(Fraction(video_stream.average_rate or video_stream.guessed_rate or Fraction(24, 1)))
                 total_frames = max(1, int(round(duration * rate))) if duration > 0 else 0
             processed_frames = 0
-            last_logged_progress = -10
-            proxy_started_at = time.perf_counter()
+            if progress_key and tqdm is not None:
+                progress_bar = tqdm(
+                    total=total_frames or None,
+                    desc="[INFO] [CS Load Video] proxy frame processing",
+                    unit="frame",
+                    file=sys.stderr,
+                    dynamic_ncols=True,
+                    mininterval=0.25,
+                    leave=True,
+                )
             if progress_key:
                 with _PROXY_PROGRESS_LOCK:
                     _PROXY_PROGRESS[progress_key] = {"progress": 1, "running": True}
@@ -230,13 +232,12 @@ def _create_proxy_video(
                             for encoded in output_video.encode(preview_frame):
                                 output.mux(encoded)
                             processed_frames += 1
+                            if progress_bar is not None:
+                                progress_bar.update(1)
                             if progress_key and (processed_frames == 1 or processed_frames % 3 == 0):
                                 progress = 5 if total_frames <= 0 else min(95, 5 + int(processed_frames * 90 / total_frames))
                                 with _PROXY_PROGRESS_LOCK:
                                     _PROXY_PROGRESS[progress_key] = {"progress": progress, "running": True}
-                                if progress >= last_logged_progress + 10:
-                                    _LOGGER.info(_tqdm_message("[CS Load Video] proxy frame processing", processed_frames, total_frames or None, proxy_started_at))
-                                    last_logged_progress = progress
                     elif output_audio is not None and audio_resampler is not None and packet.stream == audio_stream:
                         for frame in packet.decode():
                             for resampled in audio_resampler.resample(frame):
@@ -252,12 +253,15 @@ def _create_proxy_video(
                     for encoded in output_audio.encode():
                         output.mux(encoded)
         os.replace(temporary_path, proxy_path)
-        _LOGGER.info(_tqdm_message("[CS Load Video] proxy frame processing", processed_frames, total_frames or None, proxy_started_at))
+        if progress_bar is not None:
+            progress_bar.close()
         _LOGGER.info("[CS Load Video] proxy generation complete: %s", proxy_path)
         if progress_key:
             with _PROXY_PROGRESS_LOCK:
                 _PROXY_PROGRESS[progress_key] = {"progress": 100, "running": False}
     except Exception:
+        if progress_bar is not None:
+            progress_bar.close()
         try:
             os.remove(temporary_path)
         except OSError:

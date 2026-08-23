@@ -1067,6 +1067,20 @@ def _sec_imports() -> tuple[Any, Any, Any]:
     package_root = str(_SEC_PACKAGE_PATH.parent)
     if package_root not in sys.path:
         sys.path.insert(0, package_root)
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        category=FutureWarning,
+        message=r"Importing from timm\.models\.layers is deprecated.*",
+    )
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+    except Exception:
+        pass
     from sec_inference.configuration_sec import SeCConfig
     from sec_inference.modeling_sec import SeCModel
     from transformers import AutoTokenizer
@@ -1914,8 +1928,8 @@ class CSVideoSegmentSAM3(io.ComfyNode):
 
         progress_total = _segment_expected_frames(frame_count, anchor, propagation_direction)
         backend_pbar = comfy.utils.ProgressBar(progress_total)
-        pbar = _SegmentProgress(node_name, progress_total, backend_pbar)
         _segment_info(node_name, f"propagating masks: direction={propagation_direction}")
+        pbar = _SegmentProgress(node_name, progress_total, backend_pbar)
         nested_tqdm = _NestedTqdmSilencer(("comfy.ldm.sam3.tracker",))
         nested_tqdm.start()
         try:

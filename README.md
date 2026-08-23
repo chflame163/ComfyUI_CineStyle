@@ -138,6 +138,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 - image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
 - mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域；不需要额外的 External Matte 开关。
+- proxy_video：可选标准 ComfyUI `VIDEO`，只用于 `VFX Preview` 的前端显示和逐帧预览；节点实际渲染始终使用 `image`，不会用 proxy 替换原始处理数据。
 - colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
 - weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时重新写回该字符串。
 - blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
@@ -163,7 +164,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
 - **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
 - **Apply to Node**：将当前颜色（如果修改过）、Weights 和所有参数写回节点。未修改 `colour` 时会保留节点原有的 `auto` 或 Hex 值。
-- 预览优先读取节点上一次执行缓存的 IMAGE 和 MASK；直接可追溯到文件时，也可读取上游 Load Image 或视频文件。
+- 预览来源按以下顺序回溯：先递归查找 `proxy_video`，失败后递归查找 `image`；两者都无法找到文件时，再读取节点上一次执行缓存的 proxy 或 IMAGE/MASK。直接可追溯到文件时，也可读取上游 Load Image 或视频文件。节点实际处理仍始终使用 `image`。
 
 #### 自动肤色估计
 
@@ -173,6 +174,10 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 - `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
 - `MASK`：本节点最终使用的皮肤处理 Matte，范围为 `0–1`，可连接到其他 ComfyUI Mask 节点。
+
+#### 后台处理信息
+
+节点执行时会在 ComfyUI 后台控制台按统一 logging 格式输出绿色 `[INFO]` 和白色 `[CS VFX Beauty]` 阶段日志，包括输入缓存、参数校验、自动肤色、代理尺寸、代理 Pass、最终颜色处理和输出阶段。Beauty 保持整批向量化 Torch 处理逻辑；由于内部 kernel 无法取得逐帧回调，本节点不输出伪造的 tqdm 帧进度，只报告当前处理阶段。
 
 #### 部署 BiSeNet 权重
 
@@ -223,7 +228,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 使用流程
 
 1. 先执行 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader)，再把输出的 `SEC_MODEL` 连接到节点的 `model`。
-2. 将同一视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。
+2. 将同一视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；可选的 `proxy_video` 只用于 Selector 前端预览。
 3. 点击 `Open Selector`，在锚点帧中定义一个或多个对象的提示。
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
@@ -235,6 +240,7 @@ Selector 会递归查找上游的官方或第三方视频/图片加载节点，�
 - `model`：`CS SeC-4B Model Loader` 输出的 `SEC_MODEL`，必需输入。
 - `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
+- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示；节点运行时始终使用原始 `images`（未连接时才使用 `video_input`）进行分割和传播。Selector 会先递归查找 `proxy_video`，失败后再递归查找 `images` / `video_input`。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的多对象 Mask、BBox 和 Point 提示数据，不建议手动编辑。
 - `tracking_direction`：传播方向，`bidirectional` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -250,6 +256,8 @@ Selector 会递归查找上游的官方或第三方视频/图片加载节点，�
 - `anchor_mask`：锚点帧的合并分割 mask。
 - `video_info`：包含帧数、尺寸、锚点帧、传播方向和对象数量。
 
+节点执行时会在 ComfyUI 后台按统一格式输出绿色 `[INFO]`、白色 `[CS Video Segment (SeC-4B)]` 的阶段信息；逐帧传播阶段会显示 tqdm 风格的处理进度。
+
 ### CS Video Segment (SAM3.1)
 使用 ComfyUI 官方 SAM3/SAM3.1 模型和推理内核，把 Selector 中定义在锚点帧的多个对象提示传播到整段视频。
 
@@ -260,7 +268,7 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 #### 使用流程
 
 1. 使用官方 `CheckpointLoaderSimple`加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
-2. 将视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。
+2. 将视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；可选的 `proxy_video` 只用于 Selector 前端预览。
 3. 点击节点上的 `Open Selector`，在实际输入视频的帧上定义提示。
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
@@ -272,6 +280,7 @@ Selector 会递归查找上游的官方或第三方视频/图片加载节点。�
 - `model`：官方 SAM3/SAM3.1 模型，必需输入。
 - `images`：可选 `IMAGE` 帧批次。连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入。仅在 `images` 未连接时使用。
+- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示；节点运行时始终使用原始 `images`（未连接时才使用 `video_input`）进行 SAM3.1 推理和传播。Selector 会先递归查找 `proxy_video`，失败后再递归查找 `images` / `video_input`。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始。通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的 Mask、BBox、Point 和对象列表，不建议手动编辑。
 - `propagation_direction`：传播方向，`both` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -283,6 +292,8 @@ Selector 会递归查找上游的官方或第三方视频/图片加载节点。�
 - `mask`：形状为 `[帧数, 高, 宽]` 的整段视频 mask。
 - `anchor_mask`：锚点帧的分割 mask。
 - `video_info`：包含帧数、尺寸、锚点帧、传播方向和对象数量。
+
+节点执行时会在 ComfyUI 后台按统一格式输出绿色 `[INFO]`、白色 `[CS Video Segment (SAM3.1)]` 的阶段信息；SAM3.1 逐帧传播阶段会显示 tqdm 风格的处理进度，无法取得逐帧回调的阶段只输出当前工作信息。
 
 
 

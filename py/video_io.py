@@ -501,35 +501,51 @@ class CSLoadVideo(io.ComfyNode):
         if not folder_paths.exists_annotated_filepath(video):
             raise ValueError(f"Invalid video file: {video}")
 
-        _LOGGER.info("[CS Load Video] stage 1/7: decoding source frames")
+        source_path = folder_paths.get_annotated_filepath(video)
+        source_info = _read_video_info(video)
+        source_fps = float(source_info["fps"])
+        source_rate = Fraction(str(source_fps)).limit_denominator(100000)
+        source_count = int(source_info["frames"])
+        if source_count <= 0 and source_info["duration"] > 0:
+            source_count = max(1, int(round(source_info["duration"] * source_fps)))
+        if source_count <= 0 or source_fps <= 0:
+            raise ValueError(f"Video contains no usable frame metadata: {video}")
+
+        _LOGGER.info("[CS Load Video] stage 1/7: decoding selected source frames")
         decode_started_at = time.perf_counter()
-        source = InputImpl.VideoFromFile(folder_paths.get_annotated_filepath(video))
+        start = max(0, min(int(start_frame), source_count - 1))
+        end = source_count - 1 if int(end_frame) < 0 else min(int(end_frame), source_count - 1)
+        if end < start:
+            raise ValueError(f"end_frame ({end}) must be greater than or equal to start_frame ({start})")
+        selected_frame_count = end - start + 1
+        start_time = float(Fraction(start, 1) / source_rate)
+        selected_duration = float(Fraction(selected_frame_count, 1) / source_rate)
+        _LOGGER.info(
+            "[CS Load Video] source trim window: frames %d-%d -> %.6fs + %.6fs",
+            start,
+            end,
+            start_time,
+            selected_duration,
+        )
+        source = InputImpl.VideoFromFile(source_path, start_time=start_time, duration=selected_duration)
         components = source.get_components()
         images = components.images
         if images.ndim != 4 or images.shape[-1] not in (3, 4):
             raise ValueError("Decoded video frames must have shape [frames, height, width, 3 or 4]")
-        source_fps = float(components.frame_rate)
-        source_count = int(images.shape[0])
-        if source_count == 0:
+        if images.shape[0] == 0:
             raise ValueError(f"Video contains no decodable frames: {video}")
         _LOGGER.info("[CS Load Video] decoding source frames complete in %.2fs", time.perf_counter() - decode_started_at)
         _LOGGER.info(
-            "[CS Load Video] source decoded: %d frames, %dx%d, %.3f fps",
-            source_count,
+            "[CS Load Video] selected source decoded: %d frames (requested %d), %dx%d, %.3f fps",
+            images.shape[0],
+            selected_frame_count,
             int(images.shape[2]),
             int(images.shape[1]),
             source_fps,
         )
 
-        _LOGGER.info("[CS Load Video] stage 2/7: selecting frames %d-%s", start_frame, end_frame if end_frame >= 0 else "end")
-        start = max(0, min(int(start_frame), source_count - 1))
-        end = source_count - 1 if int(end_frame) < 0 else min(int(end_frame), source_count - 1)
-        if end < start:
-            raise ValueError(f"end_frame ({end}) must be greater than or equal to start_frame ({start})")
-
-        selected = images[start : end + 1]
-        _LOGGER.info("[CS Load Video] frame selection complete: %d/%d frames", selected.shape[0], source_count)
-        selected_duration = selected.shape[0] / source_fps
+        _LOGGER.info("[CS Load Video] stage 2/7: selected frame window already applied (%d frames)", images.shape[0])
+        selected = images
         target_fps = source_fps if fps <= 0 else float(fps)
         _LOGGER.info("[CS Load Video] stage 3/7: FPS processing %.3f -> %.3f", source_fps, target_fps)
         selected = _resample_frames(selected, source_fps, target_fps)
@@ -559,7 +575,7 @@ class CSLoadVideo(io.ComfyNode):
         _LOGGER.info("[CS Load Video] frame resizing complete: %d frames", selected.shape[0])
 
         _LOGGER.info("[CS Load Video] stage 5/7: trimming audio")
-        audio = _trim_audio(components.audio, start / source_fps, selected_duration)
+        audio = components.audio
         _LOGGER.info("[CS Load Video] audio processing: 100%% (%s)", "available" if audio is not None else "none")
         normalized_proxy_threshold = _normalize_proxy_threshold(proxy_threshold)
         normalized_proxy_size = _normalize_proxy_size(proxy_size)

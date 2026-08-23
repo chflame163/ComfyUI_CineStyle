@@ -26,6 +26,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
+* 添加 `CS Video Subtitle Track` 节点，将 SRT 作为可编辑字幕轨叠加到标准 `VIDEO`，支持字体、渐变填充、描边、阴影和位置预览。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
 
 
@@ -47,6 +48,10 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - 输出尺寸可以自动四舍五入到指定倍数，适合视频模型常见的尺寸要求。
 - 入点、出点、宽度、高度和 FPS 会保存到 ComfyUI 工作流中，重新打开工作流后仍可复现相同设置。
 - 输出同时包含图像帧批次、音频和结构化视频信息。
+- 打开 Edit Timeline 时，如果原视频超过 `proxy threshold`，界面会自动生成保持宽高比的 `proxy size` 像素预览代理，降低大视频预览的内存和解码压力；节点最终输出仍使用原视频。
+- 时间线 `Play` 按钮会同步播放预览视频的音频。
+- 生成代理时，预览窗口会显示 `Wait for Generate Proxy xx%` 进度。
+- 节点执行时会在 ComfyUI 后台输出当前阶段；帧选择、FPS、尺寸和代理帧处理会显示处理进度。
 
 #### 节点选项说明：
 ![CS Load Video 节点](images/CS_Load_Video_node.jpg)
@@ -58,6 +63,8 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - width： 整数，默认`0`。 输出宽度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。 
 - height： 整数，默认`0`。 输出高度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。 
 - fps： 浮点数，默认 `0`。 输出帧率。`0` 表示保留源视频帧率；输入其他数值时会按目标帧率重新采样帧。 
+- proxy threshold：浮点数，单位 MPixels，默认 `2.1`。仅当原视频总像素超过该阈值时生成预览代理；1920×1080 约为 2.074 MPixels，严格按数值不会触发代理。
+- proxy size：浮点数，单位 MPixels，默认 `0.8`。生成代理时的目标总像素；代理会保持原始宽高比并将边长调整为偶数。
 - choose file to upload：点击按钮从本地加载视频。
 - Edit Timeline：进入时间线界面。
 其中 `start_frame`、`end_frame`、`width`、`height` 和 `fps` 可通过 `Edit Timeline` 窗口设置或在节点控件中直接编辑。
@@ -80,17 +87,27 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ##### 时间线按钮
 - `Set In`：将视频预览当前帧设为入点。如果当前帧晚于出点，会自动修正出点。
+- 入点帧数栏：显示当前入点帧号，点击可跳转到入点。
 - `|<`： 跳转到上一帧。只受视频首帧限制，不受入点限制。 
 - `Play`: 只播放从入点到出点的内容，播放到出点后自动暂停。再次播放时，如果当前帧不在范围内，会从入点重新开始。 
 - `>|`: 跳转到下一帧。只受视频尾帧限制，不受出点限制。 
+- 出点帧数栏：显示当前出点帧号，点击可跳转到出点。
 - `Set Out`： 将视频预览当前帧设为出点。如果当前帧早于入点，会自动修正入点。 
 
 #### 输出说明
 - video：标准 ComfyUI `VIDEO` 类型，包含时间线选段、尺寸、帧率和音频，可直接连接官方视频节点。
+- proxy_video：预览代理对象输出，与 `video` 保持相同的入出点、帧数、帧顺序、FPS 和音频。超过阈值时仅缩小帧尺寸；未超过阈值时直接复用 `video` 对象本身，避免再次编码和解码。
 - IMAGE: 输出的video图像帧批次。
 - frame_count: 实际输出帧数。修改 FPS 后，该数值可能与源视频选段帧数不同。 
 - audio: 选定时间范围内的音频。没有音频轨道时输出为空。 
 - video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息。
+
+
+### CS Video Subtitle Track
+
+输入标准 ComfyUI `VIDEO` 和 SRT 文本，执行后输出带字幕画面的 `VIDEO`，原音频会透传。节点上的 `Edit Timeline` 使用独立的 Video/Subtitles 双轨编辑区：视频轨不可编辑，字幕片段可以移动、调整 In/Out，双击片段可编辑文本；时间线支持缩放、左右平移、出入点预览和字幕拖动定位。点击 `Apply` 后，字幕片段、字体、字号、双色渐变、对齐、描边、阴影和位置都会写回节点参数。
+
+`video_file` 是可选的源视频引用，仅用于浏览器生成预览代理；实际渲染使用连接的标准 `VIDEO` 输入。字体从 `ComfyUI/models/fonts` 目录读取。
 
 
 ### CS Save Video

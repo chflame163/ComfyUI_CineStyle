@@ -37,6 +37,7 @@ registerVideoSelector({
     previewRoute: "/cinestyle/sec-video-segment-preview",
     previewLabel: "Loading SeC-4B if needed and running...",
     widgets: { prompt: "prompt_data" },
+    videoInputs: ["images", "video_input"],
     removeInputs: ["input_mask"],
     removeWidgets: ["video", "selection_mode", "points", "bbox"],
     note: {},

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import logging
 from fractions import Fraction
 import uuid
 from pathlib import Path
@@ -66,6 +67,66 @@ _SELECTOR_INPUT_CACHE: dict[str, dict[str, Any]] = {}
 _SELECTOR_CACHE_LOCK = threading.RLock()
 _SELECTOR_CACHE_LIMIT = 8
 _SELECTOR_CACHE_MAX_BYTES = 4 * 1024**3
+_SEGMENT_LOGGER = logging.getLogger("CineStyleVideoSegment")
+
+
+def _segment_tqdm_message(label: str, current: int, total: int | None, started_at: float, unit: str = "frame") -> str:
+    elapsed = max(0.001, time.perf_counter() - started_at)
+    rate = current / elapsed
+    if total and total > 0:
+        ratio = min(1.0, max(0.0, current / total))
+        percent = int(ratio * 100)
+        filled = int(ratio * 10)
+        bar = "=" * filled + " " * (10 - filled)
+        remaining = max(0.0, (total - current) / rate) if rate > 0 else 0.0
+        return f"{label}: {percent:3d}%|{bar}| {current}/{total} [{elapsed:05.1f}s<{remaining:05.1f}s, {rate:6.1f} {unit}/s]"
+    return f"{label}: {current} {unit} [{elapsed:05.1f}s, {rate:6.1f} {unit}/s]"
+
+
+def _segment_info(node_name: str, message: str) -> None:
+    _SEGMENT_LOGGER.info("[%s] %s", node_name, message)
+
+
+class _SegmentProgress:
+    """Forward ComfyUI progress updates while emitting throttled tqdm-style logs."""
+
+    def __init__(self, node_name: str, total: int, backend: Any = None):
+        self.node_name = node_name
+        self.total = max(1, int(total))
+        self.backend = backend
+        self.current = 0
+        self.started_at = time.perf_counter()
+        self._last_percent = -1
+
+    def update(self, amount: int = 1) -> None:
+        step = max(0, int(amount))
+        if self.backend is not None:
+            self.backend.update(step)
+        self.current += step
+        percent = min(100, int(self.current * 100 / self.total))
+        if self.current == 1 or percent >= self._last_percent + 10 or self.current >= self.total:
+            _segment_info(
+                self.node_name,
+                _segment_tqdm_message("frame processing", min(self.current, self.total), self.total, self.started_at),
+            )
+            self._last_percent = percent
+
+    def close(self) -> None:
+        if self.current and self.current < self.total:
+            _segment_info(
+                self.node_name,
+                _segment_tqdm_message("frame processing", self.current, self.total, self.started_at),
+            )
+
+
+def _segment_expected_frames(frame_count: int, anchor: int, direction: str, limit: int | None = None) -> int:
+    cap = None if limit is None or int(limit) < 0 else max(1, int(limit))
+    total = 0
+    if direction in {"both", "forward"} and anchor + 1 < frame_count:
+        total += min(cap, frame_count - anchor) if cap is not None else frame_count - anchor
+    if direction in {"both", "backward"} and anchor > 0:
+        total += min(cap, anchor + 1) if cap is not None else anchor + 1
+    return max(1, total)
 
 try:
     folder_paths.add_model_folder_path("sams", os.path.join(folder_paths.models_dir, "sams"))
@@ -393,14 +454,15 @@ def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.T
 
 
 async def _selector_cache_info_route(request: web.Request) -> web.Response:
-    entry = _selector_cache_for_node(request.query.get("node_id", ""))
+    requested_node_id = str(request.query.get("node_id", ""))
+    entry = _selector_cache_for_node(requested_node_id)
     if entry is None:
         return web.json_response({"error": "No cached Selector input."}, status=404)
     token = str(entry["token"])
     return web.json_response(
         {
             "token": token,
-            "label": "Cached input from the last workflow run",
+            "label": "Proxy input from the last workflow run" if requested_node_id.endswith(":proxy") else "Cached input from the last workflow run",
             "video_url": f"/cinestyle/video-selector-cache-video?token={token}",
             "info": entry["info"],
         }
@@ -1437,6 +1499,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 SEC_MODEL.Input("model", tooltip="Loaded SeC-4B model."),
                 io.Image.Input("images", optional=True, tooltip="Video frames as an IMAGE batch."),
                 io.Video.Input("video_input", optional=True, tooltip="Optional VIDEO input."),
+                io.Video.Input("proxy_video", optional=True, tooltip="Optional VIDEO used only by Selector preview."),
                 io.Int.Input("anchor_frame", default=0, min=0, max=10000000, step=1),
                 io.String.Input("prompt_data", default='{"version":2,"objects":[]}', multiline=True, optional=True, tooltip="Selector multi-object mask, bbox, and point prompts."),
                 io.Combo.Input("tracking_direction", options=["forward", "backward", "bidirectional"], default="bidirectional", advanced=True),
@@ -1458,6 +1521,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
         model: Any,
         images: torch.Tensor | None = None,
         video_input: Any = None,
+        proxy_video: Any = None,
         anchor_frame: int = 0,
         prompt_data: str = '{"version":2,"objects":[]}',
         tracking_direction: str = "bidirectional",
@@ -1466,7 +1530,10 @@ class CSVideoSegmentSeC(io.ComfyNode):
         offload_video_to_cpu: bool = False,
         auto_unload_model: bool = True,
     ) -> io.NodeOutput:
+        node_name = "CS Video Segment (SeC-4B)"
+        _segment_info(node_name, "start")
         model = _sec_ensure_loaded(model)
+        _segment_info(node_name, "model ready")
         if images is None and video_input is not None:
             images = video_input.get_components().images
         if images is None:
@@ -1474,12 +1541,27 @@ class CSVideoSegmentSeC(io.ComfyNode):
         if not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[-1] < 3:
             raise ValueError("images must have shape [frames, height, width, 3 or 4].")
         images = images[..., :3].to("cpu", dtype=torch.float32).clamp_(0, 1)
+        _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
         if not _prompt_has_file_video_source(cls.hidden.prompt, cls.hidden.unique_id):
             _cache_selector_input(
                 cls.hidden.unique_id,
                 images,
                 _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
             )
+        if proxy_video is not None:
+            try:
+                proxy_images = proxy_video.get_components().images
+                if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
+                    _cache_selector_input(
+                        f"{cls.hidden.unique_id}:proxy",
+                        proxy_images,
+                        _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
+                    )
+                    _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
+                else:
+                    _segment_info(node_name, "proxy_video ignored: no valid IMAGE frames")
+            except Exception as exc:
+                _segment_info(node_name, f"proxy preview cache unavailable: {exc}")
         frame_count, height, width = map(int, images.shape[:3])
         anchor = int(anchor_frame)
         if not 0 <= anchor < frame_count:
@@ -1487,10 +1569,12 @@ class CSVideoSegmentSeC(io.ComfyNode):
         if tracking_direction not in {"forward", "backward", "bidirectional"}:
             raise ValueError("tracking_direction must be forward, backward, or bidirectional.")
         prompts = _parse_prompt_data(prompt_data, width, height)
+        _segment_info(node_name, f"prompts parsed: objects={len(prompts)}, anchor={anchor}")
         if any(prompt["text"] for prompt in prompts):
             raise ValueError("SeC-4B does not support Semantic prompts. Use Point, BBox, or Draw Mask.")
 
         temp_dir = _sec_frame_dir(images)
+        _segment_info(node_name, "temporary frame sequence prepared")
         state = None
         try:
             state = model.grounding_encoder.init_state(
@@ -1499,6 +1583,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 offload_state_to_cpu=str(model._sec_loading_metadata.get("device")) == "cpu",
             )
             model.grounding_encoder.reset_state(state)
+            _segment_info(node_name, "video tracking state initialized")
             object_masks: list[np.ndarray] = []
 
             def add_all_prompts() -> list[np.ndarray]:
@@ -1528,9 +1613,12 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 return added
 
             object_masks = add_all_prompts()
+            _segment_info(node_name, f"anchor prompts applied: objects={len(object_masks)}")
             initial_union = torch.from_numpy(np.asarray(object_masks).astype(np.float32).max(axis=0))
             limit = frame_count if int(max_frames_to_track) < 0 else max(1, int(max_frames_to_track))
             segments: dict[int, torch.Tensor] = {}
+            progress_total = _segment_expected_frames(frame_count, anchor, tracking_direction, limit)
+            progress = _SegmentProgress(node_name, progress_total)
 
             def collect(reverse: bool):
                 for frame_index, object_ids, mask_logits in model.propagate_in_video(
@@ -1544,15 +1632,22 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 ):
                     union = (mask_logits > 0.0).any(dim=0).to("cpu", dtype=torch.float32)
                     segments[int(frame_index)] = union
+                    progress.update()
 
             if tracking_direction in {"forward", "bidirectional"}:
+                _segment_info(node_name, "propagating forward")
                 collect(False)
             if tracking_direction == "bidirectional":
+                _segment_info(node_name, "resetting tracking state for backward propagation")
                 model.grounding_encoder.reset_state(state)
                 object_masks = add_all_prompts()
+                _segment_info(node_name, "backward anchor prompts applied")
+                _segment_info(node_name, "propagating backward")
                 collect(True)
             elif tracking_direction == "backward":
+                _segment_info(node_name, "propagating backward")
                 collect(True)
+            progress.close()
 
             output = torch.zeros(frame_count, height, width, dtype=torch.float32)
             for frame_index, mask in segments.items():
@@ -1567,6 +1662,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 "tracking_direction": tracking_direction,
                 "object_count": len(prompts),
             }
+            _segment_info(node_name, f"complete: frames={frame_count}, object_count={len(prompts)}")
             return io.NodeOutput(output, initial_union, info)
         finally:
             try:
@@ -1577,6 +1673,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
             shutil.rmtree(temp_dir, ignore_errors=True)
             if auto_unload_model:
                 _sec_unload_model(model)
+                _segment_info(node_name, "model unloaded")
             elif torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1675,6 +1772,11 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                     optional=True,
                     tooltip="Optional VIDEO input from CS Load Video.",
                 ),
+                io.Video.Input(
+                    "proxy_video",
+                    optional=True,
+                    tooltip="Optional VIDEO used only by Selector preview.",
+                ),
                 io.Int.Input(
                     "anchor_frame",
                     default=0,
@@ -1720,13 +1822,17 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         model: Any,
         images: torch.Tensor | None = None,
         video_input: Any = None,
+        proxy_video: Any = None,
         anchor_frame: int = 0,
         prompt_data: str = '{"version":2,"objects":[]}',
         propagation_direction: str = "both",
         max_objects: int = 16,
     ) -> io.NodeOutput:
         global _LAST_MODEL
+        node_name = "CS Video Segment (SAM3.1)"
+        _segment_info(node_name, "start")
         _LAST_MODEL = model
+        _segment_info(node_name, "model ready")
         if images is None and video_input is not None:
             images = video_input.get_components().images
         if images is None:
@@ -1737,12 +1843,27 @@ class CSVideoSegmentSAM3(io.ComfyNode):
             raise ValueError("The video contains no frames.")
 
         images = images[..., :3].to(device="cpu", dtype=torch.float32).clamp_(0.0, 1.0)
+        _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
         if not _prompt_has_file_video_source(cls.hidden.prompt, cls.hidden.unique_id):
             _cache_selector_input(
                 cls.hidden.unique_id,
                 images,
                 _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
             )
+        if proxy_video is not None:
+            try:
+                proxy_images = proxy_video.get_components().images
+                if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
+                    _cache_selector_input(
+                        f"{cls.hidden.unique_id}:proxy",
+                        proxy_images,
+                        _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
+                    )
+                    _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
+                else:
+                    _segment_info(node_name, "proxy_video ignored: no valid IMAGE frames")
+            except Exception as exc:
+                _segment_info(node_name, f"proxy preview cache unavailable: {exc}")
         frame_count, height, width = map(int, images.shape[:3])
         anchor = int(anchor_frame)
         if anchor < 0 or anchor >= frame_count:
@@ -1756,11 +1877,15 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         object_limit = min(16, max(1, int(max_objects)))
 
         anchor_mask_objects = _sam3_anchor_masks(model, images[anchor : anchor + 1], prompt_data)
+        _segment_info(node_name, f"anchor prompts segmented: objects={anchor_mask_objects.shape[0]}")
         if anchor_mask_objects.shape[0] > object_limit:
             anchor_mask_objects = anchor_mask_objects[:object_limit]
         anchor_mask = anchor_mask_objects.amax(dim=0).to("cpu").float().clamp_(0.0, 1.0)
 
-        pbar = comfy.utils.ProgressBar(max(1, frame_count * 2))
+        progress_total = _segment_expected_frames(frame_count, anchor, propagation_direction)
+        backend_pbar = comfy.utils.ProgressBar(progress_total)
+        pbar = _SegmentProgress(node_name, progress_total, backend_pbar)
+        _segment_info(node_name, f"propagating masks: direction={propagation_direction}")
         mask = _propagate(
             model,
             images,
@@ -1770,6 +1895,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
             pbar,
             object_limit,
         )
+        pbar.close()
         info = {
             "frame_count": frame_count,
             "height": height,
@@ -1779,6 +1905,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
             "prompt_version": PROMPT_VERSION,
             "object_count": int(anchor_mask_objects.shape[0]),
         }
+        _segment_info(node_name, f"complete: frames={frame_count}, object_count={int(anchor_mask_objects.shape[0])}")
         return io.NodeOutput(mask, anchor_mask, info)
 
 

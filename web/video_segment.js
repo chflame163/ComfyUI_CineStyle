@@ -30,6 +30,7 @@ registerVideoSelector({
     previewRoute: "/cinestyle/video-segment-preview",
     previewLabel: "Running SAM3.1 on this frame...",
     widgets: { prompt: "prompt_data" },
+    videoInputs: ["images", "video_input"],
     note: {},
     removeInputs: ["clip", "conditioning"],
     removeWidgets: ["video", "selection_mode", "semantic_prompt", "points", "bbox", "threshold"],

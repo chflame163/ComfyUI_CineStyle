@@ -10,6 +10,28 @@ import {
 
 const STYLE_ID = "cinestyle-vfx-beauty-style";
 
+async function fetchBeautyCachedSource(node) {
+    const nodeId = String(node?.id ?? "").trim();
+    if (!nodeId) return null;
+    const response = await api.fetchApi(`/cinestyle/vfx-beauty-cache?${new URLSearchParams({ node_id: nodeId, t: String(Date.now()) })}`);
+    if (response.status === 404) return null;
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to read VFX Beauty preview cache");
+    const info = result.info || {};
+    return {
+        filename: "",
+        kind: "video",
+        label: String(result.label || "Cached VFX Beauty preview input"),
+        url: api.apiURL(result.video_url),
+        token: String(result.token || ""),
+        info,
+        startFrame: 0,
+        endFrame: Math.max(0, Number(info.frames || 1) - 1),
+        targetFps: Number(info.fps || 24),
+        usesProxy: Boolean(result.uses_proxy),
+    };
+}
+
 const PARAMS = [
     ["blur_m", "Soften", 0, 100, 10, 0.01, "Softens the keyed skin matte."],
     ["sigma", "Amount", 0, 100, 10, 0.01, "Controls the edge-preserving skin blur."],
@@ -106,8 +128,15 @@ async function openPreview(node) {
         if (element) { element.textContent = message; element.classList.toggle("cs-vfx-error", error); }
     };
     let source = null;
-    try { source = await fetchCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
+    let cachedSource = null;
+    try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
+    if (cachedSource?.usesProxy) source = cachedSource;
+    if (!source) source = connectedVideoSource(node, ["proxy_video"]);
     if (!source) source = connectedVideoSource(node, ["image", "images", "video_input"]);
+    if (!source) source = cachedSource;
+    if (!source) {
+        try { source = await fetchCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
+    }
     if (!source) { app.canvas?.prompt?.("Run the workflow once to cache the connected image/video input.", ""); return; }
     if (!source.token && !source.filename) { app.canvas?.prompt?.("No previewable input source was found.", ""); return; }
     let info = source.info;

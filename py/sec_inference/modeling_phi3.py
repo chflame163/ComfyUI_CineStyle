@@ -55,11 +55,11 @@ try:
     _flash_supports_window_size = 'window_size' in list(inspect.signature(flash_attn_func).parameters)
     has_flash_attn = True
 except ImportError as error:
-    logger.warning(
+    logger.debug(
         f'`flash-attention` package not found, consider installing for better performance: {error}.'
     )
     if not _flash_supports_window_size:
-        logger.warning(
+        logger.debug(
             "Current `flash-attenton` does not support `window_size`. Either upgrade or use `attn_implementation='eager'`."
         )
     has_flash_attn = False

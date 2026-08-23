@@ -34,9 +34,7 @@
       ],
       "properties": {
         "Node name for S&R": "MaskPreview"
-      },
-      "widgets_values": [],
-      "widgets_values_named": {}
+      }
     },
     {
       "id": 5,
@@ -47,7 +45,7 @@
       ],
       "size": [
         390,
-        296
+        316
       ],
       "flags": {},
       "order": 2,
@@ -69,6 +67,12 @@
           "shape": 7,
           "type": "VIDEO",
           "link": 4
+        },
+        {
+          "name": "proxy_video",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": null
         }
       ],
       "outputs": [
@@ -165,7 +169,7 @@
       ],
       "size": [
         360,
-        551.7142857142858
+        619.7142857142858
       ],
       "flags": {},
       "order": 1,
@@ -198,6 +202,11 @@
           "name": "video_info",
           "type": "DICT",
           "links": null
+        },
+        {
+          "name": "proxy_video",
+          "type": "*",
+          "links": null
         }
       ],
       "properties": {
@@ -212,6 +221,8 @@
         1120,
         640,
         24,
+        2.1,
+        0.8,
         "image",
         ""
       ],
@@ -224,6 +235,8 @@
         "width": 1120,
         "height": 640,
         "fps": 24,
+        "proxy_threshold": 2.1,
+        "proxy_size": 0.8,
         "upload": "image",
         "Edit Timeline": ""
       },
@@ -260,10 +273,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 1.3513057093106566,
+      "scale": 0.7627768444386934,
       "offset": [
-        -2438.693951044927,
-        -7069.036007221861
+        -2177.7221085674264,
+        -6926.288969544942
       ]
     },
     "frontendVersion": "1.49.6"

@@ -47,7 +47,7 @@ try:
     from .flash_attention import FlashAttention
     has_flash_attn = True
 except:
-    print('FlashAttention is not installed.')
+    logging.get_logger(__name__).debug('FlashAttention is not installed; using standard attention.')
     has_flash_attn = False
 
 logger = logging.get_logger(__name__)

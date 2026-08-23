@@ -31,6 +31,21 @@ function resetTimelineWidgets(node) {
     node.graph?.setDirtyCanvas(true, true);
 }
 
+function sanitizeProxyWidgets(node) {
+    const threshold = widget(node, "proxy_threshold");
+    const size = widget(node, "proxy_size");
+    const normalize = (target, fallback) => {
+        if (!target) return;
+        const value = Number(target.value);
+        if (!Number.isFinite(value) || value <= 0) {
+            target.value = fallback;
+            target.callback?.(fallback);
+        }
+    };
+    normalize(threshold, 2.1);
+    normalize(size, 0.8);
+}
+
 function syncVideoSelection(node, filename) {
     const nextFilename = String(filename ?? "");
     if (node.__csTimelineVideo !== undefined && node.__csTimelineVideo !== nextFilename) {
@@ -41,6 +56,11 @@ function syncVideoSelection(node, filename) {
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+}
+
+function proxyParameter(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? clamp(number, 0.1, 1000) : fallback;
 }
 
 function roundToMultiple(value, multiple) {
@@ -93,7 +113,9 @@ function addStyles() {
       .cs-timeline-title { margin: 0; font-size: 16px; font-weight: 600; }
       .cs-timeline-muted { color: #9299a8; }
       .cs-timeline-close { border: 0; background: transparent; color: #aeb5c2; font-size: 22px; cursor: pointer; padding: 0 5px; }
-      .cs-timeline-video { width: 100%; aspect-ratio: 16 / 9; height: auto; display: block; background: #08090b; border-radius: 6px; object-fit: contain; }
+      .cs-video-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #08090b; border-radius: 6px; overflow: hidden; }
+      .cs-timeline-video { width: 100%; height: 100%; display: block; background: #08090b; object-fit: contain; }
+      .cs-proxy-wait { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px; color: #e6e9ef; background: #08090be6; font-size: 15px; text-align: center; pointer-events: none; }
       .cs-file-name { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cs-original-info { max-width: 100%; color: #aeb5c2; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }
       .cs-timeline-readout { display: flex; justify-content: space-between; color: #aeb5c2; font-variant-numeric: tabular-nums; }
@@ -108,6 +130,7 @@ function addStyles() {
       .cs-timeline-controls { display: flex; gap: 6px; }
       .cs-timeline-controls button, .cs-timeline-foot button { border: 1px solid #424956; border-radius: 5px; padding: 7px 12px; background: #242832; color: #e6e9ef; cursor: pointer; }
       .cs-timeline-controls button:hover, .cs-timeline-foot button:hover { background: #303643; }
+      .cs-point-frame { min-width: 52px; padding-left: 7px !important; padding-right: 7px !important; color: #9fc9ec !important; font-variant-numeric: tabular-nums; }
       .cs-timeline-fields { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
       .cs-timeline-field { display: grid; gap: 5px; color: #9da5b4; }
       .cs-timeline-field input { width: 100%; box-sizing: border-box; border: 1px solid #424956; border-radius: 5px; padding: 7px 8px; background: #20232a; color: #f2f4f7; }
@@ -126,8 +149,18 @@ function videoUrl(filename) {
     return api.apiURL(`/view?${params.toString()}`);
 }
 
-async function fetchInfo(filename) {
-    const params = new URLSearchParams({ filename });
+function proxyVideoUrl(filename, proxyThreshold, proxySize) {
+    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize), t: String(Date.now()) });
+    return api.apiURL(`/cinestyle/video-proxy?${params.toString()}`);
+}
+
+function proxyProgressUrl(filename, proxyThreshold, proxySize) {
+    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize) });
+    return api.apiURL(`/cinestyle/video-proxy-progress?${params.toString()}`);
+}
+
+async function fetchInfo(filename, proxyThreshold, proxySize) {
+    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize) });
     const response = await api.fetchApi(`/cinestyle/video-info?${params.toString()}`);
     if (!response.ok) throw new Error(await response.text());
     return await response.json();
@@ -145,17 +178,18 @@ function openTimeline(node) {
     dialog.innerHTML = `
       <div class="cs-timeline-shell">
         <div class="cs-timeline-head"><div><h2 class="cs-timeline-title">Edit Timeline</h2><div class="cs-timeline-muted cs-file-name"></div><div class="cs-original-info"></div></div><button class="cs-timeline-close" type="button" aria-label="Close">&times;</button></div>
-        <video class="cs-timeline-video" controls muted playsinline preload="metadata"></video>
+        <div class="cs-video-stage"><video class="cs-timeline-video" controls playsinline preload="auto"></video><div class="cs-proxy-wait">Wait for Generate Proxy</div></div>
         <div class="cs-timeline-readout"><span class="cs-current">00:00.00</span><span class="cs-range"></span><span class="cs-duration">00:00.00</span></div>
         <div class="cs-timeline-pointer-row" aria-label="Current frame"><button class="cs-timeline-pointer" type="button" aria-label="Drag current frame" title="Drag current frame"></button></div>
         <div class="cs-timeline-track" aria-label="Video timeline"><div class="cs-timeline-selection"></div><button class="cs-timeline-handle cs-in" type="button" aria-label="In point"></button><button class="cs-timeline-handle cs-out" type="button" aria-label="Out point"></button></div>
-        <div class="cs-timeline-controls"><button class="cs-set-in" type="button">Set In</button><button class="cs-back" type="button">|&lt;</button><button class="cs-play" type="button">Play</button><button class="cs-forward" type="button">&gt;|</button><button class="cs-set-out" type="button">Set Out</button></div>
+        <div class="cs-timeline-controls"><button class="cs-set-in" type="button">Set In</button><button class="cs-point-frame cs-in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="cs-back" type="button">|&lt;</button><button class="cs-play" type="button">Play</button><button class="cs-forward" type="button">&gt;|</button><button class="cs-point-frame cs-out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="cs-set-out" type="button">Set Out</button></div>
         <div class="cs-timeline-fields"><label class="cs-timeline-field cs-timeline-check"><span><input class="cs-keep-aspect" type="checkbox"> keep aspect ratio</span></label><label class="cs-timeline-field">multiple<input class="cs-multiple" type="number" min="1" step="1"></label><label class="cs-timeline-field">Width<input class="cs-width" type="number" min="1" step="1"></label><label class="cs-timeline-field">Height<input class="cs-height" type="number" min="1" step="1"></label><label class="cs-timeline-field">FPS<input class="cs-fps" type="number" min="0.01" max="240" step="0.01"></label></div>
         <div class="cs-timeline-foot"><button class="cs-cancel" type="button">Cancel</button><button class="cs-apply" type="button">Apply</button></div>
       </div>`;
     document.body.append(dialog);
 
     const video = dialog.querySelector(".cs-timeline-video");
+    const proxyWait = dialog.querySelector(".cs-proxy-wait");
     const track = dialog.querySelector(".cs-timeline-track");
     const selection = dialog.querySelector(".cs-timeline-selection");
     const inHandle = dialog.querySelector(".cs-in");
@@ -168,11 +202,15 @@ function openTimeline(node) {
     const pointerRow = dialog.querySelector(".cs-timeline-pointer-row");
     const pointer = dialog.querySelector(".cs-timeline-pointer");
     const playButton = dialog.querySelector(".cs-play");
+    const inFrameButton = dialog.querySelector(".cs-in-frame");
+    const outFrameButton = dialog.querySelector(".cs-out-frame");
     const keepAspectInput = dialog.querySelector(".cs-keep-aspect");
     const multipleInput = dialog.querySelector(".cs-multiple");
     const widthInput = dialog.querySelector(".cs-width");
     const heightInput = dialog.querySelector(".cs-height");
     const fpsInput = dialog.querySelector(".cs-fps");
+    const proxyThreshold = proxyParameter(widget(node, "proxy_threshold")?.value, 2.1);
+    const proxySize = proxyParameter(widget(node, "proxy_size")?.value, 0.8);
     const currentValues = {
         start: Number(widget(node, "start_frame")?.value ?? 0),
         end: Number(widget(node, "end_frame")?.value ?? -1),
@@ -190,7 +228,43 @@ function openTimeline(node) {
     let customPlayRequest = false;
 
     fileLabel.textContent = filename;
-    video.src = videoUrl(filename);
+    video.muted = false;
+    video.volume = 1;
+    let proxyProgressTimer = null;
+    const setProxyWait = (visible, progress = 0) => {
+        proxyWait.style.display = visible ? "flex" : "none";
+        if (visible) proxyWait.textContent = `Wait for Generate Proxy ${Math.max(0, Math.min(100, Math.round(progress)))}%`;
+    };
+    const stopProxyProgress = () => {
+        if (proxyProgressTimer !== null) window.clearTimeout(proxyProgressTimer);
+        proxyProgressTimer = null;
+    };
+    video.addEventListener("loadeddata", () => { stopProxyProgress(); setProxyWait(false); });
+    video.addEventListener("canplay", () => { stopProxyProgress(); setProxyWait(false); });
+    video.addEventListener("error", () => { stopProxyProgress(); setProxyWait(false); });
+    const watchProxyProgress = async () => {
+        try {
+            const response = await api.fetchApi(proxyProgressUrl(filename, proxyThreshold, proxySize));
+            const state = await response.json();
+            if (state.error) {
+                setProxyWait(true, 0);
+                proxyWait.textContent = `Proxy generation failed: ${state.error}`;
+                stopProxyProgress();
+                return;
+            }
+            setProxyWait(true, state.progress);
+            if (state.done) {
+                setProxyWait(true, 100);
+                stopProxyProgress();
+                return;
+            }
+        } catch (error) {
+            proxyWait.textContent = `Proxy progress unavailable: ${error.message}`;
+            stopProxyProgress();
+            return;
+        }
+        proxyProgressTimer = window.setTimeout(watchProxyProgress, 250);
+    };
 
     function activeMultiple() {
         return Math.max(1, Math.round(Number(multipleInput.value) || 1));
@@ -294,6 +368,15 @@ function openTimeline(node) {
         updateTimeline(end);
     }
 
+    function jumpToMarkedFrame(frame) {
+        video.pause();
+        seek(frame);
+        updateTimeline(frame);
+    }
+
+    inFrameButton.addEventListener("click", () => jumpToMarkedFrame(start));
+    outFrameButton.addEventListener("click", () => jumpToMarkedFrame(end));
+
     widthInput.addEventListener("input", () => syncAspect("width"));
     widthInput.addEventListener("change", () => syncAspect("width", true));
     widthInput.addEventListener("blur", () => syncAspect("width", true));
@@ -320,6 +403,8 @@ function openTimeline(node) {
         selection.style.width = `${Math.max(0, (endRatio - startRatio) * 100)}%`;
         inHandle.style.left = `${startRatio * 100}%`;
         outHandle.style.left = `${endRatio * 100}%`;
+        inFrameButton.textContent = String(start);
+        outFrameButton.textContent = String(end);
         range.textContent = `In ${formatTime(start / info.fps)}  -  Out ${formatTime(end / info.fps)}`;
         durationLabel.textContent = formatTime((end - start + 1) / info.fps);
         current.textContent = formatTime(frame / info.fps);
@@ -415,6 +500,8 @@ function openTimeline(node) {
     dialog.querySelector(".cs-set-out").addEventListener("click", setOutPoint);
     playButton.addEventListener("click", () => {
         if (!info) return;
+        video.muted = false;
+        video.volume = 1;
         if (!video.paused) {
             selectionPlayback = false;
             video.pause();
@@ -432,7 +519,7 @@ function openTimeline(node) {
     dialog.querySelector(".cs-back").addEventListener("click", () => stepFrame(-1));
     dialog.querySelector(".cs-forward").addEventListener("click", () => stepFrame(1));
 
-    const close = () => { video.pause(); dialog.close(); dialog.remove(); };
+    const close = () => { stopProxyProgress(); video.pause(); dialog.close(); dialog.remove(); };
     dialog.querySelector(".cs-close")?.addEventListener("click", close);
     dialog.querySelector(".cs-timeline-close").addEventListener("click", close);
     dialog.querySelector(".cs-cancel").addEventListener("click", close);
@@ -449,10 +536,20 @@ function openTimeline(node) {
     });
     dialog.addEventListener("cancel", close);
 
-    fetchInfo(filename).then((result) => {
+    fetchInfo(filename, proxyThreshold, proxySize).then((result) => {
         info = result;
         originalInfo.textContent = formatOriginalInfo(result);
         originalInfo.title = originalInfo.textContent;
+        if (result.proxy_required) {
+            originalInfo.textContent += ` · 正在生成 ${result.proxy_width}×${result.proxy_height} 预览代理`;
+            setProxyWait(true);
+            video.src = proxyVideoUrl(filename, proxyThreshold, proxySize);
+            watchProxyProgress();
+        } else {
+            setProxyWait(false);
+            video.src = videoUrl(filename);
+        }
+        video.load();
         end = end < 0 ? result.frames - 1 : end;
         keepAspectInput.checked = currentValues.keepAspect;
         multipleInput.value = currentValues.multiple > 0 ? currentValues.multiple : 32;
@@ -474,6 +571,7 @@ app.registerExtension({
         const original = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             original?.apply(this, arguments);
+            sanitizeProxyWidgets(this);
             const videoWidget = widget(this, "video");
             if (videoWidget && !this.__csVideoResetInstalled) {
                 this.__csTimelineVideo = String(videoWidget.value ?? "");
@@ -490,6 +588,11 @@ app.registerExtension({
             button.label = "Edit Timeline";
             button.options = { ...(button.options || {}), serialize: false };
             this.setSize?.([360, Math.max(220, this.computeSize?.()[1] || 220)]);
+        };
+        const originalConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            originalConfigure?.apply(this, arguments);
+            sanitizeProxyWidgets(this);
         };
     },
 });

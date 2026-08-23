@@ -57,7 +57,7 @@
       ],
       "size": [
         390,
-        224
+        244
       ],
       "flags": {},
       "order": 2,
@@ -79,6 +79,12 @@
           "shape": 7,
           "type": "VIDEO",
           "link": 10
+        },
+        {
+          "name": "proxy_video",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": null
         }
       ],
       "outputs": [
@@ -160,7 +166,7 @@
       ],
       "size": [
         360,
-        551.7142857142858
+        619.7142857142858
       ],
       "flags": {},
       "order": 1,
@@ -193,6 +199,11 @@
           "name": "video_info",
           "type": "DICT",
           "links": null
+        },
+        {
+          "name": "proxy_video",
+          "type": "*",
+          "links": null
         }
       ],
       "properties": {
@@ -207,6 +218,8 @@
         1120,
         640,
         24,
+        2.1,
+        0.8,
         "image",
         ""
       ],
@@ -219,6 +232,8 @@
         "width": 1120,
         "height": 640,
         "fps": 24,
+        "proxy_threshold": 2.1,
+        "proxy_size": 0.8,
         "upload": "image",
         "Edit Timeline": ""
       },
@@ -255,10 +270,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.922959981770819,
+      "scale": 0.7627768444386932,
       "offset": [
-        -1579.399193655603,
-        -6967.0173071852505
+        -1459.8888637044674,
+        -6869.4832842828855
       ]
     },
     "frontendVersion": "1.49.6"

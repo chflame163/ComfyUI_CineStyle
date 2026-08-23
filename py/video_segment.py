@@ -149,6 +149,7 @@ class _SegmentProgress:
 
 
 def _segment_expected_frames(frame_count: int, anchor: int, direction: str, limit: int | None = None) -> int:
+    direction = "both" if direction == "bidirectional" else direction
     cap = None if limit is None or int(limit) < 0 else max(1, int(limit))
     total = 0
     if direction in {"both", "forward"} and anchor + 1 < frame_count:

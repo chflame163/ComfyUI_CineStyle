@@ -15,6 +15,7 @@ import threading
 import time
 import logging
 import importlib
+import warnings
 from fractions import Fraction
 import uuid
 from pathlib import Path
@@ -35,6 +36,13 @@ import comfy.utils
 import folder_paths
 from comfy_api.latest import ComfyExtension, io
 from tqdm import tqdm
+
+
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r"Importing from timm\.models\.layers is deprecated.*",
+)
 
 
 NODE_ID = "CS_Video_Segment_SAM3"

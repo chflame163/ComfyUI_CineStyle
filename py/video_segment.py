@@ -33,6 +33,7 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 from comfy_api.latest import ComfyExtension, io
+from tqdm import tqdm
 
 
 NODE_ID = "CS_Video_Segment_SAM3"
@@ -70,19 +71,6 @@ _SELECTOR_CACHE_MAX_BYTES = 4 * 1024**3
 _SEGMENT_LOGGER = logging.getLogger("CineStyleVideoSegment")
 
 
-def _segment_tqdm_message(label: str, current: int, total: int | None, started_at: float, unit: str = "frame") -> str:
-    elapsed = max(0.001, time.perf_counter() - started_at)
-    rate = current / elapsed
-    if total and total > 0:
-        ratio = min(1.0, max(0.0, current / total))
-        percent = int(ratio * 100)
-        filled = int(ratio * 10)
-        bar = "=" * filled + " " * (10 - filled)
-        remaining = max(0.0, (total - current) / rate) if rate > 0 else 0.0
-        return f"{label}: {percent:3d}%|{bar}| {current}/{total} [{elapsed:05.1f}s<{remaining:05.1f}s, {rate:6.1f} {unit}/s]"
-    return f"{label}: {current} {unit} [{elapsed:05.1f}s, {rate:6.1f} {unit}/s]"
-
-
 def _segment_info(node_name: str, message: str) -> None:
     _SEGMENT_LOGGER.info("[%s] %s", node_name, message)
 
@@ -94,29 +82,22 @@ class _SegmentProgress:
         self.node_name = node_name
         self.total = max(1, int(total))
         self.backend = backend
-        self.current = 0
-        self.started_at = time.perf_counter()
-        self._last_percent = -1
+        self.bar = tqdm(
+            total=self.total,
+            desc=f"[INFO] [{node_name}] frame processing",
+            unit="frame",
+            dynamic_ncols=True,
+            leave=True,
+        )
 
     def update(self, amount: int = 1) -> None:
         step = max(0, int(amount))
         if self.backend is not None:
             self.backend.update(step)
-        self.current += step
-        percent = min(100, int(self.current * 100 / self.total))
-        if self.current == 1 or percent >= self._last_percent + 10 or self.current >= self.total:
-            _segment_info(
-                self.node_name,
-                _segment_tqdm_message("frame processing", min(self.current, self.total), self.total, self.started_at),
-            )
-            self._last_percent = percent
+        self.bar.update(step)
 
     def close(self) -> None:
-        if self.current and self.current < self.total:
-            _segment_info(
-                self.node_name,
-                _segment_tqdm_message("frame processing", self.current, self.total, self.started_at),
-            )
+        self.bar.close()
 
 
 def _segment_expected_frames(frame_count: int, anchor: int, direction: str, limit: int | None = None) -> int:
@@ -1618,6 +1599,10 @@ class CSVideoSegmentSeC(io.ComfyNode):
             limit = frame_count if int(max_frames_to_track) < 0 else max(1, int(max_frames_to_track))
             segments: dict[int, torch.Tensor] = {}
             progress_total = _segment_expected_frames(frame_count, anchor, tracking_direction, limit)
+            if tracking_direction == "bidirectional":
+                _segment_info(node_name, "propagating forward and backward")
+            else:
+                _segment_info(node_name, f"propagating {tracking_direction}")
             progress = _SegmentProgress(node_name, progress_total)
 
             def collect(reverse: bool):
@@ -1635,17 +1620,12 @@ class CSVideoSegmentSeC(io.ComfyNode):
                     progress.update()
 
             if tracking_direction in {"forward", "bidirectional"}:
-                _segment_info(node_name, "propagating forward")
                 collect(False)
             if tracking_direction == "bidirectional":
-                _segment_info(node_name, "resetting tracking state for backward propagation")
                 model.grounding_encoder.reset_state(state)
                 object_masks = add_all_prompts()
-                _segment_info(node_name, "backward anchor prompts applied")
-                _segment_info(node_name, "propagating backward")
                 collect(True)
             elif tracking_direction == "backward":
-                _segment_info(node_name, "propagating backward")
                 collect(True)
             progress.close()
 

@@ -1,24 +1,171 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
-const NODE_ID = "CS_Video_Subtitle_Track";
+const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
+const PERSISTED_WIDGET_NAMES = [
+    "preview_in", "preview_out", "font", "font_size", "primary_color", "secondary_color",
+    "gradient", "text_align", "italic", "letter_spacing", "position_x", "position_y",
+    "outline_size", "outline_color", "shadow_size", "shadow_color", "Edit Timeline",
+];
 
 function widget(node, name) { return node.widgets?.find((item) => item.name === name); }
+const NUMERIC_LIMITS = { font_size: [8, 100], outline_size: [0, 20], shadow_size: [0, 20], letter_spacing: [-10, 50], position_x: [0, 1], position_y: [0, 1], preview_in: [0, 10000000], preview_out: [-1, 10000000] };
+const COLOR_DEFAULTS = { primary_color: "#FFFFFF", secondary_color: "#FF0000", outline_color: "#000000", shadow_color: "#000000" };
+function finiteNumber(value, fallback) {
+    if (value == null || (typeof value === "string" && value.trim() === "")) return fallback;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+function normalizePosition(value, fallback) {
+    return clamp(Math.round(finiteNumber(value, fallback) * 100) / 100, 0, 1);
+}
+function normalizeHex(value, fallback) {
+    const text = String(value ?? "").trim().toUpperCase();
+    return /^#[0-9A-F]{6}$/.test(text) ? text : fallback;
+}
+function configureSubtitleWidgetValues(node, info) {
+    const incoming = Array.isArray(info?.widgets_values) ? info.widgets_values : null;
+    if (!incoming || !node.widgets?.length) return info;
+    const hasSrtWidget = Boolean(widget(node, "srt"));
+    // A legacy graph can contain one leading slot for the hidden force-input widget.
+    const values = hasSrtWidget && incoming.length === PERSISTED_WIDGET_NAMES.length + 1
+        ? incoming.slice(1)
+        : incoming;
+    if (values.length !== PERSISTED_WIDGET_NAMES.length) {
+        console.warn(`[CS Video Subtitle] widgets_values length ${incoming.length} does not match the ${PERSISTED_WIDGET_NAMES.length} named values.`);
+    }
+    const byName = new Map(PERSISTED_WIDGET_NAMES.map((name, index) => [name, values[index]]));
+    const mapped = node.widgets.map((item, index) => {
+        if (item?.name === "srt") return item.value ?? "";
+        if (byName.has(item?.name)) return byName.get(item.name);
+        return incoming[index];
+    });
+    return { ...info, widgets_values: mapped };
+}
+function canonicalSubtitleValues(info) {
+    const incoming = Array.isArray(info?.widgets_values) ? info.widgets_values : null;
+    if (!incoming) return null;
+    return incoming.length === PERSISTED_WIDGET_NAMES.length + 1 ? incoming.slice(1) : incoming;
+}
+function applySubtitleWidgetValuesByName(node, info) {
+    const values = canonicalSubtitleValues(info);
+    if (!values) return;
+    const byName = new Map(PERSISTED_WIDGET_NAMES.map((name, index) => [name, values[index]]));
+    for (const name of PERSISTED_WIDGET_NAMES) {
+        const target = widget(node, name);
+        if (target && byName.has(name)) target.value = byName.get(name);
+    }
+}
+function serializeSubtitleWidgetValues(node) {
+    return PERSISTED_WIDGET_NAMES.map((name) => widget(node, name)?.value ?? null);
+}
 function graphNode(graph, id) { return graph?.getNodeById?.(id) || (graph?._nodes || []).find((item) => String(item?.id) === String(id)) || null; }
 function connectedVideoFilename(node) {
-    const input = node.inputs?.find((item) => item.name === "video");
-    const link = input?.link == null ? null : (node.graph?.links?.[input.link] || app.graph?.links?.[input.link]);
-    const origin = link ? graphNode(node.graph || app.graph, link.origin_id ?? link.originId) : null;
-    return String(widget(origin, "video")?.value || "").trim();
+    const visited = new Set();
+    function findFilename(origin) {
+        if (!origin) return "";
+        const identity = String(origin.id ?? origin.type ?? visited.size);
+        if (visited.has(identity)) return "";
+        visited.add(identity);
+        for (const name of ["video", "file", "filename", "video_file", "path", "filepath", "input", "source"]) {
+            const value = widget(origin, name)?.value;
+            if (typeof value === "string" && /\.(mp4|mov|mkv|avi|webm|m4v|mpg|mpeg|wmv|flv)(?:\s*\[[^\]]+\])?$/i.test(value.trim())) return value.trim();
+        }
+        for (const input of origin.inputs || []) {
+            const upstream = connectedOrigin(origin, input.name);
+            const value = findFilename(upstream);
+            if (value) return value;
+        }
+        return "";
+    }
+    return findFilename(connectedOrigin(node, "video"));
+}
+function connectedOrigin(node, inputName) {
+    const input = node.inputs?.find((item) => item.name === inputName);
+    if (!input) return null;
+    const graph = node.graph || app.graph;
+    const candidates = [];
+    if (input.link != null) candidates.push(input.link);
+    if (Array.isArray(input.links)) candidates.push(...input.links);
+    for (const candidate of candidates) {
+        const link = typeof candidate === "object" ? candidate : (graph?.links?.[candidate] || graph?._links?.[candidate]);
+        const originId = link?.origin_id ?? link?.originId ?? link?.origin;
+        const origin = originId == null ? null : graphNode(graph, originId);
+        if (origin) return origin;
+    }
+    return null;
+}
+function graphSrtText(node) {
+    const visited = new Set();
+    function findText(origin) {
+    if (!origin) return "";
+    const identity = String(origin.id ?? origin.type ?? visited.size);
+    if (visited.has(identity)) return "";
+    visited.add(identity);
+    const candidateNames = ["srt", "text", "string", "value", "content", "prompt", "file", "filename"];
+    for (const name of candidateNames) {
+        const value = widget(origin, name)?.value;
+        if (typeof value === "string" && parseSrt(value).length) return value;
+    }
+    for (const item of origin.widgets || []) {
+        const value = item?.value;
+        if (typeof value === "string" && parseSrt(value).length) return value;
+    }
+    for (const input of origin.inputs || []) {
+        const upstream = connectedOrigin(origin, input.name);
+        if (!upstream) continue;
+        const nested = findText(upstream);
+        if (nested) return nested;
+    }
+    return "";
+    }
+    return findText(connectedOrigin(node, "srt"));
+}
+async function fetchCachedProxy(node, filename = "") {
+    const nodeId = String(node?.id ?? "").trim();
+    if (!nodeId) return null;
+    const response = await api.fetchApi(`/cinestyle/video-subtitle-preview-info?${new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) })}`);
+    if (response.status === 404) return null;
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to read subtitle preview cache");
+    return { url: api.apiURL(String(result.video_url || "")), info: result.info || {}, label: String(result.label || "Subtitle preview cache") };
+}
+async function fetchCachedSrt(node) {
+    const nodeId = String(node?.id ?? "").trim();
+    if (!nodeId) return null;
+    const response = await api.fetchApi(`/cinestyle/video-subtitle-srt-cache?${new URLSearchParams({ node_id: nodeId, t: String(Date.now()) })}`);
+    if (response.status === 404) return null;
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to read cached SRT");
+    return { srt: String(result.srt || ""), sourceHash: String(result.source_hash || "") };
+}
+async function srtSourceHash(value) {
+    const data = new TextEncoder().encode(String(value || ""));
+    const digest = await crypto.subtle.digest("SHA-1", data);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function saveCachedSrt(node, sourceHash, srt) {
+    const response = await api.fetchApi("/cinestyle/video-subtitle-srt-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: String(node?.id ?? ""), source_hash: sourceHash, srt }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to save edited SRT");
 }
 function setWidgetValue(node, name, value) {
     const target = widget(node, name);
     if (!target) return;
+    if (Object.prototype.hasOwnProperty.call(NUMERIC_LIMITS, name)) {
+        const numericValue = Number(value);
+        if (Number.isFinite(numericValue)) value = numericValue;
+    }
     target.value = value;
     target.callback?.(value);
 }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function boolValue(value) { return typeof value === "string" ? ["1", "true", "yes", "on"].includes(value.trim().toLowerCase()) : Boolean(value); }
 function formatTime(seconds) {
     const safe = Math.max(0, Number(seconds) || 0);
     const hours = Math.floor(safe / 3600);
@@ -44,12 +191,19 @@ function parseSrt(text) {
     }
     return cues;
 }
-function readCues(node) {
-    try {
-        const data = JSON.parse(String(widget(node, "subtitle_data")?.value || "[]"));
-        if (Array.isArray(data) && data.some((cue) => cue?.text)) return data.map((cue, index) => ({ id: cue.id ?? index + 1, start: Number(cue.start) || 0, end: Number(cue.end) || 0, text: String(cue.text || "") })).filter((cue) => cue.end > cue.start && cue.text);
-    } catch (_) { /* fall back to the source SRT */ }
-    return parseSrt(widget(node, "srt")?.value || "");
+function readCues(node, sourceSrt = "") {
+    return parseSrt(sourceSrt || String(widget(node, "srt")?.value || ""));
+}
+function formatSrtTime(seconds) {
+    const milliseconds = Math.max(0, Math.round((Number(seconds) || 0) * 1000));
+    const hours = Math.floor(milliseconds / 3600000);
+    const minutes = Math.floor((milliseconds % 3600000) / 60000);
+    const secs = Math.floor((milliseconds % 60000) / 1000);
+    const millis = milliseconds % 1000;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
+}
+function cuesToSrt(cues) {
+    return cues.filter((cue) => cue.text && cue.end > cue.start).map((cue, index) => `${index + 1}\n${formatSrtTime(cue.start)} --> ${formatSrtTime(cue.end)}\n${cue.text}`).join("\n\n") + "\n\n";
 }
 function videoUrl(filename) {
     const params = new URLSearchParams({ filename, type: "input", subfolder: "", t: String(Date.now()) });
@@ -72,7 +226,6 @@ async function fetchFonts() {
         return Array.isArray(result.fonts) ? result.fonts : [];
     } catch (_) { return []; }
 }
-function fontUrl(relative) { return api.apiURL(`/cinestyle/font/${String(relative || "").split("/").map(encodeURIComponent).join("/")}`); }
 function addStyles() {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement("style");
@@ -89,7 +242,16 @@ function addStyles() {
       .cs-subtitle-close { border:0; background:transparent; color:#aeb5c2; font-size:22px; cursor:pointer; padding:0 5px; }
       .cs-subtitle-preview-wrap { position:relative; width:100%; aspect-ratio:16/9; background:#08090b; border-radius:6px; overflow:hidden; }
       .cs-subtitle-video { width:100%; height:100%; object-fit:contain; display:block; }
-      .cs-subtitle-overlay { position:absolute; left:50%; top:88%; transform:translate(-50%,-100%); max-width:90%; color:#fff; text-align:center; white-space:pre-wrap; word-break:break-word; font:48px/1.1 sans-serif; text-shadow:2px 3px 3px #000; pointer-events:auto; cursor:move; user-select:none; }
+      .cs-subtitle-overlay-image { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; pointer-events:none; display:none; }
+      .cs-subtitle-interaction-box { position:absolute; display:none; box-sizing:border-box; border:1px dashed transparent; z-index:4; cursor:grab; touch-action:none; }
+      .cs-subtitle-interaction-box:hover { border-color:#8bc7f5; }
+      .cs-subtitle-interaction-box:active { cursor:grabbing; }
+      .cs-subtitle-resize-handle { position:absolute; width:10px; height:10px; border:1px solid #e8f3ff; border-radius:2px; background:#317ec4; display:none; }
+      .cs-subtitle-interaction-box:hover .cs-subtitle-resize-handle { display:block; }
+      .cs-subtitle-resize-handle.nw { left:-6px; top:-6px; cursor:nwse-resize; }
+      .cs-subtitle-resize-handle.ne { right:-6px; top:-6px; cursor:nesw-resize; }
+      .cs-subtitle-resize-handle.sw { left:-6px; bottom:-6px; cursor:nesw-resize; }
+      .cs-subtitle-resize-handle.se { right:-6px; bottom:-6px; cursor:nwse-resize; }
       .cs-subtitle-readout { display:flex; justify-content:space-between; color:#aeb5c2; font-variant-numeric:tabular-nums; }
       .cs-subtitle-pointer-row { position:relative; height:15px; user-select:none; }
       .cs-subtitle-pointer { position:absolute; top:0; width:16px; height:15px; transform:translateX(-50%); border:0; background:#55a9f5; clip-path:polygon(0 0,100% 0,50% 100%); cursor:ew-resize; z-index:5; }
@@ -97,59 +259,93 @@ function addStyles() {
       .cs-subtitle-axis { position:relative; height:22px; color:#9299a8; font-size:11px; font-variant-numeric:tabular-nums; }
       .cs-subtitle-axis span { position:absolute; transform:translateX(-50%); top:4px; }
       .cs-subtitle-track { position:relative; height:34px; border-top:1px solid #343943; }
-      .cs-subtitle-track-label { position:absolute; left:8px; top:9px; z-index:4; color:#aeb5c2; font-size:11px; pointer-events:none; }
-      .cs-subtitle-track-body { position:absolute; inset:0; margin-left:72px; }
-      .cs-subtitle-track-video .cs-subtitle-track-body { background:repeating-linear-gradient(90deg,#2b3039 0 1px,transparent 1px 10%); }
-      .cs-subtitle-track-subtitles .cs-subtitle-track-body { background:#1c2026; }
-      .cs-subtitle-cue { position:absolute; top:5px; bottom:5px; min-width:5px; overflow:visible; border:1px solid #4b9de8; border-radius:3px; background:#317ec4; color:#f5f7fb; cursor:grab; user-select:none; }
+      .cs-subtitle-track-label { position:absolute; left:8px; top:9px; z-index:1; color:#aeb5c2; font-size:11px; pointer-events:none; }
+      .cs-subtitle-track-body { position:absolute; inset:0; margin-left:0; }
+      .cs-subtitle-track-video .cs-subtitle-track-body { background:repeating-linear-gradient(90deg,#343941 0 1px,transparent 1px 10%); }
+      .cs-subtitle-track-subtitles .cs-subtitle-track-body { background:#292e36; }
+      .cs-subtitle-cue { position:absolute; top:5px; bottom:5px; min-width:5px; overflow:visible; z-index:2; border:1px solid #4b9de8; border-radius:3px; background:#317ec4; color:#f5f7fb; cursor:grab; user-select:none; }
       .cs-subtitle-cue.selected { background:#3f9f83; border-color:#68d0ad; z-index:3; }
       .cs-subtitle-cue:active { cursor:grabbing; }
       .cs-subtitle-cue-label { display:block; overflow:hidden; padding:3px 8px; white-space:nowrap; text-overflow:ellipsis; pointer-events:none; }
       .cs-subtitle-cue-handle { position:absolute; top:-2px; bottom:-2px; width:7px; background:#f5f7fb; border-radius:2px; cursor:ew-resize; z-index:2; }
       .cs-subtitle-cue-handle.in { left:-4px; } .cs-subtitle-cue-handle.out { right:-4px; }
+      .cs-subtitle-context-menu { position:fixed; z-index:30; display:grid; min-width:140px; padding:4px; gap:2px; border:1px solid #424956; border-radius:6px; background:#20232a; box-shadow:0 10px 32px #000b; }
+      .cs-subtitle-context-menu button { border:0; border-radius:4px; padding:8px 10px; background:transparent; color:#f2f4f7; text-align:left; cursor:pointer; }
+      .cs-subtitle-context-menu button:hover { background:#317ec4; }
+      .cs-subtitle-range-band { position:absolute; top:22px; bottom:0; z-index:1; pointer-events:none; background:rgba(188,198,210,.16); border-left:1px solid rgba(210,220,230,.6); border-right:1px solid rgba(210,220,230,.6); }
+      .cs-subtitle-range-marker { position:absolute; top:0; bottom:0; width:2px; background:#c9d4df; box-shadow:0 0 0 1px #15181d; pointer-events:auto; cursor:ew-resize; touch-action:none; }
+      .cs-subtitle-range-marker::before { content:""; position:absolute; top:-1px; width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-top:6px solid #c9d4df; }
+      .cs-subtitle-range-marker.in { left:-1px; } .cs-subtitle-range-marker.in::before { left:-4px; }
+      .cs-subtitle-range-marker.out { right:-1px; } .cs-subtitle-range-marker.out::before { right:-4px; }
       .cs-subtitle-controls { display:flex; flex-wrap:wrap; gap:6px; }
       .cs-subtitle-controls button,.cs-subtitle-foot button { border:1px solid #424956; border-radius:5px; padding:7px 10px; background:#242832; color:#e6e9ef; cursor:pointer; }
       .cs-subtitle-controls button:hover,.cs-subtitle-foot button:hover { background:#303643; }
       .cs-subtitle-point-frame { min-width:52px; padding-left:7px !important; padding-right:7px !important; color:#9fc9ec !important; font-variant-numeric:tabular-nums; }
       .cs-subtitle-fields { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; }
+      .cs-subtitle-style-section { display:grid; gap:8px; padding:10px; border:1px solid #343943; border-radius:6px; background:#1b1e24; }
+      .cs-subtitle-style-section-title { color:#cbd2dc; font-size:12px; font-weight:600; letter-spacing:.02em; }
+      .cs-subtitle-style-section .cs-subtitle-fields { grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; }
+      .cs-subtitle-position-section .cs-subtitle-fields { grid-template-columns:minmax(90px,.7fr) minmax(180px,1fr) minmax(180px,1fr) auto; column-gap:14px; }
       .cs-subtitle-field { display:grid; gap:5px; color:#9da5b4; min-width:0; }
       .cs-subtitle-field input,.cs-subtitle-field select { width:100%; box-sizing:border-box; border:1px solid #424956; border-radius:5px; padding:7px 8px; background:#20232a; color:#f2f4f7; }
+      .cs-subtitle-param { display:grid; grid-template-columns:minmax(52px,auto) 1fr 48px 29px; align-items:center; gap:7px; color:#d9dee6; min-width:0; }
+      .cs-subtitle-param-compact { grid-template-columns:minmax(38px,auto) minmax(90px,1fr) 42px 29px; gap:4px; }
+      .cs-subtitle-position-param { grid-template-columns:18px minmax(90px,1fr) 42px 29px; gap:4px; }
+      .cs-subtitle-param input[type=range] { width:100%; accent-color:#55a9f5; }
+      .cs-subtitle-color-row { display:flex; align-items:center; gap:7px; }
+      .cs-subtitle-color-row input[type=color] { width:34px; height:29px; box-sizing:border-box; padding:2px; }
+      .cs-subtitle-hex { color:#f7b955; font-variant-numeric:tabular-nums; font-family:ui-monospace,monospace; }
+      .cs-subtitle-param output { color:#f7b955; text-align:right; font-variant-numeric:tabular-nums; }
+      .cs-subtitle-param-reset { width:29px; min-height:27px; padding:3px; border:1px solid #424956; border-radius:5px; background:#20232a; color:#f2f4f7; cursor:pointer; font-size:15px; line-height:1; }
+      .cs-subtitle-param-reset:hover { border-color:#6aa9df; }
+      .cs-subtitle-position-reset { min-height:29px; white-space:nowrap; border:1px solid #424956; border-radius:5px; padding:6px 10px; background:#242832; color:#e6e9ef; cursor:pointer; }
+      .cs-subtitle-position-reset:hover { background:#303643; }
       .cs-subtitle-field input[type=color] { height:32px; padding:2px; }
       .cs-subtitle-check { display:flex; align-items:center; gap:6px; min-height:32px; }
       .cs-subtitle-check input { width:auto; }
       .cs-subtitle-status { min-width:0; flex:1; color:#9299a8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .cs-subtitle-foot { justify-content:flex-end; }
       .cs-subtitle-foot .apply { background:#317ec4; border-color:#4b9de8; }
-      @media(max-width:760px) { .cs-subtitle-fields{grid-template-columns:repeat(2,minmax(0,1fr));} }
-      @media(max-width:460px) { .cs-subtitle-fields{grid-template-columns:1fr;} .cs-subtitle-shell{padding:10px;} }
+      @media(max-width:760px) { .cs-subtitle-style-section .cs-subtitle-fields,.cs-subtitle-position-section .cs-subtitle-fields{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      @media(max-width:460px) { .cs-subtitle-style-section .cs-subtitle-fields{grid-template-columns:1fr;} .cs-subtitle-shell{padding:10px;} }
     `;
     document.head.append(style);
 }
 
-function openTimeline(node) {
-    const filename = String(widget(node, "video_file")?.value || connectedVideoFilename(node) || "");
+async function openTimeline(node) {
+    const filename = String(connectedVideoFilename(node) || "");
+    const cachedSrt = await fetchCachedSrt(node).catch(() => null);
+    const cachedProxy = await fetchCachedProxy(node, filename).catch(() => null);
+    const sourceSrt = cachedSrt?.srt || graphSrtText(node) || String(widget(node, "srt")?.value || "");
     addStyles();
     const dialog = document.createElement("dialog");
     dialog.className = "cs-subtitle-dialog";
     dialog.innerHTML = `
       <div class="cs-subtitle-shell">
         <div class="cs-subtitle-head"><div><h2 class="cs-subtitle-title">Subtitle Timeline</h2><div class="cs-subtitle-muted cs-subtitle-file"></div></div><button class="cs-subtitle-close" type="button" aria-label="Close">&times;</button></div>
-        <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><div class="cs-subtitle-overlay"></div></div>
+         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><img class="cs-subtitle-overlay-image" alt="" draggable="false"><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div></div>
         <div class="cs-subtitle-readout"><span class="current">00:00.00</span><span class="range"></span><span class="duration">00:00.00</span></div>
         <div class="cs-subtitle-pointer-row"><button class="cs-subtitle-pointer" type="button" aria-label="Current time"></button></div>
-        <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-video"><span class="cs-subtitle-track-label">Video</span><div class="cs-subtitle-track-body"></div></div></div>
-        <div class="cs-subtitle-controls"><button class="set-in">Set In</button><button class="cs-subtitle-point-frame in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="back">|&lt;</button><button class="play">Play</button><button class="forward">&gt;|</button><button class="cs-subtitle-point-frame out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="set-out">Set Out</button><button class="zoom-out">−</button><button class="zoom-in">+</button><button class="pan-left">◀</button><button class="pan-right">▶</button></div>
-        <div class="cs-subtitle-fields"><label class="cs-subtitle-field">Font<select class="font-family"></select></label><label class="cs-subtitle-field">Size<input class="font-size" type="number" min="8" max="256" step="1"></label><label class="cs-subtitle-field">Fill<input class="fill-1" type="color"></label><label class="cs-subtitle-field">Gradient Fill<input class="fill-2" type="color"></label><label class="cs-subtitle-field cs-subtitle-check"><span><input class="gradient" type="checkbox"> vertical gradient</span></label><label class="cs-subtitle-field">Align<select class="text-align"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label class="cs-subtitle-field">Outline<input class="outline-size" type="number" min="0" max="32" step="1"></label><label class="cs-subtitle-field">Outline Color<input class="outline-color" type="color"></label><label class="cs-subtitle-field">Shadow<input class="shadow-size" type="number" min="0" max="32" step="1"></label><label class="cs-subtitle-field">Shadow Color<input class="shadow-color" type="color"></label></div>
-        <div class="cs-subtitle-row"><span class="cs-subtitle-status"></span><button class="move-reset">Reset Position</button></div>
+        <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-video"><span class="cs-subtitle-track-label">Video</span><div class="cs-subtitle-track-body"></div></div></div>
+        <div class="cs-subtitle-controls"><button class="set-in">Set In</button><button class="cs-subtitle-point-frame in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="back">|&lt;</button><button class="play">Play</button><button class="forward">&gt;|</button><button class="cs-subtitle-point-frame out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="set-out">Set Out</button></div>
+        <div class="cs-subtitle-style-section"><div class="cs-subtitle-style-section-title">Typography</div><div class="cs-subtitle-fields"><label class="cs-subtitle-field">Font<select class="font"></select></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-font-size">Size</label><input id="cs-subtitle-font-size" class="font-size" type="range" min="8" max="100" step="1"><output data-subtitle-output="font_size">30</output><button class="cs-subtitle-param-reset" data-reset="font_size" type="button" title="Reset Size">&#8634;</button></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="italic" type="checkbox"> Italic</span></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-letter-spacing">Spacing</label><input id="cs-subtitle-letter-spacing" class="letter-spacing" type="range" min="-10" max="50" step="1"><output data-subtitle-output="letter_spacing">0</output><button class="cs-subtitle-param-reset" data-reset="letter_spacing" type="button" title="Reset Letter Spacing">&#8634;</button></div></div></div>
+        <div class="cs-subtitle-style-section"><div class="cs-subtitle-style-section-title">Fill</div><div class="cs-subtitle-fields"><label class="cs-subtitle-field">Primary Color<div class="cs-subtitle-color-row"><input class="primary-color" type="color"><output class="cs-subtitle-hex primary-color-hex">#FFFFFF</output></div></label><label class="cs-subtitle-field">Secondary Color<div class="cs-subtitle-color-row"><input class="secondary-color" type="color" value="#FF0000"><output class="cs-subtitle-hex secondary-color-hex">#FF0000</output></div></label><label class="cs-subtitle-field cs-subtitle-check"><span><input class="gradient" type="checkbox"> Vertical Gradient</span></label></div></div>
+        <div class="cs-subtitle-style-section cs-subtitle-position-section"><div class="cs-subtitle-style-section-title">Position</div><div class="cs-subtitle-fields"><label class="cs-subtitle-field">Align<select class="text-align"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><div class="cs-subtitle-param cs-subtitle-position-param"><label for="cs-subtitle-position-x">X</label><input id="cs-subtitle-position-x" class="position-x" type="range" min="0" max="1" step="0.01"><output data-subtitle-output="position_x">0.50</output><button class="cs-subtitle-param-reset" data-reset="position_x" type="button" title="Reset X">&#8634;</button></div><div class="cs-subtitle-param cs-subtitle-position-param"><label for="cs-subtitle-position-y">Y</label><input id="cs-subtitle-position-y" class="position-y" type="range" min="0" max="1" step="0.01"><output data-subtitle-output="position_y">0.88</output><button class="cs-subtitle-param-reset" data-reset="position_y" type="button" title="Reset Y">&#8634;</button></div><button class="cs-subtitle-position-reset move-reset" type="button">Reset Position</button></div></div>
+        <div class="cs-subtitle-style-section"><div class="cs-subtitle-style-section-title">Outline</div><div class="cs-subtitle-fields"><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-outline-size">Size</label><input id="cs-subtitle-outline-size" class="outline-size" type="range" min="0" max="20" step="1"><output data-subtitle-output="outline_size">2</output><button class="cs-subtitle-param-reset" data-reset="outline_size" type="button" title="Reset Outline">&#8634;</button></div><label class="cs-subtitle-field">Color<div class="cs-subtitle-color-row"><input class="outline-color" type="color"><output class="cs-subtitle-hex outline-color-hex">#000000</output></div></label></div></div>
+        <div class="cs-subtitle-style-section"><div class="cs-subtitle-style-section-title">Shadow</div><div class="cs-subtitle-fields"><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-shadow-size">Size</label><input id="cs-subtitle-shadow-size" class="shadow-size" type="range" min="0" max="20" step="1"><output data-subtitle-output="shadow_size">3</output><button class="cs-subtitle-param-reset" data-reset="shadow_size" type="button" title="Reset Shadow">&#8634;</button></div><label class="cs-subtitle-field">Color<div class="cs-subtitle-color-row"><input class="shadow-color" type="color"><output class="cs-subtitle-hex shadow-color-hex">#000000</output></div></label></div></div>
+        <div class="cs-subtitle-row"><span class="cs-subtitle-status"></span></div>
         <div class="cs-subtitle-foot"><button class="cancel">Cancel</button><button class="apply">Apply</button></div>
       </div>`;
     document.body.append(dialog);
 
     const video = dialog.querySelector(".cs-subtitle-video");
-    const overlay = dialog.querySelector(".cs-subtitle-overlay");
+    const previewWrap = dialog.querySelector(".cs-subtitle-preview-wrap");
+    const overlayImage = dialog.querySelector(".cs-subtitle-overlay-image");
+    const interactionBox = dialog.querySelector(".cs-subtitle-interaction-box");
     const viewport = dialog.querySelector(".cs-subtitle-viewport");
     const axis = dialog.querySelector(".cs-subtitle-axis");
     const body = dialog.querySelector(".cs-subtitle-track-subtitles .cs-subtitle-track-body");
+    const rangeBand = dialog.querySelector(".cs-subtitle-range-band");
     const pointer = dialog.querySelector(".cs-subtitle-pointer");
     const inFrameButton = dialog.querySelector(".in-frame");
     const outFrameButton = dialog.querySelector(".out-frame");
@@ -157,72 +353,229 @@ function openTimeline(node) {
     const range = dialog.querySelector(".range");
     const durationLabel = dialog.querySelector(".duration");
     const status = dialog.querySelector(".cs-subtitle-status");
-    const cues = readCues(node).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
+    const cues = readCues(node, sourceSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
+    let sourceHash = cachedSrt?.sourceHash || (sourceSrt ? await srtSourceHash(sourceSrt).catch(() => "") : "");
     let info = null;
     let duration = Math.max(1, ...cues.map((cue) => Number(cue.end) || 0));
     let fps = 30;
-    let inFrame = Math.max(0, Number(widget(node, "start_frame")?.value || 0));
-    let outFrame = Number(widget(node, "end_frame")?.value ?? -1);
+    let inFrame = clamp(finiteNumber(widget(node, "preview_in")?.value, 0), 0, 10000000);
+    let outFrame = clamp(finiteNumber(widget(node, "preview_out")?.value, -1), -1, 10000000);
     let viewStart = 0;
     let viewDuration = duration;
     let selected = null;
     let drag = null;
-    const loadedFonts = new Set();
     let playingSelection = false;
+    let previewTimer = null;
+    let previewRequest = 0;
+    let previewObjectUrl = "";
+    let previewBounds = null;
+    let previewTransform = { x: 0, y: 0, scale: 1 };
+    let localTransformActive = false;
     const style = {
-        font_family: String(widget(node, "font_family")?.value || ""),
-        font_size: Number(widget(node, "font_size")?.value || 48),
-        fill_color_1: String(widget(node, "fill_color_1")?.value || "#FFFFFF"),
-        fill_color_2: String(widget(node, "fill_color_2")?.value || "#FFFFFF"),
-        gradient: Boolean(widget(node, "gradient")?.value || false),
+        font: String(widget(node, "font")?.value || ""),
+        font_size: clamp(finiteNumber(widget(node, "font_size")?.value, 30), 8, 100),
+        primary_color: normalizeHex(widget(node, "primary_color")?.value, "#FFFFFF"),
+        secondary_color: normalizeHex(widget(node, "secondary_color")?.value, "#FF0000"),
+        gradient: boolValue(widget(node, "gradient")?.value || false),
         text_align: String(widget(node, "text_align")?.value || "center"),
-        position_x: Number(widget(node, "position_x")?.value ?? 0.5),
-        position_y: Number(widget(node, "position_y")?.value ?? 0.88),
-        outline_size: Number(widget(node, "outline_size")?.value || 2),
-        outline_color: String(widget(node, "outline_color")?.value || "#000000"),
-        shadow_size: Number(widget(node, "shadow_size")?.value || 3),
-        shadow_color: String(widget(node, "shadow_color")?.value || "#000000"),
+        italic: boolValue(widget(node, "italic")?.value || false),
+        letter_spacing: clamp(finiteNumber(widget(node, "letter_spacing")?.value, 0), -10, 50),
+        position_x: normalizePosition(widget(node, "position_x")?.value, 0.5),
+        position_y: normalizePosition(widget(node, "position_y")?.value, 0.88),
+        outline_size: clamp(finiteNumber(widget(node, "outline_size")?.value, 2), 0, 20),
+        outline_color: normalizeHex(widget(node, "outline_color")?.value, "#000000"),
+        shadow_size: clamp(finiteNumber(widget(node, "shadow_size")?.value, 3), 0, 20),
+        shadow_color: normalizeHex(widget(node, "shadow_color")?.value, "#000000"),
     };
     const inputs = {
-        font_family: dialog.querySelector(".font-family"), font_size: dialog.querySelector(".font-size"),
-        fill_color_1: dialog.querySelector(".fill-1"), fill_color_2: dialog.querySelector(".fill-2"), gradient: dialog.querySelector(".gradient"),
-        text_align: dialog.querySelector(".text-align"), outline_size: dialog.querySelector(".outline-size"), outline_color: dialog.querySelector(".outline-color"),
+        font: dialog.querySelector(".font"), font_size: dialog.querySelector(".font-size"),
+        primary_color: dialog.querySelector(".primary-color"), secondary_color: dialog.querySelector(".secondary-color"), gradient: dialog.querySelector(".gradient"),
+        text_align: dialog.querySelector(".text-align"), position_x: dialog.querySelector(".position-x"), position_y: dialog.querySelector(".position-y"),
+        italic: dialog.querySelector(".italic"), letter_spacing: dialog.querySelector(".letter-spacing"),
+        outline_size: dialog.querySelector(".outline-size"), outline_color: dialog.querySelector(".outline-color"),
         shadow_size: dialog.querySelector(".shadow-size"), shadow_color: dialog.querySelector(".shadow-color"),
     };
-    for (const [key, input] of Object.entries(inputs)) { if (input.type === "checkbox") input.checked = Boolean(style[key]); else input.value = style[key]; input.addEventListener("input", () => { style[key] = input.type === "checkbox" ? input.checked : input.value; updateOverlay(); }); }
+    function imageContentRect() {
+        const rect = previewWrap.getBoundingClientRect();
+        const imageWidth = Number(info?.width || overlayImage.naturalWidth || 0);
+        const imageHeight = Number(info?.height || overlayImage.naturalHeight || 0);
+        if (!imageWidth || !imageHeight) return null;
+        const scale = Math.min(rect.width / imageWidth, rect.height / imageHeight);
+        const width = imageWidth * scale;
+        const height = imageHeight * scale;
+        return { left: rect.left + (rect.width - width) / 2, top: rect.top + (rect.height - height) / 2, width, height, scale };
+    }
+    function applyPreviewTransform(x, y, scale = 1) {
+        previewTransform = { x, y, scale };
+        const transform = `translate3d(${x}px,${y}px,0) scale(${scale})`;
+        overlayImage.style.transform = transform;
+        interactionBox.style.transform = transform;
+    }
+    function clearPreviewTransform() {
+        previewTransform = { x: 0, y: 0, scale: 1 };
+        overlayImage.style.transform = "";
+        interactionBox.style.transform = "";
+    }
+    function updateInteractionBox() {
+        if (!previewBounds) { interactionBox.style.display = "none"; return; }
+        const content = imageContentRect();
+        if (!content) return;
+        interactionBox.style.display = "block";
+        interactionBox.style.left = `${content.left - previewWrap.getBoundingClientRect().left + previewBounds.left * content.scale}px`;
+        interactionBox.style.top = `${content.top - previewWrap.getBoundingClientRect().top + previewBounds.top * content.scale}px`;
+        interactionBox.style.width = `${Math.max(12, previewBounds.width * content.scale)}px`;
+        interactionBox.style.height = `${Math.max(12, previewBounds.height * content.scale)}px`;
+        interactionBox.style.transformOrigin = "center center";
+        overlayImage.style.transformOrigin = `${content.left - previewWrap.getBoundingClientRect().left + (previewBounds.left + previewBounds.width / 2) * content.scale}px ${content.top - previewWrap.getBoundingClientRect().top + (previewBounds.top + previewBounds.height / 2) * content.scale}px`;
+    }
+    async function renderPreviewFrame() {
+        const requestId = ++previewRequest;
+        const response = await api.fetchApi("/cinestyle/video-subtitle-preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                node_id: String(node.id ?? ""),
+                video_filename: filename,
+                frame: currentFrame(),
+                cues,
+                style,
+            }),
+        }).catch(() => null);
+        if (!response || requestId !== previewRequest) return;
+        if (!response.ok) {
+            previewBounds = null;
+            overlayImage.removeAttribute("src");
+            overlayImage.style.display = "none";
+            status.textContent = response.status === 404
+                ? "Run the workflow once after restarting ComfyUI to build the subtitle preview cache."
+                : "Pillow subtitle preview is unavailable.";
+            return;
+        }
+        const blob = await response.blob();
+        if (requestId !== previewRequest) return;
+        try { previewBounds = JSON.parse(response.headers.get("X-CineStyle-Subtitle-Bounds") || "null"); } catch (_) { previewBounds = null; }
+        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = URL.createObjectURL(blob);
+        overlayImage.onload = () => {
+            if (requestId !== previewRequest) return;
+            clearPreviewTransform();
+            updateInteractionBox();
+        };
+        overlayImage.src = previewObjectUrl;
+        overlayImage.style.display = "block";
+        updateInteractionBox();
+        status.textContent = "Pillow preview";
+    }
+    function schedulePreview() {
+        if (previewTimer) clearTimeout(previewTimer);
+        previewTimer = setTimeout(() => { previewTimer = null; renderPreviewFrame(); }, 60);
+    }
+    function updateParamOutput(name, value) {
+        const output = dialog.querySelector(`[data-subtitle-output="${name}"]`);
+        if (output) output.textContent = name === "position_x" || name === "position_y"
+            ? normalizePosition(value, name === "position_x" ? 0.5 : 0.88).toFixed(2)
+            : String(value ?? "");
+    }
+    function updateColorOutput(name, value) {
+        const output = dialog.querySelector(`.${name.replace("_color", "-color")}-hex`);
+        if (output) output.textContent = normalizeHex(value, COLOR_DEFAULTS[name]);
+    }
+    for (const [key, input] of Object.entries(inputs)) {
+        if (input.type === "checkbox") input.checked = boolValue(style[key]); else input.value = style[key];
+        updateParamOutput(key, style[key]);
+        if (Object.prototype.hasOwnProperty.call(COLOR_DEFAULTS, key)) updateColorOutput(key, style[key]);
+        input.addEventListener("input", () => {
+            style[key] = input.type === "checkbox" ? input.checked : input.value;
+            if (Object.prototype.hasOwnProperty.call(COLOR_DEFAULTS, key)) { style[key] = normalizeHex(style[key], COLOR_DEFAULTS[key]); input.value = style[key]; updateColorOutput(key, style[key]); }
+            if (key === "position_x" || key === "position_y") {
+                style[key] = normalizePosition(style[key], key === "position_x" ? 0.5 : 0.88);
+                input.value = style[key];
+            }
+            updateParamOutput(key, style[key]);
+            updateOverlay();
+        });
+    }
 
     function rangeStartSeconds() { return inFrame / fps; }
     function rangeEndSeconds() { return (outFrame < 0 ? duration : (outFrame + 1) / fps); }
+    function beginRangeMarkerDrag(mode, event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const move = (moveEvent) => {
+            const rect = viewport.getBoundingClientRect();
+            const ratio = clamp((moveEvent.clientX - rect.left) / rect.width, 0, 1);
+            const frame = Math.round((viewStart + ratio * viewDuration) * fps);
+            const maxFrame = Math.max(1, Math.round(duration * fps) - 1);
+            if (mode === "in") inFrame = clamp(frame, 0, Math.max(0, outFrame - 1));
+            else outFrame = clamp(frame, Math.min(maxFrame, inFrame + 1), maxFrame);
+            renderTimeline();
+        };
+        const up = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            window.removeEventListener("pointercancel", up);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+        window.addEventListener("pointercancel", up);
+        move(event);
+    }
     function jumpToMarkedFrame(frame) {
         video.pause();
         setFrame(frame);
     }
     inFrameButton.addEventListener("click", () => jumpToMarkedFrame(inFrame));
     outFrameButton.addEventListener("click", () => jumpToMarkedFrame(outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame));
+    rangeBand.querySelector(".in").addEventListener("pointerdown", (event) => beginRangeMarkerDrag("in", event));
+    rangeBand.querySelector(".out").addEventListener("pointerdown", (event) => beginRangeMarkerDrag("out", event));
     function updateOverlay() {
-        const active = cues.filter((cue) => cue.start <= (video.currentTime || 0) && cue.end > (video.currentTime || 0));
-        overlay.textContent = active.map((cue) => cue.text).join("\n");
-        overlay.style.left = `${style.position_x * 100}%`;
-        overlay.style.top = `${style.position_y * 100}%`;
-        overlay.style.fontSize = `${Math.max(8, Number(style.font_size) || 48)}px`;
-        overlay.style.textAlign = style.text_align;
-        overlay.style.textShadow = `${Number(style.shadow_size) || 0}px ${Number(style.shadow_size) || 0}px ${Number(style.shadow_size) || 0}px ${style.shadow_color}`;
-        overlay.style.webkitTextStroke = `${Number(style.outline_size) || 0}px ${style.outline_color}`;
-        overlay.style.background = style.gradient ? `linear-gradient(${style.fill_color_1},${style.fill_color_2})` : style.fill_color_1;
-        overlay.style.webkitBackgroundClip = "text";
-        overlay.style.color = "transparent";
-        overlay.style.display = active.length ? "block" : "none";
-        if (style.font_family) {
-            const family = `CineStyleSubtitle_${String(style.font_family).replace(/[^a-zA-Z0-9_]/g, "_")}`;
-            if (!loadedFonts.has(family)) {
-                loadedFonts.add(family);
-                const fontFace = new FontFace(family, `url(${fontUrl(style.font_family)})`);
-                fontFace.load().then((loaded) => { document.fonts.add(loaded); overlay.style.fontFamily = family; }).catch(() => {});
-            } else overlay.style.fontFamily = family;
-        } else overlay.style.fontFamily = "sans-serif";
+        if (localTransformActive) return;
+        schedulePreview();
     }
     function updateReadout() { const now = video.currentTime || 0; current.textContent = formatTime(now); range.textContent = `In ${formatTime(rangeStartSeconds())}  -  Out ${formatTime(rangeEndSeconds())}`; durationLabel.textContent = formatTime(duration); }
     function cuePosition(cue) { const start = ((cue.start - viewStart) / viewDuration) * 100; const width = ((cue.end - cue.start) / viewDuration) * 100; return { left: `${start}%`, width: `${Math.max(0.35, width)}%` }; }
+    let contextMenu = null;
+    function closeContextMenu() {
+        contextMenu?.remove();
+        contextMenu = null;
+    }
+    function showContextMenu(event, items) {
+        closeContextMenu();
+        contextMenu = document.createElement("div");
+        contextMenu.className = "cs-subtitle-context-menu";
+        for (const item of items) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = item.label;
+            button.addEventListener("click", () => { closeContextMenu(); item.action(); });
+            contextMenu.append(button);
+        }
+        document.body.append(contextMenu);
+        contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 160)}px`;
+        contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 100)}px`;
+        setTimeout(() => window.addEventListener("pointerdown", closeContextMenu, { once: true }), 0);
+    }
+    function editCueText(cue, title = "Edit subtitle") {
+        const value = window.prompt(title, cue.text);
+        if (value === null) return false;
+        const text = String(value).trim();
+        if (!text) return false;
+        cue.text = text;
+        return true;
+    }
+    function addCueAt(seconds) {
+        const start = clamp(Number(seconds) || 0, 0, Math.max(0, duration - 0.05));
+        const next = cues.filter((cue) => cue.start > start).sort((a, b) => a.start - b.start)[0];
+        const available = Math.max(0.05, (next ? next.start : duration) - start);
+        const end = start + Math.min(2, available);
+        const cue = { id: cues.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1, start, end, text: "" };
+        if (!editCueText(cue, "New subtitle")) return;
+        cues.push(cue);
+        cues.sort((a, b) => a.start - b.start);
+        selected = cue.id;
+        renderTimeline();
+        updateOverlay();
+    }
     function renderTimeline() {
         viewDuration = clamp(viewDuration, Math.min(duration, 0.5), duration);
         viewStart = clamp(viewStart, 0, Math.max(0, duration - viewDuration));
@@ -236,17 +589,39 @@ function openTimeline(node) {
             item.innerHTML = `<span class="cs-subtitle-cue-handle in"></span><span class="cs-subtitle-cue-label"></span><span class="cs-subtitle-cue-handle out"></span>`;
             item.querySelector(".cs-subtitle-cue-label").textContent = cue.text.replace(/\n/g, " ");
             item.addEventListener("pointerdown", (event) => beginCueDrag(cue, event));
-            item.addEventListener("dblclick", (event) => { event.stopPropagation(); const value = window.prompt("Edit subtitle", cue.text); if (value !== null) { cue.text = value; renderTimeline(); updateOverlay(); } });
+            item.addEventListener("dblclick", (event) => { event.stopPropagation(); if (editCueText(cue)) { renderTimeline(); updateOverlay(); } });
+            item.addEventListener("contextmenu", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                showContextMenu(event, [
+                    { label: "Edit", action: () => { if (editCueText(cue)) { renderTimeline(); updateOverlay(); } } },
+                    { label: "Delete", action: () => { const index = cues.indexOf(cue); if (index >= 0) cues.splice(index, 1); selected = null; renderTimeline(); updateOverlay(); } },
+                ]);
+            });
             item.querySelector(".in").addEventListener("pointerdown", (event) => beginCueEdge(cue, "in", event));
             item.querySelector(".out").addEventListener("pointerdown", (event) => beginCueEdge(cue, "out", event));
             body.append(item);
         }
+        const rangeStart = (rangeStartSeconds() - viewStart) / viewDuration;
+        const rangeEnd = (rangeEndSeconds() - viewStart) / viewDuration;
+        const visibleStart = clamp(Math.min(rangeStart, rangeEnd), 0, 1);
+        const visibleEnd = clamp(Math.max(rangeStart, rangeEnd), 0, 1);
+        rangeBand.style.display = visibleEnd > visibleStart ? "block" : "none";
+        rangeBand.style.left = `${visibleStart * 100}%`;
+        rangeBand.style.width = `${Math.max(0, (visibleEnd - visibleStart) * 100)}%`;
+        rangeBand.querySelector(".in").style.display = rangeStart >= 0 && rangeStart <= 1 ? "block" : "none";
+        rangeBand.querySelector(".out").style.display = rangeEnd >= 0 && rangeEnd <= 1 ? "block" : "none";
         const ratio = duration ? ((video.currentTime || 0) - viewStart) / viewDuration : 0;
         pointer.style.left = `${clamp(ratio, 0, 1) * 100}%`;
         inFrameButton.textContent = String(inFrame);
         outFrameButton.textContent = String(outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame);
         updateReadout(); updateOverlay();
     }
+    body.addEventListener("contextmenu", (event) => {
+        if (event.target.closest?.(".cs-subtitle-cue")) return;
+        event.preventDefault();
+        showContextMenu(event, [{ label: "New subtitle", action: () => addCueAt(secondsAtEvent(event)) }]);
+    });
     function secondsAtEvent(event) { const rect = body.getBoundingClientRect(); return viewStart + clamp((event.clientX - rect.left) / rect.width, 0, 1) * viewDuration; }
     function beginCueDrag(cue, event) {
         if (event.target.classList.contains("cs-subtitle-cue-handle")) return;
@@ -264,39 +639,128 @@ function openTimeline(node) {
     function setFrame(frame) { video.currentTime = clamp(frame / fps, 0, duration); renderTimeline(); }
     function currentFrame() { return Math.round((video.currentTime || 0) * fps); }
     function normalizeRange() { const max = Math.max(0, Math.round(duration * fps) - 1); inFrame = clamp(Math.round(inFrame), 0, max); outFrame = outFrame < 0 ? max : clamp(Math.round(outFrame), 0, max); if (outFrame <= inFrame) outFrame = Math.min(max, inFrame + 1); }
-    function close() { video.pause(); dialog.close(); dialog.remove(); }
+    function close() { video.pause(); closeContextMenu(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); dialog.close(); dialog.remove(); }
 
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".back").addEventListener("click", () => setFrame(currentFrame() - 1));
     dialog.querySelector(".forward").addEventListener("click", () => setFrame(currentFrame() + 1));
     dialog.querySelector(".play").addEventListener("click", () => { if (!video.paused) { video.pause(); return; } normalizeRange(); if (video.currentTime < rangeStartSeconds() || video.currentTime >= rangeEndSeconds()) video.currentTime = rangeStartSeconds(); playingSelection = true; video.play().catch(() => { playingSelection = false; }); });
-    dialog.querySelector(".zoom-in").addEventListener("click", () => { const center = viewStart + viewDuration / 2; viewDuration = Math.max(0.5, viewDuration / 1.6); viewStart = center - viewDuration / 2; renderTimeline(); });
-    dialog.querySelector(".zoom-out").addEventListener("click", () => { const center = viewStart + viewDuration / 2; viewDuration = Math.min(duration, viewDuration * 1.6); viewStart = center - viewDuration / 2; renderTimeline(); });
-    dialog.querySelector(".pan-left").addEventListener("click", () => { viewStart -= viewDuration * 0.25; renderTimeline(); });
-    dialog.querySelector(".pan-right").addEventListener("click", () => { viewStart += viewDuration * 0.25; renderTimeline(); });
-    dialog.querySelector(".move-reset").addEventListener("click", () => { style.position_x = 0.5; style.position_y = 0.88; renderTimeline(); });
-    overlay.addEventListener("pointerdown", (event) => { event.preventDefault(); const startX = event.clientX; const startY = event.clientY; const x = style.position_x; const y = style.position_y; const move = (moveEvent) => { const rect = video.getBoundingClientRect(); style.position_x = clamp(x + (moveEvent.clientX - startX) / rect.width, 0, 1); style.position_y = clamp(y + (moveEvent.clientY - startY) / rect.height, 0, 1); updateOverlay(); }; const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); });
+    dialog.querySelector(".move-reset").addEventListener("click", () => { setStyleInput("position_x", 0.5); setStyleInput("position_y", 0.88); renderTimeline(); updateOverlay(); });
+    function setStyleInput(name, value) {
+        if (name === "position_x" || name === "position_y") value = normalizePosition(value, name === "position_x" ? 0.5 : 0.88);
+        if (Object.prototype.hasOwnProperty.call(COLOR_DEFAULTS, name)) value = normalizeHex(value, COLOR_DEFAULTS[name]);
+        style[name] = value;
+        const input = inputs[name];
+        if (input) input.value = value;
+        updateParamOutput(name, value);
+    }
+    const paramDefaults = { font_size: 30, letter_spacing: 0, position_x: 0.5, position_y: 0.88, outline_size: 2, shadow_size: 3 };
+    dialog.querySelectorAll(".cs-subtitle-param-reset").forEach((button) => {
+        button.addEventListener("click", () => { const name = button.dataset.reset; setStyleInput(name, paramDefaults[name]); updateOverlay(); });
+    });
+    function beginTextDrag(event) {
+        event.preventDefault();
+        previewRequest += 1;
+        const content = imageContentRect();
+        if (!content) return;
+        localTransformActive = true;
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const originX = style.position_x;
+        const originY = style.position_y;
+        let pendingX = originX;
+        let pendingY = originY;
+        const move = (moveEvent) => {
+            const dx = moveEvent.clientX - startX;
+            const dy = moveEvent.clientY - startY;
+            pendingY = clamp(originY + dy / content.height, 0, 1);
+            pendingX = clamp(originX + dx / content.width, 0, 1);
+            setStyleInput("position_x", pendingX);
+            setStyleInput("position_y", pendingY);
+            applyPreviewTransform(dx, dy, 1);
+        };
+        const up = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            window.removeEventListener("pointercancel", up);
+            setStyleInput("position_x", pendingX);
+            setStyleInput("position_y", pendingY);
+            localTransformActive = false;
+            updateOverlay();
+        };
+        window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+    }
+    function beginTextResize(event, handle) {
+        event.preventDefault();
+        event.stopPropagation();
+        previewRequest += 1;
+        localTransformActive = true;
+        const box = interactionBox.getBoundingClientRect();
+        const isRightHandle = handle.classList.contains("ne") || handle.classList.contains("se");
+        const isBottomHandle = handle.classList.contains("sw") || handle.classList.contains("se");
+        const anchorX = isRightHandle ? box.left : box.right;
+        const anchorY = isBottomHandle ? box.top : box.bottom;
+        const startDistance = Math.max(8, Math.max(Math.abs(event.clientX - anchorX), Math.abs(event.clientY - anchorY)));
+        const originSize = finiteNumber(style.font_size, 30);
+        const move = (moveEvent) => {
+            const distance = Math.max(8, Math.max(Math.abs(moveEvent.clientX - anchorX), Math.abs(moveEvent.clientY - anchorY)));
+            const nextSize = clamp(Math.round(originSize * distance / startDistance), 8, 100);
+            setStyleInput("font_size", nextSize);
+            applyPreviewTransform(0, 0, nextSize / originSize);
+        };
+        const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up); localTransformActive = false; updateOverlay(); };
+        window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+    }
+    interactionBox.addEventListener("pointerdown", (event) => {
+        const handle = event.target.closest?.(".cs-subtitle-resize-handle");
+        if (handle) beginTextResize(event, handle);
+        else beginTextDrag(event);
+    });
+    window.addEventListener("resize", updateInteractionBox);
     dialog.querySelector(".cs-subtitle-pointer-row").addEventListener("pointerdown", (event) => { const row = event.currentTarget; const move = (moveEvent) => { const rect = row.getBoundingClientRect(); setFrame(Math.round(clamp((moveEvent.clientX - rect.left) / rect.width, 0, 1) * Math.max(0, Math.round(duration * fps) - 1))); }; const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); move(event); });
     video.addEventListener("timeupdate", () => { if (playingSelection && video.currentTime >= rangeEndSeconds()) { video.pause(); video.currentTime = rangeEndSeconds(); playingSelection = false; } renderTimeline(); });
     video.addEventListener("pause", () => { playingSelection = false; dialog.querySelector(".play").textContent = "Play"; });
     video.addEventListener("play", () => { dialog.querySelector(".play").textContent = "Pause"; });
     dialog.querySelector(".cs-subtitle-close").addEventListener("click", close); dialog.querySelector(".cancel").addEventListener("click", close); dialog.addEventListener("cancel", close);
-    dialog.querySelector(".apply").addEventListener("click", () => {
+    dialog.querySelector(".apply").addEventListener("click", async () => {
         normalizeRange();
-        setWidgetValue(node, "start_frame", inFrame); setWidgetValue(node, "end_frame", outFrame);
-        setWidgetValue(node, "subtitle_data", JSON.stringify(cues));
+        setWidgetValue(node, "preview_in", inFrame); setWidgetValue(node, "preview_out", outFrame);
+        setWidgetValue(node, "position_x", style.position_x); setWidgetValue(node, "position_y", style.position_y);
         for (const [key, input] of Object.entries(inputs)) setWidgetValue(node, key, input.type === "checkbox" ? input.checked : input.value);
-        node.graph?.setDirtyCanvas(true, true); close();
+        try {
+            await saveCachedSrt(node, sourceHash, cuesToSrt(cues));
+            node.graph?.setDirtyCanvas(true, true); close();
+        } catch (error) {
+            status.textContent = error.message;
+        }
     });
     dialog.showModal();
-    dialog.querySelector(".cs-subtitle-file").textContent = filename || "Select a source video in video_file for preview";
+    dialog.querySelector(".cs-subtitle-file").textContent = cachedProxy?.label || filename || "Run the workflow once after restarting ComfyUI to build the subtitle preview cache";
 
-    fetchFonts().then((fonts) => { inputs.font_family.innerHTML = "<option value=\"\">Default</option>"; for (const font of fonts) { const option = document.createElement("option"); option.value = font; option.textContent = font; inputs.font_family.append(option); } if (style.font_family && !fonts.includes(style.font_family)) { const option = document.createElement("option"); option.value = style.font_family; option.textContent = style.font_family; inputs.font_family.append(option); } inputs.font_family.value = style.font_family; }).catch(() => {});
-    if (filename) {
+    fetchFonts().then((fonts) => { inputs.font.innerHTML = ""; for (const font of fonts) { const option = document.createElement("option"); option.value = font; option.textContent = font; inputs.font.append(option); } if (!style.font && fonts.length) style.font = fonts[0]; inputs.font.value = style.font; updateOverlay(); }).catch(() => {});
+    if (cachedProxy) {
+        info = cachedProxy.info || {};
+        fps = Number(info.fps) || 30;
+        duration = Number(info.duration) || duration;
+        outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
+        viewDuration = duration;
+        const useCachedPlayback = () => { video.src = cachedProxy.url; video.load(); normalizeRange(); renderTimeline(); };
+        if (filename) {
+            fetchInfo(filename).then((sourceInfo) => {
+                info = sourceInfo;
+                fps = Number(sourceInfo.fps) || fps;
+                duration = Number(sourceInfo.duration) || duration;
+                outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
+                viewDuration = duration;
+                video.src = sourceInfo.proxy_required ? proxyVideoUrl(filename, sourceInfo.proxy_threshold, sourceInfo.proxy_size) : videoUrl(filename);
+                video.load(); normalizeRange(); renderTimeline();
+            }).catch(useCachedPlayback);
+        } else useCachedPlayback();
+    } else if (filename) {
         fetchInfo(filename).then((result) => { info = result; fps = Number(result.fps) || 30; duration = Number(result.duration) || duration; outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame; viewDuration = duration; video.src = result.proxy_required ? proxyVideoUrl(filename, result.proxy_threshold, result.proxy_size) : videoUrl(filename); video.load(); normalizeRange(); renderTimeline(); }).catch((error) => { status.textContent = error.message; renderTimeline(); });
     } else {
-        status.textContent = "Choose a source video for proxy preview; the connected VIDEO is rendered on execution.";
+        status.textContent = "Run the workflow once after restarting ComfyUI to build the subtitle preview cache and load the external SRT.";
         renderTimeline();
     }
 }
@@ -306,11 +770,23 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE_ID) return;
         const original = nodeType.prototype.onNodeCreated;
+        const originalConfigure = nodeType.prototype.configure;
+        const originalSerialize = nodeType.prototype.onSerialize;
         nodeType.prototype.onNodeCreated = function () {
             original?.apply(this, arguments);
-            const button = this.addWidget("button", "Edit Timeline", "", () => openTimeline(this));
+            const button = this.addWidget("button", "Edit Timeline", "", () => { openTimeline(this).catch((error) => app.canvas?.prompt?.(error.message, "")); });
             button.name = "Edit Timeline"; button.label = "Edit Timeline"; button.options = { ...(button.options || {}), serialize: false };
             this.setSize?.([410, Math.max(380, this.computeSize?.()[1] || 380)]);
+        };
+        nodeType.prototype.configure = function (info) {
+            const configured = configureSubtitleWidgetValues(this, info);
+            originalConfigure?.call(this, configured);
+            applySubtitleWidgetValuesByName(this, info);
+        };
+        nodeType.prototype.onSerialize = function () {
+            originalSerialize?.apply(this, arguments);
+            const data = arguments[0];
+            if (data && typeof data === "object") data.widgets_values = serializeSubtitleWidgetValues(this);
         };
     },
 });

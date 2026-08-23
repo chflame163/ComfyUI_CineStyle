@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import logging
+import importlib
 from fractions import Fraction
 import uuid
 from pathlib import Path
@@ -69,6 +70,43 @@ _SELECTOR_CACHE_LOCK = threading.RLock()
 _SELECTOR_CACHE_LIMIT = 8
 _SELECTOR_CACHE_MAX_BYTES = 4 * 1024**3
 _SEGMENT_LOGGER = logging.getLogger("CineStyleVideoSegment")
+_NESTED_TQDM_LOCK = threading.Lock()
+
+
+def _no_nested_tqdm(iterable: Any, *args: Any, **kwargs: Any) -> Any:
+    return iterable
+
+
+class _NestedTqdmSilencer:
+    """Temporarily hide progress bars emitted inside the bundled model kernels."""
+
+    def __init__(self, module_names: tuple[str, ...]):
+        self.module_names = module_names
+        self._patched: list[tuple[Any, Any]] = []
+        self._locked = False
+
+    def start(self) -> None:
+        _NESTED_TQDM_LOCK.acquire()
+        self._locked = True
+        for module_name in self.module_names:
+            module = sys.modules.get(module_name)
+            if module is None:
+                try:
+                    module = importlib.import_module(module_name)
+                except Exception:
+                    continue
+            if module is None or not hasattr(module, "tqdm"):
+                continue
+            self._patched.append((module, module.tqdm))
+            module.tqdm = _no_nested_tqdm
+
+    def stop(self) -> None:
+        for module, original in reversed(self._patched):
+            module.tqdm = original
+        self._patched.clear()
+        if self._locked:
+            self._locked = False
+            _NESTED_TQDM_LOCK.release()
 
 
 def _segment_info(node_name: str, message: str) -> None:
@@ -86,6 +124,8 @@ class _SegmentProgress:
             total=self.total,
             desc=f"[INFO] [{node_name}] frame processing",
             unit="frame",
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+            mininterval=0.1,
             dynamic_ncols=True,
             leave=True,
         )
@@ -1557,6 +1597,15 @@ class CSVideoSegmentSeC(io.ComfyNode):
         temp_dir = _sec_frame_dir(images)
         _segment_info(node_name, "temporary frame sequence prepared")
         state = None
+        nested_tqdm = _NestedTqdmSilencer(
+            (
+                "sec_inference.modeling_sec",
+                "sec_inference.sam2_video_predictor",
+                "sec_inference.sam2.sam2_video_predictor",
+                "sec_inference.sam2.utils.misc",
+            )
+        )
+        nested_tqdm.start()
         try:
             state = model.grounding_encoder.init_state(
                 video_path=temp_dir,
@@ -1645,6 +1694,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
             _segment_info(node_name, f"complete: frames={frame_count}, object_count={len(prompts)}")
             return io.NodeOutput(output, initial_union, info)
         finally:
+            nested_tqdm.stop()
             try:
                 if state is not None:
                     model.grounding_encoder.reset_state(state)
@@ -1866,16 +1916,21 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         backend_pbar = comfy.utils.ProgressBar(progress_total)
         pbar = _SegmentProgress(node_name, progress_total, backend_pbar)
         _segment_info(node_name, f"propagating masks: direction={propagation_direction}")
-        mask = _propagate(
-            model,
-            images,
-            anchor_mask_objects,
-            anchor,
-            propagation_direction,
-            pbar,
-            object_limit,
-        )
-        pbar.close()
+        nested_tqdm = _NestedTqdmSilencer(("comfy.ldm.sam3.tracker",))
+        nested_tqdm.start()
+        try:
+            mask = _propagate(
+                model,
+                images,
+                anchor_mask_objects,
+                anchor,
+                propagation_direction,
+                pbar,
+                object_limit,
+            )
+        finally:
+            nested_tqdm.stop()
+            pbar.close()
         info = {
             "frame_count": frame_count,
             "height": height,

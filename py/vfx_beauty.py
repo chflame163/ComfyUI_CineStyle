@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import base64
 import io as py_io
+import logging
 import threading
 import urllib.error
 import urllib.request
@@ -36,11 +37,35 @@ _AUTO_COLOUR_FALLBACK = (0.5294118, 0.3803922, 0.3294118)
 _EPS = 1.0e-6
 _VFX_MASK_CACHE: dict[str, torch.Tensor | None] = {}
 _VFX_COLOUR_CACHE: dict[str, torch.Tensor] = {}
+_VFX_PROXY_PRESENT: dict[str, bool] = {}
 _VFX_CACHE_LOCK = threading.RLock()
 _VFX_ROUTE_REGISTERED = False
 _BISE_NET_DOWNLOAD_LOCK = threading.Lock()
 _BISE_NET_HF_URL = "https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth"
 _BISE_NET_OFFICIAL_URL = "https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth"
+_LOGGER = logging.getLogger("CineStyleVFXBeauty")
+
+
+def _console_info(node_id: Any, stage: str, detail: str = "") -> None:
+    suffix = f" | {detail}" if detail else ""
+    node_detail = f"node={node_id} | " if str(node_id or "").strip() else ""
+    _LOGGER.info("[CS VFX Beauty] %s%s%s", node_detail, stage, suffix)
+
+
+class _BeautyProgress:
+    """Console stage logger for the vectorized Beauty batch."""
+
+    def __init__(self, node_id: Any, frame_total: int):
+        self.node_id = node_id
+        self.frame_total = max(1, int(frame_total))
+    def info(self, stage: str, detail: str = "") -> None:
+        _console_info(self.node_id, stage, detail)
+
+    def close_line(self) -> None:
+        return None
+
+    def stage(self, percent: float, stage: str, detail: str = "") -> None:
+        self.info(stage, detail)
 
 
 def _parse_hex_colour(value: Any, name: str = "colour") -> torch.Tensor | None:
@@ -148,10 +173,12 @@ def _load_state_dict(path: Path) -> dict[str, torch.Tensor]:
 
 
 @torch.no_grad()
-def _bisenet_skin_mask(images: torch.Tensor) -> torch.Tensor:
+def _bisenet_skin_mask(images: torch.Tensor, progress: _BeautyProgress | None = None) -> torch.Tensor:
     """Generate a temporary full-frame skin mask at the colour proxy size."""
     model = None
     try:
+        if progress is not None:
+            progress.info("load BiSeNet", f"frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
         model = _bisenet_type()(num_class=19)
         state = _load_state_dict(_bisenet_weights_path())
         model.load_state_dict(state, strict=True)
@@ -162,12 +189,16 @@ def _bisenet_skin_mask(images: torch.Tensor) -> torch.Tensor:
         for start in range(0, network_input.shape[0], 2):
             logits = model(network_input[start : start + 2])[0]
             masks.append(logits.argmax(dim=1).eq(_BISE_NET_SKIN_CLASS).float())
+        if progress is not None:
+            progress.info("BiSeNet complete", "skin mask generated; temporary model will be released")
         return torch.cat(masks, dim=0)
     finally:
         del model
         gc.collect()
         if images.device.type == "cuda":
             torch.cuda.empty_cache()
+        if progress is not None:
+            progress.info("release BiSeNet", "temporary model and CUDA cache released")
 
 
 def _as_rgb(images: torch.Tensor) -> torch.Tensor:
@@ -475,6 +506,7 @@ def _estimate_clip_colour(
     source: torch.Tensor,
     external: torch.Tensor | None,
     alpha: torch.Tensor,
+    progress: _BeautyProgress | None = None,
 ) -> torch.Tensor:
     """Estimate a clip-stable key colour using an optional mask or BiSeNet."""
     _, height, width, _ = source.shape
@@ -488,7 +520,7 @@ def _estimate_clip_colour(
     if external is not None:
         colour_mask = _resize_bhwc(external.unsqueeze(-1), colour_height, colour_width)[..., 0]
     else:
-        colour_mask = _bisenet_skin_mask(colour_image)
+        colour_mask = _bisenet_skin_mask(colour_image, progress=progress)
     fallback = source.new_tensor(_AUTO_COLOUR_FALLBACK)
     colour = _estimate_colour_from_mask(colour_image, colour_mask, colour_alpha, fallback)
     del colour_image, colour_mask, colour_alpha
@@ -655,11 +687,14 @@ def _run_beauty(
     o_amount: float,
     sat_amount: float,
     hue_amount: float,
+    progress: _BeautyProgress | None = None,
 ) -> torch.Tensor:
     source_device = image.device if isinstance(image, torch.Tensor) else torch.device("cpu")
     source = _as_rgb(image).to(device=_preferred_device(source_device), non_blocking=True)
     batch, height, width, _ = source.shape
     device = source.device
+    if progress is not None:
+        progress.info("prepare input", f"frames={batch}, size={width}x{height}, device={device}")
     if isinstance(image, torch.Tensor) and image.shape[-1] >= 4:
         alpha = image[..., 3].to(device=device, dtype=torch.float32, non_blocking=True)
     else:
@@ -670,8 +705,12 @@ def _run_beauty(
         # Colour estimation is deliberately independent from the beauty proxy.
         # It uses a 512-long-side clip sample and is therefore stable across
         # all frames without allocating a full-resolution histogram.
-        colour = _estimate_clip_colour(source, external, alpha)
+        if progress is not None:
+            progress.info("estimate colour", "auto mode; using mask" if external is not None else "auto mode; running BiSeNet")
+        colour = _estimate_clip_colour(source, external, alpha, progress=progress)
     else:
+        if progress is not None:
+            progress.info("use fixed colour", "skipping automatic colour estimation")
         colour = colour.to(device=device, dtype=source.dtype)
 
     longest = max(height, width)
@@ -692,6 +731,11 @@ def _run_beauty(
     proxy_blur_h = float(blur_h) * (scale_x + scale_y) * 0.5
     proxy_blur_s = float(blur_s) * (scale_x + scale_y) * 0.5
 
+    if progress is not None:
+        progress.info("proxy setup", f"proxy={proxy_width}x{proxy_height}")
+
+    if progress is not None:
+        progress.info("run proxy passes", "passes 1-17; internal Torch kernels do not expose per-frame callbacks")
     cleaned_proxy, matte_proxy, degrain_proxy = _compute_proxy(
         proxy_source,
         proxy_external,
@@ -707,6 +751,8 @@ def _run_beauty(
         proxy_blur_s,
         o_amount,
     )
+    if progress is not None:
+        progress.info("proxy passes complete")
 
     cleaned = _resize_bhwc(cleaned_proxy, height, width)
     degrain = _resize_bhwc(degrain_proxy, height, width)
@@ -723,6 +769,9 @@ def _run_beauty(
     result = matte * shifted + (1.0 - matte) * result
     result = torch.nan_to_num(result, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
     output = torch.cat((result, matte), dim=-1)
+    if progress is not None:
+        progress.info("final colour pass", "regrain and YUV hue/saturation adjustment complete")
+        progress.info("complete", f"frames={batch}")
     return output.to(device=source_device, non_blocking=True)
 
 
@@ -738,18 +787,32 @@ def _video_segment_module() -> Any | None:
     )
 
 
-def _cache_vfx_input(node_id: Any, prompt: Any, image: torch.Tensor, mask: torch.Tensor | None) -> None:
+def _cache_vfx_input(
+    node_id: Any,
+    prompt: Any,
+    image: torch.Tensor,
+    mask: torch.Tensor | None,
+    proxy_video: Any = None,
+) -> None:
     """Make the last node input available to the browser preview dialog."""
     key = str(node_id or "").strip()
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
     selector = _video_segment_module()
+    proxy_present = False
     if selector is not None:
         try:
             fps = selector._video_input_fps(None, prompt, key)
             selector._cache_selector_input(key, image, fps)
         except Exception as exc:
             print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
+        try:
+            proxy_images = proxy_video.get_components().images if proxy_video is not None else None
+            if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
+                proxy_fps = selector._video_input_fps(proxy_video, prompt, key)
+                proxy_present = selector._cache_selector_input(f"{key}:proxy", proxy_images, proxy_fps) is not None
+        except Exception as exc:
+            print(f"[CineStyle] VFX Beauty proxy cache failed for node {key}: {exc}")
     cached_mask = None
     if isinstance(mask, torch.Tensor) and mask.ndim >= 3:
         cached_mask = mask.detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -758,6 +821,7 @@ def _cache_vfx_input(node_id: Any, prompt: Any, image: torch.Tensor, mask: torch
     with _VFX_CACHE_LOCK:
         _VFX_MASK_CACHE[key] = cached_mask
         _VFX_COLOUR_CACHE.pop(key, None)
+        _VFX_PROXY_PRESENT[key] = proxy_present
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
@@ -768,6 +832,36 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
         return selector._selector_cache_for_node(node_id)
     except Exception:
         return None
+
+
+def _preview_proxy_cache_entry(node_id: str) -> dict[str, Any] | None:
+    selector = _video_segment_module()
+    if selector is None:
+        return None
+    with _VFX_CACHE_LOCK:
+        if not _VFX_PROXY_PRESENT.get(node_id, False):
+            return None
+    try:
+        return selector._selector_cache_for_node(f"{node_id}:proxy")
+    except Exception:
+        return None
+
+
+def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str) -> int:
+    """Map a proxy frame to the corresponding original mask frame."""
+    selector = _video_segment_module()
+    if selector is None:
+        return frame_index
+    try:
+        source_entry = selector._selector_cache_for_token(source_token)
+        original_entry = selector._selector_cache_for_node(node_id)
+        source_count = int((source_entry or {}).get("info", {}).get("frames") or 0)
+        original_count = int((original_entry or {}).get("info", {}).get("frames") or 0)
+        if source_count > 1 and original_count > 1 and source_count != original_count:
+            return int(round(frame_index * (original_count - 1) / (source_count - 1)))
+    except Exception:
+        pass
+    return frame_index
 
 
 def _preview_mask_for_node(node_id: str, frame_index: int, height: int, width: int) -> torch.Tensor | None:
@@ -849,19 +943,21 @@ def _preview_float(payload: dict[str, Any], name: str, default: float) -> float:
 
 async def _vfx_beauty_cache_info_route(request: web.Request) -> web.Response:
     node_id = str(request.query.get("node_id") or "").strip()
-    entry = _preview_cache_entry(node_id)
+    entry = _preview_proxy_cache_entry(node_id) or _preview_cache_entry(node_id)
     if entry is None:
         return web.json_response({"error": "Run the workflow once to cache the VFX Beauty input."}, status=404)
     info = dict(entry.get("info") or {})
     with _VFX_CACHE_LOCK:
         has_mask = node_id in _VFX_MASK_CACHE and _VFX_MASK_CACHE[node_id] is not None
+        uses_proxy = bool(_VFX_PROXY_PRESENT.get(node_id, False)) and _preview_proxy_cache_entry(node_id) is not None
     return web.json_response(
         {
             "token": str(entry.get("token") or ""),
-            "label": "Cached input from the last workflow run",
+            "label": "Proxy input from the last workflow run" if uses_proxy else "Cached input from the last workflow run",
             "video_url": f"/cinestyle/video-selector-cache-video?token={entry.get('token')}",
             "info": info,
             "has_mask": has_mask,
+            "uses_proxy": uses_proxy,
         }
     )
 
@@ -880,7 +976,8 @@ async def _vfx_beauty_preview_route(request: web.Request) -> web.Response:
             raise ValueError("The shared video selector cache is unavailable.")
         frame = selector._decode_selector_frame(payload, frame_index)
         height, width = int(frame.shape[1]), int(frame.shape[2])
-        mask = _preview_mask_for_node(node_id, frame_index, height, width)
+        mask_index = _preview_mask_frame_index(node_id, frame_index, str(payload.get("source_token") or ""))
+        mask = _preview_mask_for_node(node_id, mask_index, height, width)
         colour, colour_label = _preview_colour(node_id, payload.get("colour", "auto"), frame, mask)
         output = _run_beauty(
             frame,
@@ -926,6 +1023,7 @@ class CSVFXBeauty(io.ComfyNode):
             inputs=[
                 io.Image.Input("image", tooltip="Original foreground image."),
                 io.Mask.Input("mask", optional=True, tooltip="Optional skin mask. When connected, it is used automatically for the beauty region and colour estimation."),
+                io.Video.Input("proxy_video", optional=True, tooltip="Optional proxy VIDEO used only by VFX Preview. Rendering still uses image."),
                 io.String.Input("colour", default="auto", tooltip="Use auto for clip skin-colour estimation, or enter a #RRGGBB value to bypass automatic estimation."),
                 io.String.Input("weights", default="6.0, 0.0, 3.0", tooltip="HSV keying weights vec3."),
                 io.Float.Input("blur_m", default=10.0, min=0.0, max=100.0, step=0.01, display_name="Soften"),
@@ -953,6 +1051,7 @@ class CSVFXBeauty(io.ComfyNode):
         cls,
         image: torch.Tensor,
         mask: torch.Tensor | None = None,
+        proxy_video: Any = None,
         colour: Any = "auto",
         weights: Any = "6.0, 0.0, 3.0",
         blur_m: float = 10.0,
@@ -967,32 +1066,45 @@ class CSVFXBeauty(io.ComfyNode):
         sat_amount: float = 100.0,
         hue_amount: float = 0.0,
     ) -> io.NodeOutput:
-        _cache_vfx_input(
-            getattr(cls, "hidden", None) and getattr(cls.hidden, "unique_id", ""),
-            getattr(cls, "hidden", None) and getattr(cls.hidden, "prompt", None),
-            image,
-            mask,
-        )
-        colour_tensor = _parse_hex_colour(colour)
-        weights_tensor = _parse_vec3(weights, (6.0, 0.0, 3.0), "weights")
-        output = _run_beauty(
-            image,
-            mask,
-            colour_tensor,
-            weights_tensor,
-            float(blur_m),
-            float(sigma),
-            float(threshold),
-            float(r_spots_blend),
-            float(r_h_blend),
-            float(strength),
-            float(blur_h),
-            float(blur_s),
-            float(o_amount),
-            float(sat_amount),
-            float(hue_amount),
-        )
-        return io.NodeOutput(output[..., :3], output[..., 3])
+        node_id = getattr(cls, "hidden", None) and getattr(cls.hidden, "unique_id", "")
+        prompt = getattr(cls, "hidden", None) and getattr(cls.hidden, "prompt", None)
+        frame_total = int(image.shape[0]) if isinstance(image, torch.Tensor) and image.ndim >= 1 else 1
+        progress = _BeautyProgress(node_id, frame_total)
+        progress.info("start", f"frames={frame_total}")
+        try:
+            progress.info("cache input", "storing frames and optional mask for VFX Preview")
+            _cache_vfx_input(node_id, prompt, image, mask, proxy_video)
+            progress.info("cache input complete")
+
+            colour_tensor = _parse_hex_colour(colour)
+            weights_tensor = _parse_vec3(weights, (6.0, 0.0, 3.0), "weights")
+            progress.info("validate parameters", f"colour={'auto' if colour_tensor is None else 'fixed'}")
+            progress.info("process frame batch", "using the original vectorized Torch path")
+            output = _run_beauty(
+                image,
+                mask,
+                colour_tensor,
+                weights_tensor,
+                float(blur_m),
+                float(sigma),
+                float(threshold),
+                float(r_spots_blend),
+                float(r_h_blend),
+                float(strength),
+                float(blur_h),
+                float(blur_s),
+                float(o_amount),
+                float(sat_amount),
+                float(hue_amount),
+                progress=progress,
+            )
+            progress.info("outputs", "returning RGB IMAGE and skin Matte MASK")
+            return io.NodeOutput(output[..., :3], output[..., 3])
+        except Exception:
+            progress.info("failed", "see traceback for the exception details")
+            raise
+        finally:
+            progress.close_line()
 
 
 class VFXBeautyExtension(ComfyExtension):

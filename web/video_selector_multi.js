@@ -25,9 +25,9 @@ async function fetchInfo(filename) {
     if (isImageFilename(filename)) return fetchImageInfo(filename);
     const response = await api.fetchApi(`/cinestyle/video-info?${new URLSearchParams({ filename })}`); if (!response.ok) throw new Error(await response.text()); return response.json();
 }
-async function fetchCachedSource(node) {
+async function fetchCachedSource(node, suffix = "") {
     const nodeId = String(node?.id ?? "").trim(); if (!nodeId) return null;
-    const response = await api.fetchApi(`/cinestyle/video-selector-cache?${new URLSearchParams({ node_id: nodeId, t: String(Date.now()) })}`);
+    const response = await api.fetchApi(`/cinestyle/video-selector-cache?${new URLSearchParams({ node_id: `${nodeId}${suffix}`, t: String(Date.now()) })}`);
     if (response.status === 404) return null;
     const result = await response.json(); if (!response.ok) throw new Error(result.error || "Unable to read cached Selector input");
     const info = result.info || {};
@@ -69,8 +69,7 @@ function sourceFromOrigin(origin, visited = new Set()) {
     return null;
 }
 function connectedVideoSource(node, inputNames = ["images", "video_input"]) {
-    const imagesOrigin = connectedOrigin(node, "images");
-    const origins = imagesOrigin ? [imagesOrigin] : inputNames.filter((name) => name !== "images").map((name) => connectedOrigin(node, name));
+    const origins = inputNames.map((name) => connectedOrigin(node, name)).filter(Boolean);
     for (const origin of origins) { const source = sourceFromOrigin(origin); if (source) return source; }
     return null;
 }
@@ -103,7 +102,9 @@ function addStyles() {
 
 async function openSelector(node, config) {
     const names = { frame: "anchor_frame", prompt: "prompt_data", ...(config.widgets || {}) };
-    let source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
+    let source = connectedVideoSource(node, ["proxy_video"]);
+    if (!source) { try { source = await fetchCachedSource(node, ":proxy"); } catch { source = null; } }
+    if (!source) source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
     if (!source) { try { source = await fetchCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; } if (!source) { app.canvas?.prompt?.("Run the workflow once to cache the connected video input before opening the selector", ""); return; } }
     const filename = source.filename; const sourceLabel = source.label || filename; addStyles();
     const dialog = document.createElement("dialog"); dialog.className = "cs-vseg-dialog";

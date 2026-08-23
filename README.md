@@ -21,11 +21,11 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ## 更新说明
 
-* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理。
-* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
-* 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
+* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理，支持独立的预览代理输入。
+* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask；Selector 支持预览代理。
+* 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask；Selector 支持预览代理。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
-* 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率等。
+* 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率和大视频预览代理。
 * 添加 `CS Video Subtitle Track` 节点，将 SRT 作为可编辑字幕轨叠加到标准 `VIDEO`，支持字体、渐变填充、描边、阴影和位置预览。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
 
@@ -46,12 +46,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - 视频预览窗口的白色播放键仍然播放完整视频，不受入出点限制。
 - 开启保持宽高比后，修改宽度或高度会自动联动另一项。
 - 输出尺寸可以自动四舍五入到指定倍数，适合视频模型常见的尺寸要求。
-- 入点、出点、宽度、高度和 FPS 会保存到 ComfyUI 工作流中，重新打开工作流后仍可复现相同设置。
-- 输出同时包含图像帧批次、音频和结构化视频信息。
-- 打开 Edit Timeline 时，如果原视频超过 `proxy threshold`，界面会自动生成保持宽高比的 `proxy size` 像素预览代理，降低大视频预览的内存和解码压力；节点最终输出仍使用原视频。
-- 时间线 `Play` 按钮会同步播放预览视频的音频。
-- 生成代理时，预览窗口会显示 `Wait for Generate Proxy xx%` 进度。
-- 节点执行时会在 ComfyUI 后台输出当前阶段；帧选择、FPS、尺寸和代理帧处理会显示处理进度。
+- 打开 Edit Timeline 时，如果当前预览分辨率超过 `proxy_threshold`，界面会自动生成保持宽高比、目标像素为 `proxy_size` 的预览代理，降低大视频预览的内存和解码压力；节点最终输出仍使用原视频。
 
 #### 节点选项说明：
 ![CS Load Video 节点](images/CS_Load_Video_node.jpg)
@@ -63,8 +58,8 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - width： 整数，默认`0`。 输出宽度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。 
 - height： 整数，默认`0`。 输出高度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。 
 - fps： 浮点数，默认 `0`。 输出帧率。`0` 表示保留源视频帧率；输入其他数值时会按目标帧率重新采样帧。 
-- proxy threshold：浮点数，单位 MPixels，默认 `2.1`。仅当原视频总像素超过该阈值时生成预览代理；1920×1080 约为 2.074 MPixels，严格按数值不会触发代理。
-- proxy size：浮点数，单位 MPixels，默认 `0.8`。生成代理时的目标总像素；代理会保持原始宽高比并将边长调整为偶数。
+- proxy_threshold：浮点数，单位 MPixels，默认 `2.1`，范围 `0.1–1000.0`。当前预览或输出分辨率的总像素超过该阈值时才生成代理。
+- proxy_size：浮点数，单位 MPixels，默认 `0.8`，范围 `0.1–1000.0`。生成代理时的目标总像素。
 - choose file to upload：点击按钮从本地加载视频。
 - Edit Timeline：进入时间线界面。
 其中 `start_frame`、`end_frame`、`width`、`height` 和 `fps` 可通过 `Edit Timeline` 窗口设置或在节点控件中直接编辑。
@@ -73,8 +68,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ![Edit Timeline 时间线界面](images/CS_Load_Video_UI.jpg)
 
-时间线界面从上到下依次包含视频预览、时间读数、当前帧指针、入出点标记栏、时间线操作按钮和输出参数。
-
+时间线界面从上到下依次包含视频预览、原视频信息、时间读数、当前帧指针、入出点标记栏、时间线操作按钮和输出参数。
 
 ##### 入点和出点标记
 
@@ -87,27 +81,20 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 ##### 时间线按钮
 - `Set In`：将视频预览当前帧设为入点。如果当前帧晚于出点，会自动修正出点。
-- 入点帧数栏：显示当前入点帧号，点击可跳转到入点。
+- 入点指示：显示当前入点帧号，点击可跳转到入点。
 - `|<`： 跳转到上一帧。只受视频首帧限制，不受入点限制。 
 - `Play`: 只播放从入点到出点的内容，播放到出点后自动暂停。再次播放时，如果当前帧不在范围内，会从入点重新开始。 
 - `>|`: 跳转到下一帧。只受视频尾帧限制，不受出点限制。 
-- 出点帧数栏：显示当前出点帧号，点击可跳转到出点。
+- 出点指示：显示当前出点帧号，点击可跳转到出点。
 - `Set Out`： 将视频预览当前帧设为出点。如果当前帧早于入点，会自动修正入点。 
 
 #### 输出说明
 - video：标准 ComfyUI `VIDEO` 类型，包含时间线选段、尺寸、帧率和音频，可直接连接官方视频节点。
-- proxy_video：预览代理对象输出，与 `video` 保持相同的入出点、帧数、帧顺序、FPS 和音频。超过阈值时仅缩小帧尺寸；未超过阈值时直接复用 `video` 对象本身，避免再次编码和解码。
+- proxy_video：预览代理对象输出，与 `video` 保持相同的入出点、帧数、帧顺序、FPS 和音频。
 - IMAGE: 输出的video图像帧批次。
 - frame_count: 实际输出帧数。修改 FPS 后，该数值可能与源视频选段帧数不同。 
 - audio: 选定时间范围内的音频。没有音频轨道时输出为空。 
-- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息。
-
-
-### CS Video Subtitle Track
-
-输入标准 ComfyUI `VIDEO` 和 SRT 文本，执行后输出带字幕画面的 `VIDEO`，原音频会透传。节点上的 `Edit Timeline` 使用独立的 Video/Subtitles 双轨编辑区：视频轨不可编辑，字幕片段可以移动、调整 In/Out，双击片段可编辑文本；时间线支持缩放、左右平移、出入点预览和字幕拖动定位。点击 `Apply` 后，字幕片段、字体、字号、双色渐变、对齐、描边、阴影和位置都会写回节点参数。
-
-`video_file` 是可选的源视频引用，仅用于浏览器生成预览代理；实际渲染使用连接的标准 `VIDEO` 输入。字体从 `ComfyUI/models/fonts` 目录读取。
+- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息，以及 `proxy_threshold`、`proxy_size` 和 `proxy_video` 标志。
 
 
 ### CS Save Video
@@ -124,21 +111,32 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 ### CS VFX Beauty
 为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动加载 BiSeNet 生成内部皮肤区域，仅用于估算目标肤色，不作为输出。
 
-![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
+#### 部署 BiSeNet 权重
+
+权重文件 `parsing_bisenet.pth`放置于：
+
+```text
+ComfyUI/models/facexlib/parsing_bisenet.pth
+```
+
+首次运行且本地不存在权重时，节点会自动从 FaceXLib 上游官方的 [GitHub Release 下载地址](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 或者 Hugging Face 上的 [parsing_bisenet.pth 镜像](https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth) 下载权重。
+也可以手动下载后放置到 `ComfyUI/models/facexlib/parsing_bisenet.pth`。
+
 
 #### 使用流程
 
 - 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点。
+- 如果上游节点提供低分辨率预览代理，可将其连接到 `proxy_video`；该输入只供 `VFX Preview` 显示，不参与 Beauty 实际渲染。
 - 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
 - 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
 - 直接执行工作流得到处理结果。对于上游由其他节点运行时生成的图片或视频，先执行一次工作流，再打开 `VFX Preview` 建立可预览缓存。
 - 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 将预览参数写回节点，再重新执行工作流。
 
 #### 节点选项说明
-
+![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
 - image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
 - mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域；不需要额外的 External Matte 开关。
-- proxy_video：可选标准 ComfyUI `VIDEO`，只用于 `VFX Preview` 的前端显示和逐帧预览；节点实际渲染始终使用 `image`，不会用 proxy 替换原始处理数据。
+- proxy_video：可选标准 ComfyUI `VIDEO`，只用于 `VFX Preview` 的前端显示和逐帧预览。
 - colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
 - weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时重新写回该字符串。
 - blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
@@ -164,7 +162,6 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
 - **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
 - **Apply to Node**：将当前颜色（如果修改过）、Weights 和所有参数写回节点。未修改 `colour` 时会保留节点原有的 `auto` 或 Hex 值。
-- 预览来源按以下顺序回溯：先递归查找 `proxy_video`，失败后递归查找 `image`；两者都无法找到文件时，再读取节点上一次执行缓存的 proxy 或 IMAGE/MASK。直接可追溯到文件时，也可读取上游 Load Image 或视频文件。节点实际处理仍始终使用 `image`。
 
 #### 自动肤色估计
 
@@ -175,20 +172,6 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
 - `MASK`：本节点最终使用的皮肤处理 Matte，范围为 `0–1`，可连接到其他 ComfyUI Mask 节点。
 
-#### 后台处理信息
-
-节点执行时会在 ComfyUI 后台控制台按统一 logging 格式输出绿色 `[INFO]` 和白色 `[CS VFX Beauty]` 阶段日志，包括输入缓存、参数校验、自动肤色、代理尺寸、代理 Pass、最终颜色处理和输出阶段。Beauty 保持整批向量化 Torch 处理逻辑；由于内部 kernel 无法取得逐帧回调，本节点不输出伪造的 tqdm 帧进度，只报告当前处理阶段。
-
-#### 部署 BiSeNet 权重
-
-权重文件 `parsing_bisenet.pth`放置于：
-
-```text
-ComfyUI/models/facexlib/parsing_bisenet.pth
-```
-
-首次运行且本地不存在权重时，节点会自动从 FaceXLib 上游官方的 [GitHub Release 下载地址](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 或者 Hugging Face 上的 [parsing_bisenet.pth 镜像](https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth) 下载权重。
-也可以手动下载后放置到 `ComfyUI/models/facexlib/parsing_bisenet.pth`。
 
 
 ### CS SeC-4B Model Loader
@@ -223,8 +206,6 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 ### CS Video Segment (SeC-4B)
 使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在锚点帧用多个 BBox、多个正负 Point 和粗略 Mask 定义对象，并传播到整段视频。
 
-![CS Video Segment (SeC-4B) 节点](images/CS_Video_Segment(Sec-4B)_node.jpg)
-
 #### 使用流程
 
 1. 先执行 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader)，再把输出的 `SEC_MODEL` 连接到节点的 `model`。
@@ -233,14 +214,14 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
 
-Selector 会递归查找上游的官方或第三方视频/图片加载节点，包括官方和第三方 `Load Image`。单张图片按单帧输入显示；对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
+对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
 
 #### 节点选项说明
-
+![CS Video Segment (SeC-4B) 节点](images/CS_Video_Segment(Sec-4B)_node.jpg)
 - `model`：`CS SeC-4B Model Loader` 输出的 `SEC_MODEL`，必需输入。
 - `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
-- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示；节点运行时始终使用原始 `images`（未连接时才使用 `video_input`）进行分割和传播。Selector 会先递归查找 `proxy_video`，失败后再递归查找 `images` / `video_input`。
+- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的多对象 Mask、BBox 和 Point 提示数据，不建议手动编辑。
 - `tracking_direction`：传播方向，`bidirectional` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -256,14 +237,10 @@ Selector 会递归查找上游的官方或第三方视频/图片加载节点，�
 - `anchor_mask`：锚点帧的合并分割 mask。
 - `video_info`：包含帧数、尺寸、锚点帧、传播方向和对象数量。
 
-节点执行时会在 ComfyUI 后台按统一格式输出绿色 `[INFO]`、白色 `[CS Video Segment (SeC-4B)]` 的阶段信息；逐帧传播阶段会显示 tqdm 风格的处理进度。
-
 ### CS Video Segment (SAM3.1)
 使用 ComfyUI 官方 SAM3/SAM3.1 模型和推理内核，把 Selector 中定义在锚点帧的多个对象提示传播到整段视频。
 
 SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1)。下载后放入 ComfyUI 的 `models/checkpoints`
-
-![CS Video Segment (SAM3.1) 节点](images/CS_Video_Segment(SAM3.1)_node.jpg)
 
 #### 使用流程
 
@@ -273,14 +250,12 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
 
-Selector 会递归查找上游的官方或第三方视频/图片加载节点。如果输入来自中间生成节点、无法在打开 Selector 时直接追溯到文件，先运行一次工作流；节点会缓存最近一次实际收到的帧，Selector 随后使用这份缓存。
-
 #### 节点选项说明
-
+![CS Video Segment (SAM3.1) 节点](images/CS_Video_Segment(SAM3.1)_node.jpg)
 - `model`：官方 SAM3/SAM3.1 模型，必需输入。
 - `images`：可选 `IMAGE` 帧批次。连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入。仅在 `images` 未连接时使用。
-- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示；节点运行时始终使用原始 `images`（未连接时才使用 `video_input`）进行 SAM3.1 推理和传播。Selector 会先递归查找 `proxy_video`，失败后再递归查找 `images` / `video_input`。
+- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始。通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的 Mask、BBox、Point 和对象列表，不建议手动编辑。
 - `propagation_direction`：传播方向，`both` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -288,14 +263,9 @@ Selector 会递归查找上游的官方或第三方视频/图片加载节点。�
 - `Open Selector`：打开交互式提示编辑器。
 
 #### 输出说明
-
 - `mask`：形状为 `[帧数, 高, 宽]` 的整段视频 mask。
 - `anchor_mask`：锚点帧的分割 mask。
 - `video_info`：包含帧数、尺寸、锚点帧、传播方向和对象数量。
-
-节点执行时会在 ComfyUI 后台按统一格式输出绿色 `[INFO]`、白色 `[CS Video Segment (SAM3.1)]` 的阶段信息；SAM3.1 逐帧传播阶段会显示 tqdm 风格的处理进度，无法取得逐帧回调的阶段只输出当前工作信息。
-
-
 
 ## Selector 使用说明
 

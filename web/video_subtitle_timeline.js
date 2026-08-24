@@ -4,6 +4,7 @@ import { createCineStyleTextEditor } from "./cinestyle_text_editor.js";
 
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
+const SOURCE_VIDEO_REQUIRED_MESSAGE = "找不到可访问的源视频文件，请先执行一次节点并保持源视频路径有效。";
 const PERSISTED_WIDGET_NAMES = [
     "edited_srt", "preview_in", "preview_out", "font", "font_size", "primary_color", "secondary_color",
     "gradient", "text_align", "italic", "letter_spacing", "position_x", "position_y",
@@ -61,6 +62,14 @@ function serializeSubtitleWidgetValues(node) {
     return PERSISTED_WIDGET_NAMES.map((name) => widget(node, name)?.value ?? null);
 }
 function graphNode(graph, id) { return graph?.getNodeById?.(id) || (graph?._nodes || []).find((item) => String(item?.id) === String(id)) || null; }
+function filenameValue(value) {
+    if (typeof value === "string") return value.trim();
+    if (!value || typeof value !== "object") return "";
+    for (const key of ["filename", "video", "video_path", "path", "source"]) {
+        if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+    }
+    return "";
+}
 function connectedVideoFilename(node) {
     const visited = new Set();
     function findFilename(origin) {
@@ -69,8 +78,8 @@ function connectedVideoFilename(node) {
         if (visited.has(identity)) return "";
         visited.add(identity);
         for (const name of ["video", "file", "filename", "video_file", "path", "filepath", "input", "source"]) {
-            const value = widget(origin, name)?.value;
-            if (typeof value === "string" && /\.(mp4|mov|mkv|avi|webm|m4v|mpg|mpeg|wmv|flv)(?:\s*\[[^\]]+\])?$/i.test(value.trim())) return value.trim();
+            const value = filenameValue(widget(origin, name)?.value);
+            if (/\.(mp4|mov|mkv|avi|webm|m4v|mpg|mpeg|wmv|flv)(?:\s*\[[^\]]+\])?$/i.test(value)) return value;
         }
         for (const input of origin.inputs || []) {
             const upstream = connectedOrigin(origin, input.name);
@@ -476,7 +485,7 @@ async function openTimeline(node) {
             overlayImage.removeAttribute("src");
             overlayImage.style.display = "none";
             status.textContent = response.status === 404
-                ? "Run the workflow once after restarting ComfyUI to build the subtitle preview cache."
+                ? SOURCE_VIDEO_REQUIRED_MESSAGE
                 : "Pillow subtitle preview is unavailable.";
             return;
         }
@@ -957,14 +966,14 @@ async function openTimeline(node) {
             normalizeRange();
             renderTimeline();
         } else {
-            status.textContent = "Run the workflow once after restarting ComfyUI to build the subtitle preview cache and load the external SRT.";
+            status.textContent = SOURCE_VIDEO_REQUIRED_MESSAGE;
             renderTimeline();
         }
         setLoading("", false);
     };
     void initialize().catch((error) => {
         setLoading("Unable to initialize subtitle preview", false);
-        status.textContent = error?.message || "Unable to initialize subtitle preview.";
+        status.textContent = filename ? SOURCE_VIDEO_REQUIRED_MESSAGE : (error?.message || SOURCE_VIDEO_REQUIRED_MESSAGE);
         renderTimeline();
     });
 }

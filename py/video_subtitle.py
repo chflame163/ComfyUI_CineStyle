@@ -7,6 +7,7 @@ import sys
 import json
 import hashlib
 import importlib.util
+import logging
 import os
 import tempfile
 import uuid
@@ -18,6 +19,11 @@ from typing import Any
 import av
 import numpy as np
 import torch
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - ComfyUI normally provides tqdm
+    tqdm = None
 
 import folder_paths
 from comfy_api.latest import ComfyExtension, InputImpl, Types, io
@@ -32,6 +38,36 @@ _SUBTITLE_PREVIEW_CACHE_ROOT = Path(tempfile.gettempdir()) / "cinestyle_subtitle
 _SUBTITLE_PREVIEW_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 _SUBTITLE_PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
 _SUBTITLE_MAIN_VIDEO_CACHE: dict[str, dict[str, Any]] = {}
+_SUBTITLE_LOGGER = logging.getLogger("CineStyleVideoSubtitle")
+
+
+def _subtitle_info(message: str, *args: Any) -> None:
+    _SUBTITLE_LOGGER.info("[CS Video Subtitle] " + message, *args)
+
+
+class _SubtitleProgress:
+    """Emit the same console-friendly progress style as the video nodes."""
+
+    def __init__(self, total: int, description: str = "frame processing"):
+        self.bar = None
+        if tqdm is not None:
+            self.bar = tqdm(
+                total=max(1, int(total)),
+                desc=f"[INFO] [CS Video Subtitle] {description}",
+                unit="frame",
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                mininterval=0.1,
+                dynamic_ncols=True,
+                leave=True,
+            )
+
+    def update(self, amount: int = 1) -> None:
+        if self.bar is not None:
+            self.bar.update(max(0, int(amount)))
+
+    def close(self) -> None:
+        if self.bar is not None:
+            self.bar.close()
 
 
 def _fonts_root() -> Path:
@@ -211,7 +247,7 @@ def _cache_video_source(
         frames, safe_fps, info, audio = _extract_video_frames(video)
         return _store_frame_cache(frames, safe_fps, info, node_id, target_cache, cache_label, encode_video, audio)
     except Exception as exc:
-        print(f"[INFO] [CS Video Subtitle] {cache_label} cache unavailable: {exc}")
+        _subtitle_info("%s cache unavailable: %s", cache_label, exc)
     return False
 
 
@@ -261,9 +297,13 @@ def _store_frame_cache(
         "info": info,
         "audio": _prepare_audio(audio) if video_path is None else None,
     }
-    print(
-        f"[INFO] [CS Video Subtitle] {cache_label} cache ready: "
-        f"frames={info['frames']}, size={info['width']}x{info['height']}, fps={safe_fps:.3f}"
+    _subtitle_info(
+        "%s cache ready: frames=%d, size=%dx%d, fps=%.3f",
+        cache_label,
+        info["frames"],
+        info["width"],
+        info["height"],
+        safe_fps,
     )
     return True
 
@@ -315,7 +355,7 @@ def _cache_main_video_from_file(filename: str, node_id: Any) -> bool:
                                 "sample_rate": sample_rate,
                             }
         except Exception as exc:
-            print(f"[INFO] [CS Video Subtitle] source audio cache unavailable: {exc}")
+            _subtitle_info("source audio cache unavailable: %s", exc)
         info = {
             "frames": int(array.shape[0]),
             "width": int(array.shape[2]),
@@ -334,7 +374,7 @@ def _cache_main_video_from_file(filename: str, node_id: Any) -> bool:
             audio=audio,
         )
     except Exception as exc:
-        print(f"[INFO] [CS Video Subtitle] main video file cache unavailable: {exc}")
+        _subtitle_info("main video file cache unavailable: %s", exc)
         return False
 
 
@@ -364,10 +404,10 @@ def _ensure_preview_video(entry: dict[str, Any], node_id: str) -> dict[str, Any]
         _encode_preview_video(video_path, np.asarray(frames), fps, entry.get("audio"))
         entry["video_path"] = str(video_path)
         _SUBTITLE_PREVIEW_CACHE[node_id] = entry
-        print("[INFO] [CS Video Subtitle] preview video rebuilt from main video frames")
+        _subtitle_info("preview video rebuilt from main video frames")
         return entry
     except Exception as exc:
-        print(f"[INFO] [CS Video Subtitle] preview video rebuild unavailable: {exc}")
+        _subtitle_info("preview video rebuild unavailable: %s", exc)
         return None
 
 
@@ -387,7 +427,7 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
             frames = np.load(str(main_entry["frames_path"]), mmap_mode="r", allow_pickle=False)
             if frames.ndim == 4 and frames.shape[0] > 0:
                 _SUBTITLE_PREVIEW_CACHE[node_id] = dict(main_entry)
-                print("[INFO] [CS Video Subtitle] preview frame cache rebuilt from main video cache")
+                _subtitle_info("preview frame cache rebuilt from main video cache")
                 return _SUBTITLE_PREVIEW_CACHE[node_id]
     except (OSError, ValueError, KeyError):
         pass
@@ -400,7 +440,7 @@ def _preview_entry_for_request(node_id: str, video_filename: str = "") -> dict[s
         return entry
     if _cache_main_video_from_file(video_filename, node_id):
         _SUBTITLE_PREVIEW_CACHE[node_id] = dict(_SUBTITLE_MAIN_VIDEO_CACHE[node_id])
-        print("[INFO] [CS Video Subtitle] preview cache created from connected main video file")
+        _subtitle_info("preview cache created from connected main video file")
         return _preview_cache_entry(node_id)
     return None
 
@@ -411,45 +451,50 @@ def _encode_preview_video(path: Path, frames: np.ndarray, fps: float, audio: Any
     encoded_width = width + (width % 2)
     encoded_height = height + (height % 2)
     rate = Fraction(float(fps)).limit_denominator(1000)
-    with av.open(str(path), mode="w", format="mp4") as container:
-        try:
-            stream = container.add_stream("libx264", rate=rate)
-            stream.options = {"preset": "ultrafast", "crf": "20"}
-        except (av.error.FFmpegError, ValueError):
-            stream = container.add_stream("mpeg4", rate=rate)
-        stream.width = encoded_width
-        stream.height = encoded_height
-        stream.pix_fmt = "yuv420p"
-        audio_stream = None
-        prepared_audio = _prepare_audio(audio)
-        if prepared_audio is not None:
-            waveform = prepared_audio["waveform"]
-            channels = int(waveform.shape[1])
-            layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
-            audio_stream = container.add_stream("aac", rate=int(prepared_audio["sample_rate"]), layout=layout)
-        for array in frames:
-            if encoded_width != width or encoded_height != height:
-                array = np.pad(
-                    array,
-                    ((0, encoded_height - height), (0, encoded_width - width), (0, 0)),
-                    mode="edge",
+    progress = _SubtitleProgress(int(frames.shape[0]), "preview video encoding")
+    try:
+        with av.open(str(path), mode="w", format="mp4") as container:
+            try:
+                stream = container.add_stream("libx264", rate=rate)
+                stream.options = {"preset": "ultrafast", "crf": "20"}
+            except (av.error.FFmpegError, ValueError):
+                stream = container.add_stream("mpeg4", rate=rate)
+            stream.width = encoded_width
+            stream.height = encoded_height
+            stream.pix_fmt = "yuv420p"
+            audio_stream = None
+            prepared_audio = _prepare_audio(audio)
+            if prepared_audio is not None:
+                waveform = prepared_audio["waveform"]
+                channels = int(waveform.shape[1])
+                layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
+                audio_stream = container.add_stream("aac", rate=int(prepared_audio["sample_rate"]), layout=layout)
+            for array in frames:
+                if encoded_width != width or encoded_height != height:
+                    array = np.pad(
+                        array,
+                        ((0, encoded_height - height), (0, encoded_width - width), (0, 0)),
+                        mode="edge",
+                    )
+                video_frame = av.VideoFrame.from_ndarray(array, format="rgb24")
+                for packet in stream.encode(video_frame):
+                    container.mux(packet)
+                progress.update()
+            for packet in stream.encode():
+                container.mux(packet)
+            if audio_stream is not None and prepared_audio is not None:
+                audio_frame = av.AudioFrame.from_ndarray(
+                    prepared_audio["waveform"][0].numpy(),
+                    format="fltp",
+                    layout=audio_stream.layout.name,
                 )
-            video_frame = av.VideoFrame.from_ndarray(array, format="rgb24")
-            for packet in stream.encode(video_frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-        if audio_stream is not None and prepared_audio is not None:
-            audio_frame = av.AudioFrame.from_ndarray(
-                prepared_audio["waveform"][0].numpy(),
-                format="fltp",
-                layout=audio_stream.layout.name,
-            )
-            audio_frame.sample_rate = int(prepared_audio["sample_rate"])
-            for packet in audio_stream.encode(audio_frame):
-                container.mux(packet)
-            for packet in audio_stream.encode():
-                container.mux(packet)
+                audio_frame.sample_rate = int(prepared_audio["sample_rate"])
+                for packet in audio_stream.encode(audio_frame):
+                    container.mux(packet)
+                for packet in audio_stream.encode():
+                    container.mux(packet)
+    finally:
+        progress.close()
 
 
 class CSVideoSubtitle(io.ComfyNode):
@@ -521,6 +566,8 @@ class CSVideoSubtitle(io.ComfyNode):
     ) -> io.NodeOutput:
         if not hasattr(video, "get_components"):
             raise ValueError("video input is not a compatible VIDEO value.")
+        _subtitle_info("start")
+        _subtitle_info("stage 1/6: validating video and subtitle inputs")
         preview_in = _safe_int(preview_in, 0, 0, 10000000)
         preview_out = _safe_int(preview_out, -1, -1, 10000000)
         font_size = _safe_int(font_size, 30, 8, 100)
@@ -555,19 +602,27 @@ class CSVideoSubtitle(io.ComfyNode):
         frame_rate = float(components.frame_rate)
         if frame_rate <= 0:
             raise ValueError("VIDEO frame rate must be positive.")
+        _subtitle_info(
+            "input ready: frames=%d, size=%dx%d, fps=%.3f",
+            int(images.shape[0]),
+            int(images.shape[2]),
+            int(images.shape[1]),
+            frame_rate,
+        )
         render_size = (int(images.shape[2]), int(images.shape[1]))
         if node_id:
             _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = render_size
+        _subtitle_info("stage 2/6: preparing preview caches")
         main_cached = _cache_main_video(video, node_id)
         if proxy_video is None:
             if main_cached:
                 _SUBTITLE_PREVIEW_CACHE[str(node_id)] = dict(_SUBTITLE_MAIN_VIDEO_CACHE[str(node_id)])
-                print("[INFO] [CS Video Subtitle] preview uses the main video cache")
+                _subtitle_info("preview uses the main video cache")
         else:
             cached_preview = _cache_proxy_preview(proxy_video, node_id, render_size=render_size)
             if not cached_preview and main_cached:
                 _SUBTITLE_PREVIEW_CACHE[str(node_id)] = dict(_SUBTITLE_MAIN_VIDEO_CACHE[str(node_id)])
-                print("[INFO] [CS Video Subtitle] proxy cache failed; preview uses the main video cache")
+                _subtitle_info("proxy cache failed; preview uses the main video cache")
         cache_entry = _SUBTITLE_SRT_CACHE.get(cache_key, {}) if cache_key else {}
         cached_edited_srt = (
             str(cache_entry.get("srt", ""))
@@ -575,6 +630,7 @@ class CSVideoSubtitle(io.ComfyNode):
             else ""
         )
         edited_srt = edited_srt.strip() or cached_edited_srt or str(srt)
+        _subtitle_info("stage 3/6: parsing subtitle cues")
         cues = _coerce_cues(srt, edited_srt)
         source_metadata = dict(components.metadata or {})
         source_offset = 0.0
@@ -602,16 +658,25 @@ class CSVideoSubtitle(io.ComfyNode):
             "shadow_size": shadow_size,
             "shadow_color": shadow_color,
         }
+        _subtitle_info("subtitle cues ready: count=%d", len(cues))
+        _subtitle_info("stage 4/6: rendering subtitles onto %d frames", int(images.shape[0]))
         rendered = []
-        for index, frame in enumerate(images):
-            time_seconds = index / frame_rate
-            active = [cue for cue in cues if float(cue["start"]) <= time_seconds < float(cue["end"])]
-            rendered.append(
-                _renderer_module().render_frame(frame, active, style, _fonts_root())
-                if active
-                else frame[..., :3].detach().cpu().float()
-            )
+        progress = _SubtitleProgress(int(images.shape[0]))
+        try:
+            for index, frame in enumerate(images):
+                time_seconds = index / frame_rate
+                active = [cue for cue in cues if float(cue["start"]) <= time_seconds < float(cue["end"])]
+                rendered.append(
+                    _renderer_module().render_frame(frame, active, style, _fonts_root())
+                    if active
+                    else frame[..., :3].detach().cpu().float()
+                )
+                progress.update()
+        finally:
+            progress.close()
+        _subtitle_info("frame rendering complete: %d frames", len(rendered))
         output_images = torch.stack(rendered, dim=0).clamp(0, 1)
+        _subtitle_info("stage 5/6: assembling output video")
         metadata = source_metadata
         edited_srt = _cues_to_srt(cues)
         metadata["cinestyle_subtitles"] = {"cue_count": len(cues), "style": style}
@@ -628,6 +693,7 @@ class CSVideoSubtitle(io.ComfyNode):
                 audio=components.audio,
                 frame_rate=components.frame_rate,
             )
+        _subtitle_info("stage 6/6: complete, output frames=%d", int(output_images.shape[0]))
         return io.NodeOutput(InputImpl.VideoFromComponents(output_components), edited_srt)
 
 

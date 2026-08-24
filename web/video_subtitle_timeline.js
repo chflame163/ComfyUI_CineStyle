@@ -4,7 +4,7 @@ import { api } from "../../../scripts/api.js";
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
 const PERSISTED_WIDGET_NAMES = [
-    "preview_in", "preview_out", "font", "font_size", "primary_color", "secondary_color",
+    "edited_srt", "preview_in", "preview_out", "font", "font_size", "primary_color", "secondary_color",
     "gradient", "text_align", "italic", "letter_spacing", "position_x", "position_y",
     "outline_size", "outline_color", "shadow_size", "shadow_color", "Edit Timeline",
 ];
@@ -27,11 +27,8 @@ function normalizeHex(value, fallback) {
 function configureSubtitleWidgetValues(node, info) {
     const incoming = Array.isArray(info?.widgets_values) ? info.widgets_values : null;
     if (!incoming || !node.widgets?.length) return info;
-    const hasSrtWidget = Boolean(widget(node, "srt"));
-    // A legacy graph can contain one leading slot for the hidden force-input widget.
-    const values = hasSrtWidget && incoming.length === PERSISTED_WIDGET_NAMES.length + 1
-        ? incoming.slice(1)
-        : incoming;
+    const hasPersistedSrtInput = Array.isArray(info?.inputs) && info.inputs.some((item) => item?.name === "edited_srt");
+    const values = hasPersistedSrtInput ? incoming : ["", ...incoming];
     if (values.length !== PERSISTED_WIDGET_NAMES.length) {
         console.warn(`[CS Video Subtitle] widgets_values length ${incoming.length} does not match the ${PERSISTED_WIDGET_NAMES.length} named values.`);
     }
@@ -46,7 +43,8 @@ function configureSubtitleWidgetValues(node, info) {
 function canonicalSubtitleValues(info) {
     const incoming = Array.isArray(info?.widgets_values) ? info.widgets_values : null;
     if (!incoming) return null;
-    return incoming.length === PERSISTED_WIDGET_NAMES.length + 1 ? incoming.slice(1) : incoming;
+    const hasPersistedSrtInput = Array.isArray(info?.inputs) && info.inputs.some((item) => item?.name === "edited_srt");
+    return hasPersistedSrtInput ? incoming : ["", ...incoming];
 }
 function applySubtitleWidgetValuesByName(node, info) {
     const values = canonicalSubtitleValues(info);
@@ -242,6 +240,10 @@ function addStyles() {
       .cs-subtitle-close { border:0; background:transparent; color:#aeb5c2; font-size:22px; cursor:pointer; padding:0 5px; }
       .cs-subtitle-preview-wrap { position:relative; width:100%; aspect-ratio:16/9; background:#08090b; border-radius:6px; overflow:hidden; }
       .cs-subtitle-video { width:100%; height:100%; object-fit:contain; display:block; }
+      .cs-subtitle-preview-loading { position:absolute; inset:0; z-index:6; display:flex; align-items:center; justify-content:center; padding:16px; background:#08090bd9; color:#dce7f3; text-align:center; pointer-events:none; }
+      .cs-subtitle-preview-loading[hidden] { display:none; }
+      .cs-subtitle-preview-loading::before { content:""; width:16px; height:16px; margin-right:9px; border:2px solid #5c7185; border-top-color:#7dc6ff; border-radius:50%; animation:cs-subtitle-spin .8s linear infinite; }
+      @keyframes cs-subtitle-spin { to { transform:rotate(360deg); } }
       .cs-subtitle-overlay-image { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; pointer-events:none; display:none; }
       .cs-subtitle-interaction-box { position:absolute; display:none; box-sizing:border-box; border:1px dashed transparent; z-index:4; cursor:grab; touch-action:none; }
       .cs-subtitle-interaction-box:hover { border-color:#8bc7f5; }
@@ -314,16 +316,18 @@ function addStyles() {
 
 async function openTimeline(node) {
     const filename = String(connectedVideoFilename(node) || "");
-    const cachedSrt = await fetchCachedSrt(node).catch(() => null);
-    const cachedProxy = await fetchCachedProxy(node, filename).catch(() => null);
-    const sourceSrt = cachedSrt?.srt || graphSrtText(node) || String(widget(node, "srt")?.value || "");
+    const externalSrt = graphSrtText(node) || String(widget(node, "srt")?.value || "");
+    const persistedSrt = String(widget(node, "edited_srt")?.value || "").trim();
+    let cachedSrt = null;
+    let cachedProxy = null;
+    let sourceSrt = persistedSrt || externalSrt;
     addStyles();
     const dialog = document.createElement("dialog");
     dialog.className = "cs-subtitle-dialog";
     dialog.innerHTML = `
       <div class="cs-subtitle-shell">
         <div class="cs-subtitle-head"><div><h2 class="cs-subtitle-title">Subtitle Timeline</h2><div class="cs-subtitle-muted cs-subtitle-file"></div></div><button class="cs-subtitle-close" type="button" aria-label="Close">&times;</button></div>
-         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><img class="cs-subtitle-overlay-image" alt="" draggable="false"><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div></div>
+         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><img class="cs-subtitle-overlay-image" alt="" draggable="false"><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div><div class="cs-subtitle-preview-loading" role="status" aria-live="polite"><span class="cs-subtitle-preview-loading-text">Preparing subtitle preview...</span></div></div>
         <div class="cs-subtitle-readout"><span class="current">00:00.00</span><span class="range"></span><span class="duration">00:00.00</span></div>
         <div class="cs-subtitle-pointer-row"><button class="cs-subtitle-pointer" type="button" aria-label="Current time"></button></div>
         <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-video"><span class="cs-subtitle-track-label">Video</span><div class="cs-subtitle-track-body"></div></div></div>
@@ -337,6 +341,7 @@ async function openTimeline(node) {
         <div class="cs-subtitle-foot"><button class="cancel">Cancel</button><button class="apply">Apply</button></div>
       </div>`;
     document.body.append(dialog);
+    dialog.showModal();
 
     const video = dialog.querySelector(".cs-subtitle-video");
     const previewWrap = dialog.querySelector(".cs-subtitle-preview-wrap");
@@ -353,8 +358,17 @@ async function openTimeline(node) {
     const range = dialog.querySelector(".range");
     const durationLabel = dialog.querySelector(".duration");
     const status = dialog.querySelector(".cs-subtitle-status");
+    const loading = dialog.querySelector(".cs-subtitle-preview-loading");
+    const loadingText = dialog.querySelector(".cs-subtitle-preview-loading-text");
+    const setLoading = (message, visible = true) => { loadingText.textContent = message; loading.hidden = !visible; };
     const cues = readCues(node, sourceSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
-    let sourceHash = cachedSrt?.sourceHash || (sourceSrt ? await srtSourceHash(sourceSrt).catch(() => "") : "");
+    function replaceCues(nextSrt) {
+        const next = readCues(node, nextSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
+        cues.splice(0, cues.length, ...next);
+        duration = Math.max(1, ...cues.map((cue) => Number(cue.end) || 0));
+        viewDuration = duration;
+    }
+    let sourceHash = "";
     let info = null;
     let duration = Math.max(1, ...cues.map((cue) => Number(cue.end) || 0));
     let fps = 30;
@@ -728,41 +742,74 @@ async function openTimeline(node) {
         setWidgetValue(node, "preview_in", inFrame); setWidgetValue(node, "preview_out", outFrame);
         setWidgetValue(node, "position_x", style.position_x); setWidgetValue(node, "position_y", style.position_y);
         for (const [key, input] of Object.entries(inputs)) setWidgetValue(node, key, input.type === "checkbox" ? input.checked : input.value);
+        const editedSrt = cuesToSrt(cues);
+        setWidgetValue(node, "edited_srt", editedSrt);
         try {
-            await saveCachedSrt(node, sourceHash, cuesToSrt(cues));
+            await saveCachedSrt(node, sourceHash, editedSrt);
             node.graph?.setDirtyCanvas(true, true); close();
         } catch (error) {
             status.textContent = error.message;
         }
     });
-    dialog.showModal();
-    dialog.querySelector(".cs-subtitle-file").textContent = cachedProxy?.label || filename || "Run the workflow once after restarting ComfyUI to build the subtitle preview cache";
-
     fetchFonts().then((fonts) => { inputs.font.innerHTML = ""; for (const font of fonts) { const option = document.createElement("option"); option.value = font; option.textContent = font; inputs.font.append(option); } if (!style.font && fonts.length) style.font = fonts[0]; inputs.font.value = style.font; updateOverlay(); }).catch(() => {});
-    if (cachedProxy) {
-        info = cachedProxy.info || {};
-        fps = Number(info.fps) || 30;
-        duration = Number(info.duration) || duration;
-        outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
-        viewDuration = duration;
-        const useCachedPlayback = () => { video.src = cachedProxy.url; video.load(); normalizeRange(); renderTimeline(); };
-        if (filename) {
-            fetchInfo(filename).then((sourceInfo) => {
-                info = sourceInfo;
-                fps = Number(sourceInfo.fps) || fps;
-                duration = Number(sourceInfo.duration) || duration;
-                outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
-                viewDuration = duration;
-                video.src = sourceInfo.proxy_required ? proxyVideoUrl(filename, sourceInfo.proxy_threshold, sourceInfo.proxy_size) : videoUrl(filename);
-                video.load(); normalizeRange(); renderTimeline();
-            }).catch(useCachedPlayback);
-        } else useCachedPlayback();
-    } else if (filename) {
-        fetchInfo(filename).then((result) => { info = result; fps = Number(result.fps) || 30; duration = Number(result.duration) || duration; outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame; viewDuration = duration; video.src = result.proxy_required ? proxyVideoUrl(filename, result.proxy_threshold, result.proxy_size) : videoUrl(filename); video.load(); normalizeRange(); renderTimeline(); }).catch((error) => { status.textContent = error.message; renderTimeline(); });
-    } else {
-        status.textContent = "Run the workflow once after restarting ComfyUI to build the subtitle preview cache and load the external SRT.";
+    const initialize = async () => {
+        setLoading("Reading subtitle cache...");
+        cachedSrt = await fetchCachedSrt(node).catch(() => null);
+        sourceHash = cachedSrt?.sourceHash || (externalSrt ? await srtSourceHash(externalSrt).catch(() => "") : "");
+        if (!persistedSrt && cachedSrt?.srt) {
+            sourceSrt = cachedSrt.srt;
+            replaceCues(sourceSrt);
+        }
+        setLoading("Preparing video preview cache...");
+        cachedProxy = await fetchCachedProxy(node, filename).catch(() => null);
+        dialog.querySelector(".cs-subtitle-file").textContent = cachedProxy?.label || filename || "Subtitle preview cache";
+        if (cachedProxy) {
+            setLoading("Loading preview video...");
+            info = cachedProxy.info || {};
+            fps = Number(info.fps) || 30;
+            duration = Number(info.duration) || duration;
+            outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
+            viewDuration = duration;
+            const useCachedPlayback = () => { video.src = cachedProxy.url; video.load(); normalizeRange(); renderTimeline(); };
+            if (filename) {
+                try {
+                    const sourceInfo = await fetchInfo(filename);
+                    info = sourceInfo;
+                    fps = Number(sourceInfo.fps) || fps;
+                    duration = Number(sourceInfo.duration) || duration;
+                    outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
+                    viewDuration = duration;
+                    video.src = sourceInfo.proxy_required ? proxyVideoUrl(filename, sourceInfo.proxy_threshold, sourceInfo.proxy_size) : videoUrl(filename);
+                    video.load();
+                    normalizeRange();
+                    renderTimeline();
+                } catch (_) {
+                    useCachedPlayback();
+                }
+            } else useCachedPlayback();
+        } else if (filename) {
+            setLoading("Reading video information...");
+            const result = await fetchInfo(filename);
+            info = result;
+            fps = Number(result.fps) || 30;
+            duration = Number(result.duration) || duration;
+            outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
+            viewDuration = duration;
+            video.src = result.proxy_required ? proxyVideoUrl(filename, result.proxy_threshold, result.proxy_size) : videoUrl(filename);
+            video.load();
+            normalizeRange();
+            renderTimeline();
+        } else {
+            status.textContent = "Run the workflow once after restarting ComfyUI to build the subtitle preview cache and load the external SRT.";
+            renderTimeline();
+        }
+        setLoading("", false);
+    };
+    void initialize().catch((error) => {
+        setLoading("Unable to initialize subtitle preview", false);
+        status.textContent = error?.message || "Unable to initialize subtitle preview.";
         renderTimeline();
-    }
+    });
 }
 
 app.registerExtension({

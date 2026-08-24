@@ -27,6 +27,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
 * 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率和大视频预览代理。
 * 添加 `CS Video Subtitle Track` 节点，将 SRT 作为可编辑字幕轨叠加到标准 `VIDEO`，支持字体、渐变填充、描边、阴影和位置预览。
+* `CS Video Subtitle` 的 `edited_srt` 参数会以明文多行文本保存 `Edit Timeline` 编辑后的 SRT；非空时优先于连接的原始 `srt` 输入。
 * 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
 
 

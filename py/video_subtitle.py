@@ -467,6 +467,13 @@ class CSVideoSubtitle(io.ComfyNode):
                 io.Video.Input("video", tooltip="Connect any compatible VIDEO output."),
                 io.Video.Input("proxy_video", optional=True, tooltip="Optional compatible proxy VIDEO output for Edit Timeline preview."),
                 io.String.Input("srt", force_input=True, tooltip="Connect any STRING output containing valid SRT cues."),
+                io.String.Input(
+                    "edited_srt",
+                    default="",
+                    multiline=True,
+                    optional=True,
+                    tooltip="Persisted SRT text edited in Edit Timeline. When non-empty, it overrides the connected SRT.",
+                ),
                 io.Int.Input("preview_in", default=0, min=0, max=10000000, step=1, advanced=True),
                 io.Int.Input("preview_out", default=-1, min=-1, max=10000000, step=1, advanced=True),
                 io.Combo.Input("font", options=fonts or [""], default=fonts[0] if fonts else "", advanced=True),
@@ -494,6 +501,7 @@ class CSVideoSubtitle(io.ComfyNode):
         video: Any,
         proxy_video: Any = None,
         srt: Any = "",
+        edited_srt: str = "",
         preview_in: int = 0,
         preview_out: int = -1,
         font: str = "",
@@ -526,16 +534,18 @@ class CSVideoSubtitle(io.ComfyNode):
         srt = _coerce_srt_input(srt)
         if not srt.strip():
             raise ValueError("Connect an external SRT source to the srt input.")
+        edited_srt = str(edited_srt or "")
         raw_node_id = getattr(getattr(cls, "hidden", None), "unique_id", None)
         cache_key = str(raw_node_id or "").strip()
         node_id = cache_key or None
         source_hash = _srt_source_hash(srt)
         cached_srt = _SUBTITLE_SRT_CACHE.get(cache_key) if cache_key else None
-        edited_srt = (
+        cached_edited_srt = (
             str(cached_srt.get("srt", ""))
             if cached_srt and (not cached_srt.get("source_hash") or cached_srt.get("source_hash") == source_hash)
-            else str(srt)
+            else ""
         )
+        edited_srt = edited_srt.strip() or cached_edited_srt or str(srt)
         if cache_key:
             _SUBTITLE_SRT_CACHE[cache_key] = {"source_hash": source_hash, "srt": edited_srt, "node_id": cache_key}
         components = video.get_components()
@@ -559,11 +569,12 @@ class CSVideoSubtitle(io.ComfyNode):
                 _SUBTITLE_PREVIEW_CACHE[str(node_id)] = dict(_SUBTITLE_MAIN_VIDEO_CACHE[str(node_id)])
                 print("[INFO] [CS Video Subtitle] proxy cache failed; preview uses the main video cache")
         cache_entry = _SUBTITLE_SRT_CACHE.get(cache_key, {}) if cache_key else {}
-        edited_srt = (
+        cached_edited_srt = (
             str(cache_entry.get("srt", ""))
             if cache_entry and (not cache_entry.get("source_hash") or cache_entry.get("source_hash") == _srt_source_hash(srt))
-            else str(srt)
+            else ""
         )
+        edited_srt = edited_srt.strip() or cached_edited_srt or str(srt)
         cues = _coerce_cues(srt, edited_srt)
         source_metadata = dict(components.metadata or {})
         source_offset = 0.0

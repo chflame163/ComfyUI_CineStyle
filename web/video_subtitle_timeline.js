@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { createCineStyleTextEditor } from "./cinestyle_text_editor.js";
 
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
@@ -343,6 +344,7 @@ async function openTimeline(node) {
       </div>`;
     document.body.append(dialog);
     dialog.showModal();
+    const textEditor = createCineStyleTextEditor(dialog);
 
     const video = dialog.querySelector(".cs-subtitle-video");
     const previewWrap = dialog.querySelector(".cs-subtitle-preview-wrap");
@@ -683,26 +685,26 @@ async function openTimeline(node) {
         insertPastedSubtitle(clipboard, seconds);
     }
     function showTrackContextMenu(event, seconds) {
-        const items = [{ label: "新增字幕", action: () => addCueAt(seconds) }];
+        const items = [{ label: "新增字幕", action: () => { void addCueAt(seconds); } }];
         if (nodeClipboard().trim()) items.push({ label: "粘贴字幕", action: () => pasteSubtitleFromClipboard(seconds) });
         showContextMenu(event, items);
     }
-    function editCueText(cue, title = "Edit subtitle") {
-        const value = window.prompt(title, cue.text);
+    async function editCueText(cue, title = "Edit subtitle") {
+        const value = await textEditor.open({ title, value: cue.text, allowEmpty: false });
         if (value === null) return false;
         const text = String(value).trim();
         if (!text) return false;
         cue.text = text;
         return true;
     }
-    function addCueAt(seconds) {
+    async function addCueAt(seconds) {
         const gap = insertionGap(seconds);
         if (gap.available < 0.05) return;
         const start = gap.start;
         const available = gap.available;
         const end = start + Math.min(2, available);
         const cue = { id: cues.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1, start, end, text: "" };
-        if (!editCueText(cue, "New subtitle")) return;
+        if (!await editCueText(cue, "New subtitle")) return;
         cues.push(cue);
         normalizeCueLayout();
         renderTimeline();
@@ -721,7 +723,7 @@ async function openTimeline(node) {
             item.innerHTML = `<span class="cs-subtitle-cue-handle in"></span><span class="cs-subtitle-cue-label"></span><span class="cs-subtitle-cue-handle out"></span>`;
             item.querySelector(".cs-subtitle-cue-label").textContent = cue.text.replace(/\n/g, " ");
             item.addEventListener("pointerdown", (event) => beginCueDrag(cue, event));
-            item.addEventListener("dblclick", (event) => { event.stopPropagation(); if (editCueText(cue)) { renderTimeline(); updateOverlay(); } });
+            item.addEventListener("dblclick", async (event) => { event.stopPropagation(); if (await editCueText(cue)) { renderTimeline(); updateOverlay(); } });
             item.querySelector(".in").addEventListener("pointerdown", (event) => beginCueEdge(cue, "in", event));
             item.querySelector(".out").addEventListener("pointerdown", (event) => beginCueEdge(cue, "out", event));
             body.append(item);
@@ -753,7 +755,7 @@ async function openTimeline(node) {
             const cue = cues.find((item) => String(item.id) === String(cueElement.dataset.id));
             if (!cue) return;
             showContextMenu(event, [
-                { label: "编辑", action: () => { if (editCueText(cue)) { renderTimeline(); updateOverlay(); } } },
+                { label: "编辑", action: async () => { if (await editCueText(cue)) { renderTimeline(); updateOverlay(); } } },
                 { label: "删除", action: () => { const index = cues.indexOf(cue); if (index >= 0) cues.splice(index, 1); renderTimeline(); updateOverlay(); } },
                 { label: "复制到剪贴板", action: () => copyCueToClipboard(cue) },
                 { label: "剪切到剪贴板", action: () => copyCueToClipboard(cue, true) },
@@ -808,7 +810,7 @@ async function openTimeline(node) {
     function setFrame(frame) { video.currentTime = clamp(frame / fps, 0, duration); renderTimeline(); }
     function currentFrame() { return Math.round((video.currentTime || 0) * fps); }
     function normalizeRange() { const max = Math.max(0, Math.round(duration * fps) - 1); inFrame = clamp(Math.round(inFrame), 0, max); outFrame = outFrame < 0 ? max : clamp(Math.round(outFrame), 0, max); if (outFrame <= inFrame) outFrame = Math.min(max, inFrame + 1); }
-    function close() { video.pause(); closeContextMenu(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
+    function close() { video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
 
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });

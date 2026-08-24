@@ -267,7 +267,6 @@ function addStyles() {
       .cs-subtitle-track-video .cs-subtitle-track-body { background:repeating-linear-gradient(90deg,#343941 0 1px,transparent 1px 10%); }
       .cs-subtitle-track-subtitles .cs-subtitle-track-body { background:#292e36; }
       .cs-subtitle-cue { position:absolute; top:5px; bottom:5px; min-width:5px; overflow:visible; z-index:2; border:1px solid #4b9de8; border-radius:3px; background:#317ec4; color:#f5f7fb; cursor:grab; user-select:none; }
-      .cs-subtitle-cue.selected { background:#3f9f83; border-color:#68d0ad; z-index:3; }
       .cs-subtitle-cue:active { cursor:grabbing; }
       .cs-subtitle-cue-label { display:block; overflow:hidden; padding:3px 8px; white-space:nowrap; text-overflow:ellipsis; pointer-events:none; }
       .cs-subtitle-cue-handle { position:absolute; top:-2px; bottom:-2px; width:7px; background:#f5f7fb; border-radius:2px; cursor:ew-resize; z-index:2; }
@@ -390,7 +389,6 @@ async function openTimeline(node) {
     let outFrame = clamp(finiteNumber(widget(node, "preview_out")?.value, -1), -1, 10000000);
     let viewStart = 0;
     let viewDuration = duration;
-    let selected = null;
     let drag = null;
     let playingSelection = false;
     let previewTimer = null;
@@ -602,7 +600,6 @@ async function openTimeline(node) {
         if (removeAfterCopy) {
             const index = cues.indexOf(cue);
             if (index >= 0) cues.splice(index, 1);
-            selected = null;
             renderTimeline();
             updateOverlay();
         }
@@ -707,7 +704,6 @@ async function openTimeline(node) {
         if (!editCueText(cue, "New subtitle")) return;
         cues.push(cue);
         normalizeCueLayout();
-        selected = cue.id;
         renderTimeline();
         updateOverlay();
     }
@@ -720,7 +716,7 @@ async function openTimeline(node) {
         body.innerHTML = "";
         for (const cue of cues) {
             if (cue.end < viewStart || cue.start > viewStart + viewDuration) continue;
-            const item = document.createElement("div"); item.className = `cs-subtitle-cue${selected === cue.id ? " selected" : ""}`; item.dataset.id = String(cue.id); Object.assign(item.style, cuePosition(cue));
+            const item = document.createElement("div"); item.className = "cs-subtitle-cue"; item.dataset.id = String(cue.id); Object.assign(item.style, cuePosition(cue));
             item.innerHTML = `<span class="cs-subtitle-cue-handle in"></span><span class="cs-subtitle-cue-label"></span><span class="cs-subtitle-cue-handle out"></span>`;
             item.querySelector(".cs-subtitle-cue-label").textContent = cue.text.replace(/\n/g, " ");
             item.addEventListener("pointerdown", (event) => beginCueDrag(cue, event));
@@ -755,10 +751,9 @@ async function openTimeline(node) {
         if (cueElement) {
             const cue = cues.find((item) => String(item.id) === String(cueElement.dataset.id));
             if (!cue) return;
-            selected = cue.id;
             showContextMenu(event, [
                 { label: "编辑", action: () => { if (editCueText(cue)) { renderTimeline(); updateOverlay(); } } },
-                { label: "删除", action: () => { const index = cues.indexOf(cue); if (index >= 0) cues.splice(index, 1); selected = null; renderTimeline(); updateOverlay(); } },
+                { label: "删除", action: () => { const index = cues.indexOf(cue); if (index >= 0) cues.splice(index, 1); renderTimeline(); updateOverlay(); } },
                 { label: "复制到剪贴板", action: () => copyCueToClipboard(cue) },
                 { label: "剪切到剪贴板", action: () => copyCueToClipboard(cue, true) },
             ]);
@@ -789,7 +784,7 @@ async function openTimeline(node) {
     window.addEventListener("contextmenu", handleWindowContextMenu, true);
     function beginCueDrag(cue, event) {
         if (event.target.classList.contains("cs-subtitle-cue-handle")) return;
-        event.preventDefault(); selected = cue.id; const origin = secondsAtEvent(event); const start = cue.start; const end = cue.end; const length = Math.max(0.05, end - start); drag = { cue, mode: "move", origin, start, end, length };
+        event.preventDefault(); const origin = secondsAtEvent(event); const start = cue.start; const end = cue.end; const length = Math.max(0.05, end - start); drag = { cue, mode: "move", origin, start, end, length };
         const move = (moveEvent) => {
             const delta = secondsAtEvent(moveEvent) - drag.origin;
             placeCueInNearestGap(cue, drag.start + delta, drag.length);
@@ -799,7 +794,7 @@ async function openTimeline(node) {
         window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
     }
     function beginCueEdge(cue, mode, event) {
-        event.preventDefault(); event.stopPropagation(); selected = cue.id; const { previous, next } = cueNeighbors(cue); drag = { cue, mode, previous, next };
+        event.preventDefault(); event.stopPropagation(); const { previous, next } = cueNeighbors(cue); drag = { cue, mode, previous, next };
         const move = (moveEvent) => {
             const time = secondsAtEvent(moveEvent);
             if (mode === "in") cue.start = clamp(Math.min(time, cue.end - 0.05), previous?.end ?? 0, cue.end - 0.05);

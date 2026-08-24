@@ -8,6 +8,7 @@ const PERSISTED_WIDGET_NAMES = [
     "gradient", "text_align", "italic", "letter_spacing", "position_x", "position_y",
     "outline_size", "outline_color", "shadow_size", "shadow_color", "Edit Timeline",
 ];
+const NODE_SUBTITLE_CLIPBOARDS = new WeakMap();
 
 function widget(node, name) { return node.widgets?.find((item) => item.name === name); }
 const NUMERIC_LIMITS = { font_size: [8, 100], outline_size: [0, 20], shadow_size: [0, 20], letter_spacing: [-10, 50], position_x: [0, 1], position_y: [0, 1], preview_in: [0, 10000000], preview_out: [-1, 10000000] };
@@ -362,9 +363,22 @@ async function openTimeline(node) {
     const loadingText = dialog.querySelector(".cs-subtitle-preview-loading-text");
     const setLoading = (message, visible = true) => { loadingText.textContent = message; loading.hidden = !visible; };
     const cues = readCues(node, sourceSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
+    function normalizeCueLayout() {
+        cues.sort((a, b) => Number(a.start) - Number(b.start));
+        let cursor = 0;
+        for (const cue of cues) {
+            const start = Math.max(cursor, Number(cue.start) || 0);
+            const end = Math.max(start + 0.05, Number(cue.end) || start + 0.05);
+            cue.start = start;
+            cue.end = end;
+            cursor = end;
+        }
+    }
+    normalizeCueLayout();
     function replaceCues(nextSrt) {
         const next = readCues(node, nextSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
         cues.splice(0, cues.length, ...next);
+        normalizeCueLayout();
         duration = Math.max(1, ...cues.map((cue) => Number(cue.end) || 0));
         viewDuration = duration;
     }
@@ -549,9 +563,14 @@ async function openTimeline(node) {
     function updateReadout() { const now = video.currentTime || 0; current.textContent = formatTime(now); range.textContent = `In ${formatTime(rangeStartSeconds())}  -  Out ${formatTime(rangeEndSeconds())}`; durationLabel.textContent = formatTime(duration); }
     function cuePosition(cue) { const start = ((cue.start - viewStart) / viewDuration) * 100; const width = ((cue.end - cue.start) / viewDuration) * 100; return { left: `${start}%`, width: `${Math.max(0.35, width)}%` }; }
     let contextMenu = null;
+    let contextMenuOutsidePointer = null;
     function closeContextMenu() {
         contextMenu?.remove();
         contextMenu = null;
+        if (contextMenuOutsidePointer) {
+            window.removeEventListener("pointerdown", contextMenuOutsidePointer, true);
+            contextMenuOutsidePointer = null;
+        }
     }
     function showContextMenu(event, items) {
         closeContextMenu();
@@ -564,10 +583,111 @@ async function openTimeline(node) {
             button.addEventListener("click", () => { closeContextMenu(); item.action(); });
             contextMenu.append(button);
         }
-        document.body.append(contextMenu);
+        dialog.append(contextMenu);
         contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 160)}px`;
         contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 100)}px`;
-        setTimeout(() => window.addEventListener("pointerdown", closeContextMenu, { once: true }), 0);
+        contextMenuOutsidePointer = (pointerEvent) => {
+            if (!contextMenu?.contains(pointerEvent.target)) closeContextMenu();
+        };
+        setTimeout(() => {
+            if (contextMenu) window.addEventListener("pointerdown", contextMenuOutsidePointer, true);
+        }, 0);
+    }
+    function cueToSrt(cue) {
+        return cuesToSrt([{ ...cue, start: Number(cue.start) || 0, end: Number(cue.end) || 0 }]);
+    }
+    function nodeClipboard() { return NODE_SUBTITLE_CLIPBOARDS.get(node) || ""; }
+    function copyCueToClipboard(cue, removeAfterCopy = false) {
+        NODE_SUBTITLE_CLIPBOARDS.set(node, cueToSrt(cue));
+        if (removeAfterCopy) {
+            const index = cues.indexOf(cue);
+            if (index >= 0) cues.splice(index, 1);
+            selected = null;
+            renderTimeline();
+            updateOverlay();
+        }
+        status.textContent = removeAfterCopy ? "字幕已剪切到本节点剪贴板" : "字幕已复制到本节点剪贴板";
+    }
+    function cueNeighbors(cue) {
+        const index = cues.indexOf(cue);
+        return { previous: index > 0 ? cues[index - 1] : null, next: index >= 0 && index + 1 < cues.length ? cues[index + 1] : null };
+    }
+    function placeCueInNearestGap(cue, requestedStart, requestedLength) {
+        const others = cues.filter((item) => item !== cue).sort((a, b) => Number(a.start) - Number(b.start));
+        const gaps = [];
+        let lower = 0;
+        for (const other of others) {
+            const upper = Math.max(lower, Number(other.start) || lower);
+            if (upper - lower >= 0.05) gaps.push({ lower, upper });
+            lower = Math.max(lower, Number(other.end) || lower);
+        }
+        if (duration - lower >= 0.05) gaps.push({ lower, upper: duration });
+        if (!gaps.length) return;
+        let best = null;
+        for (const gap of gaps) {
+            const length = Math.min(Math.max(0.05, requestedLength), gap.upper - gap.lower);
+            const start = clamp(requestedStart, gap.lower, Math.max(gap.lower, gap.upper - length));
+            const distance = Math.abs(start - requestedStart);
+            if (!best || distance < best.distance) best = { start, length, distance };
+        }
+        if (!best) return;
+        cue.start = best.start;
+        cue.end = best.start + best.length;
+        cues.sort((a, b) => Number(a.start) - Number(b.start));
+    }
+    function insertionGap(seconds) {
+        normalizeCueLayout();
+        const requested = Math.max(0, Number(seconds) || 0);
+        let previous = null;
+        let next = null;
+        for (const cue of cues) {
+            if (cue.end <= requested) previous = cue;
+            else if (cue.start >= requested) { next = cue; break; }
+        }
+        const lower = previous?.end ?? 0;
+        const upper = next?.start ?? duration;
+        const start = clamp(requested, lower, Math.max(lower, upper));
+        return { start, end: Math.max(start, upper), available: Math.max(0, upper - start) };
+    }
+    function insertPastedSubtitle(text, seconds) {
+        const parsed = parseSrt(text);
+        const fallbackText = String(text || "").trim();
+        if (!parsed.length && !fallbackText) return;
+        const gap = insertionGap(seconds);
+        if (gap.available < 0.05) return;
+        const startAt = gap.start;
+        const available = gap.available;
+        if (!parsed.length) {
+            const end = startAt + Math.min(2, available);
+            cues.push({ id: cues.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1, start: startAt, end, text: fallbackText });
+        } else {
+            const firstStart = Math.min(...parsed.map((cue) => cue.start));
+            const lastEnd = Math.max(...parsed.map((cue) => cue.end));
+            const sourceDuration = Math.max(0.05, lastEnd - firstStart);
+            const scale = Math.min(1, available / sourceDuration);
+            const idStart = cues.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1;
+            parsed.forEach((cue, index) => {
+                const start = startAt + (cue.start - firstStart) * scale;
+                const end = Math.min(startAt + available, startAt + (cue.end - firstStart) * scale);
+                if (end > start && cue.text) cues.push({ id: idStart + index, start, end, text: cue.text });
+            });
+        }
+        normalizeCueLayout();
+        renderTimeline();
+        updateOverlay();
+    }
+    function pasteSubtitleFromClipboard(seconds) {
+        const clipboard = nodeClipboard();
+        if (!clipboard.trim()) {
+            status.textContent = "本节点剪贴板中没有可用字幕";
+            return;
+        }
+        insertPastedSubtitle(clipboard, seconds);
+    }
+    function showTrackContextMenu(event, seconds) {
+        const items = [{ label: "新增字幕", action: () => addCueAt(seconds) }];
+        if (nodeClipboard().trim()) items.push({ label: "粘贴字幕", action: () => pasteSubtitleFromClipboard(seconds) });
+        showContextMenu(event, items);
     }
     function editCueText(cue, title = "Edit subtitle") {
         const value = window.prompt(title, cue.text);
@@ -578,14 +698,15 @@ async function openTimeline(node) {
         return true;
     }
     function addCueAt(seconds) {
-        const start = clamp(Number(seconds) || 0, 0, Math.max(0, duration - 0.05));
-        const next = cues.filter((cue) => cue.start > start).sort((a, b) => a.start - b.start)[0];
-        const available = Math.max(0.05, (next ? next.start : duration) - start);
+        const gap = insertionGap(seconds);
+        if (gap.available < 0.05) return;
+        const start = gap.start;
+        const available = gap.available;
         const end = start + Math.min(2, available);
         const cue = { id: cues.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1, start, end, text: "" };
         if (!editCueText(cue, "New subtitle")) return;
         cues.push(cue);
-        cues.sort((a, b) => a.start - b.start);
+        normalizeCueLayout();
         selected = cue.id;
         renderTimeline();
         updateOverlay();
@@ -604,14 +725,6 @@ async function openTimeline(node) {
             item.querySelector(".cs-subtitle-cue-label").textContent = cue.text.replace(/\n/g, " ");
             item.addEventListener("pointerdown", (event) => beginCueDrag(cue, event));
             item.addEventListener("dblclick", (event) => { event.stopPropagation(); if (editCueText(cue)) { renderTimeline(); updateOverlay(); } });
-            item.addEventListener("contextmenu", (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                showContextMenu(event, [
-                    { label: "Edit", action: () => { if (editCueText(cue)) { renderTimeline(); updateOverlay(); } } },
-                    { label: "Delete", action: () => { const index = cues.indexOf(cue); if (index >= 0) cues.splice(index, 1); selected = null; renderTimeline(); updateOverlay(); } },
-                ]);
-            });
             item.querySelector(".in").addEventListener("pointerdown", (event) => beginCueEdge(cue, "in", event));
             item.querySelector(".out").addEventListener("pointerdown", (event) => beginCueEdge(cue, "out", event));
             body.append(item);
@@ -631,29 +744,75 @@ async function openTimeline(node) {
         outFrameButton.textContent = String(outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame);
         updateReadout(); updateOverlay();
     }
-    body.addEventListener("contextmenu", (event) => {
-        if (event.target.closest?.(".cs-subtitle-cue")) return;
-        event.preventDefault();
-        showContextMenu(event, [{ label: "New subtitle", action: () => addCueAt(secondsAtEvent(event)) }]);
-    });
     function secondsAtEvent(event) { const rect = body.getBoundingClientRect(); return viewStart + clamp((event.clientX - rect.left) / rect.width, 0, 1) * viewDuration; }
+    function handleTimelineContextMenu(event) {
+        const cueElement = event.target.closest?.(".cs-subtitle-cue");
+        const trackElement = event.target.closest?.(".cs-subtitle-track-subtitles");
+        if (!cueElement && !trackElement) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        if (cueElement) {
+            const cue = cues.find((item) => String(item.id) === String(cueElement.dataset.id));
+            if (!cue) return;
+            selected = cue.id;
+            showContextMenu(event, [
+                { label: "编辑", action: () => { if (editCueText(cue)) { renderTimeline(); updateOverlay(); } } },
+                { label: "删除", action: () => { const index = cues.indexOf(cue); if (index >= 0) cues.splice(index, 1); selected = null; renderTimeline(); updateOverlay(); } },
+                { label: "复制到剪贴板", action: () => copyCueToClipboard(cue) },
+                { label: "剪切到剪贴板", action: () => copyCueToClipboard(cue, true) },
+            ]);
+            return;
+        }
+        void showTrackContextMenu(event, secondsAtEvent(event));
+    }
+    let rightPointerHandled = false;
+    const handleTimelinePointerDown = (event) => {
+        if (event.button !== 2 || !dialog.contains(event.target)) return;
+        const target = event.target.closest?.(".cs-subtitle-cue, .cs-subtitle-track-subtitles");
+        if (!target) return;
+        rightPointerHandled = true;
+        handleTimelineContextMenu(event);
+    };
+    const handleWindowContextMenu = (event) => {
+        if (!dialog.contains(event.target)) return;
+        if (rightPointerHandled) {
+            rightPointerHandled = false;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+            return;
+        }
+        handleTimelineContextMenu(event);
+    };
+    window.addEventListener("pointerdown", handleTimelinePointerDown, true);
+    window.addEventListener("contextmenu", handleWindowContextMenu, true);
     function beginCueDrag(cue, event) {
         if (event.target.classList.contains("cs-subtitle-cue-handle")) return;
-        event.preventDefault(); selected = cue.id; const origin = secondsAtEvent(event); const start = cue.start; const end = cue.end; drag = { cue, mode: "move", origin, start, end };
-        const move = (moveEvent) => { const delta = secondsAtEvent(moveEvent) - drag.origin; const length = drag.end - drag.start; cue.start = clamp(drag.start + delta, 0, Math.max(0, duration - length)); cue.end = cue.start + length; renderTimeline(); };
+        event.preventDefault(); selected = cue.id; const origin = secondsAtEvent(event); const start = cue.start; const end = cue.end; const length = Math.max(0.05, end - start); drag = { cue, mode: "move", origin, start, end, length };
+        const move = (moveEvent) => {
+            const delta = secondsAtEvent(moveEvent) - drag.origin;
+            placeCueInNearestGap(cue, drag.start + delta, drag.length);
+            renderTimeline();
+        };
         const up = () => { drag = null; window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
         window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
     }
     function beginCueEdge(cue, mode, event) {
-        event.preventDefault(); event.stopPropagation(); selected = cue.id; drag = { cue, mode };
-        const move = (moveEvent) => { const time = secondsAtEvent(moveEvent); if (mode === "in") cue.start = clamp(Math.min(time, cue.end - 0.05), 0, cue.end - 0.05); else cue.end = clamp(Math.max(time, cue.start + 0.05), cue.start + 0.05, duration); renderTimeline(); };
+        event.preventDefault(); event.stopPropagation(); selected = cue.id; const { previous, next } = cueNeighbors(cue); drag = { cue, mode, previous, next };
+        const move = (moveEvent) => {
+            const time = secondsAtEvent(moveEvent);
+            if (mode === "in") cue.start = clamp(Math.min(time, cue.end - 0.05), previous?.end ?? 0, cue.end - 0.05);
+            else cue.end = clamp(Math.max(time, cue.start + 0.05), cue.start + 0.05, next?.start ?? duration);
+            renderTimeline();
+        };
         const up = () => { drag = null; window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
         window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
     }
     function setFrame(frame) { video.currentTime = clamp(frame / fps, 0, duration); renderTimeline(); }
     function currentFrame() { return Math.round((video.currentTime || 0) * fps); }
     function normalizeRange() { const max = Math.max(0, Math.round(duration * fps) - 1); inFrame = clamp(Math.round(inFrame), 0, max); outFrame = outFrame < 0 ? max : clamp(Math.round(outFrame), 0, max); if (outFrame <= inFrame) outFrame = Math.min(max, inFrame + 1); }
-    function close() { video.pause(); closeContextMenu(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); dialog.close(); dialog.remove(); }
+    function close() { video.pause(); closeContextMenu(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
 
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });

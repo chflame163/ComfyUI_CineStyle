@@ -276,6 +276,7 @@ function addStyles() {
       .cs-subtitle-context-menu button:hover { background:#317ec4; }
       .cs-subtitle-range-band { position:absolute; top:22px; bottom:0; z-index:1; pointer-events:none; background:rgba(188,198,210,.16); border-left:1px solid rgba(210,220,230,.6); border-right:1px solid rgba(210,220,230,.6); }
       .cs-subtitle-range-marker { position:absolute; top:0; bottom:0; width:2px; background:#c9d4df; box-shadow:0 0 0 1px #15181d; pointer-events:auto; cursor:ew-resize; touch-action:none; }
+      .cs-subtitle-range-marker::after { content:""; position:absolute; top:0; bottom:0; left:-9px; width:20px; background:transparent; pointer-events:auto; cursor:ew-resize; }
       .cs-subtitle-range-marker::before { content:""; position:absolute; top:-1px; width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-top:6px solid #c9d4df; }
       .cs-subtitle-range-marker.in { left:-1px; } .cs-subtitle-range-marker.in::before { left:-4px; }
       .cs-subtitle-range-marker.out { right:-1px; } .cs-subtitle-range-marker.out::before { right:-4px; }

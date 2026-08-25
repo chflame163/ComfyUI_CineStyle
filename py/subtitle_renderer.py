@@ -10,6 +10,9 @@ import torch
 
 
 _FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
+_FONT_SIZE_MIN = 8
+_FONT_SIZE_MAX = 100
+_SUPERSAMPLE_SCALE = 2
 
 
 def font_files(fonts_root: Path) -> list[str]:
@@ -100,20 +103,37 @@ def _draw_spaced_text(draw, xy, text: str, font, fill, spacing: int, stroke_widt
             x += spacing
 
 
-def _draw_text_layer(image, active: list[dict[str, Any]], style: dict[str, Any], fonts_root: Path, supersample: bool = True):
+def _draw_text_layer(
+    image,
+    active: list[dict[str, Any]],
+    style: dict[str, Any],
+    fonts_root: Path,
+    supersample: bool = True,
+    font_size_max: int = _FONT_SIZE_MAX,
+):
     from PIL import Image, ImageDraw, ImageFont
 
     height, width = image.height, image.width
     if supersample and width > 0 and height > 0:
-        scale = 2
+        scale = _SUPERSAMPLE_SCALE
         enlarged = image.resize((width * scale, height * scale), Image.Resampling.BICUBIC)
         scaled_style = dict(style)
         for key in ("font_size", "outline_size", "shadow_size", "letter_spacing"):
             scaled_style[key] = _safe_number(style.get(key), 0) * scale
-        rendered = _draw_text_layer(enlarged, active, scaled_style, fonts_root, supersample=False)
+        rendered = _draw_text_layer(
+            enlarged,
+            active,
+            scaled_style,
+            fonts_root,
+            supersample=False,
+            font_size_max=font_size_max * scale,
+        )
         return rendered.resize((width, height), Image.Resampling.LANCZOS)
     font_path = resolve_font(str(style.get("font", "")), fonts_root)
-    font_size = max(8, min(100, int(round(_safe_number(style.get("font_size", 30), 30)))))
+    font_size = max(
+        _FONT_SIZE_MIN,
+        min(font_size_max, int(round(_safe_number(style.get("font_size", 30), 30)))),
+    )
     try:
         font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default()
     except (OSError, ValueError):

@@ -285,11 +285,11 @@ def _store_frame_cache(
     encode_video: bool = True,
     audio: Any = None,
 ) -> bool:
-    entry = _preview_cache_store().put(
+    entry = _preview_cache_store().put_preview(
         node_id,
         frames,
         safe_fps,
-        variant=variant,
+        proxy=str(variant or "").lower() in {"proxy", "preview"},
         encode_video=encode_video,
         info=info,
         audio=_prepare_audio(audio),
@@ -319,7 +319,7 @@ def _cache_main_video(video: Any, node_id: Any) -> bool:
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     """Return a readable preview cache, falling back to the node's main cache."""
-    entry = _preview_cache_store().get_node(node_id, "preview")
+    entry = _preview_cache_store().get_preview(node_id)
     try:
         if entry:
             frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
@@ -327,7 +327,7 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
                 return entry
     except (OSError, ValueError, KeyError):
         pass
-    main_entry = _preview_cache_store().get_node(node_id, "main")
+    main_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
     try:
         if main_entry:
             frames = np.load(str(main_entry["frames_path"]), mmap_mode="r", allow_pickle=False)
@@ -772,7 +772,7 @@ async def _subtitle_waveform_route(request):
     entry = _preview_entry_for_request(node_id) if node_id else None
     peaks, duration = await asyncio.to_thread(_waveform_from_audio, entry.get("audio") if entry else None)
     if not peaks and node_id:
-        main_entry = _preview_cache_store().get_node(node_id, "main")
+        main_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
         peaks, duration = await asyncio.to_thread(_waveform_from_audio, main_entry.get("audio") if main_entry else None)
     if not peaks and filename:
         peaks, duration = await asyncio.to_thread(_waveform_from_video_file, filename)

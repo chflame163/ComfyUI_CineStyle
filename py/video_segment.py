@@ -346,13 +346,13 @@ def _video_input_fps(video_input: Any, prompt: Any = None, node_id: Any = None) 
     return _prompt_selector_fps(prompt, node_id) or 24.0
 
 
-def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float) -> str | None:
+def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float, *, proxy: bool = False) -> str | None:
     key = str(node_id or "").strip()
     if not key or not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[0] == 0:
         return None
     safe_fps = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else 24.0
     try:
-        entry = _preview_cache_store().put(key, images, safe_fps, encode_video=True)
+        entry = _preview_cache_store().put_preview(key, images, safe_fps, proxy=proxy, encode_video=True)
     except Exception as exc:
         print(f"[CineStyle] Selector input cache failed for node {key}: {exc}")
         return None
@@ -363,8 +363,13 @@ def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float) -> str
     return str(entry["token"])
 
 
-def _selector_cache_for_node(node_id: Any) -> dict[str, Any] | None:
-    return _preview_cache_store().get_node(node_id)
+def _selector_cache_for_node(node_id: Any, variant: str = "") -> dict[str, Any] | None:
+    store = _preview_cache_store()
+    if variant == "proxy":
+        return store.get_preview_variant(node_id, proxy=True)
+    if variant == "main":
+        return store.get_preview_variant(node_id, proxy=False)
+    return store.get_preview(node_id)
 
 
 def _selector_cache_for_token(token: Any) -> dict[str, Any] | None:
@@ -394,14 +399,15 @@ def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.T
 
 async def _selector_cache_info_route(request: web.Request) -> web.Response:
     requested_node_id = str(request.query.get("node_id", ""))
-    entry = _selector_cache_for_node(requested_node_id)
+    variant = str(request.query.get("variant", "")).strip().lower()
+    entry = _selector_cache_for_node(requested_node_id, variant)
     if entry is None:
         return web.json_response({"error": "No cached Selector input."}, status=404)
     token = str(entry["token"])
     return web.json_response(
         {
             "token": token,
-            "label": "Proxy input from the last workflow run" if requested_node_id.endswith(":proxy") else "Cached input from the last workflow run",
+            "label": "Proxy input from the last workflow run" if entry.get("variant") == "proxy" else "Cached input from the last workflow run",
             "video_url": f"/cinestyle/video-selector-cache-video?token={token}",
             "info": entry["info"],
         }
@@ -1505,9 +1511,10 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 proxy_images = proxy_video.get_components().images
                 if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
                     _cache_selector_input(
-                        f"{cls.hidden.unique_id}:proxy",
+                        cls.hidden.unique_id,
                         proxy_images,
                         _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
+                        proxy=True,
                     )
                     _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
                 else:
@@ -1815,9 +1822,10 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                 proxy_images = proxy_video.get_components().images
                 if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
                     _cache_selector_input(
-                        f"{cls.hidden.unique_id}:proxy",
+                        cls.hidden.unique_id,
                         proxy_images,
                         _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
+                        proxy=True,
                     )
                     _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
                 else:

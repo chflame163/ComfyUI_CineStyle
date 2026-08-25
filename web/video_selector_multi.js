@@ -25,9 +25,9 @@ async function fetchInfo(filename) {
     if (isImageFilename(filename)) return fetchImageInfo(filename);
     const response = await api.fetchApi(`/cinestyle/video-info?${new URLSearchParams({ filename })}`); if (!response.ok) throw new Error(await response.text()); return response.json();
 }
-async function fetchCachedSource(node, suffix = "") {
+async function fetchCachedSource(node, variant = "") {
     const nodeId = String(node?.id ?? "").trim(); if (!nodeId) return null;
-    const response = await api.fetchApi(`/cinestyle/video-selector-cache?${new URLSearchParams({ node_id: `${nodeId}${suffix}`, t: String(Date.now()) })}`);
+    const response = await api.fetchApi(`/cinestyle/video-selector-cache?${new URLSearchParams({ node_id: nodeId, variant: String(variant || ""), t: String(Date.now()) })}`);
     if (response.status === 404) return null;
     const result = await response.json(); if (!response.ok) throw new Error(result.error || "Unable to read cached Selector input");
     const info = result.info || {};
@@ -103,8 +103,8 @@ function addStyles() {
 async function openSelector(node, config) {
     const names = { frame: "anchor_frame", prompt: "prompt_data", ...(config.widgets || {}) };
     let source = null;
-    try { source = await fetchCachedSource(node, ":proxy"); } catch { source = null; }
-    if (!source) { try { source = await fetchCachedSource(node); } catch { source = null; } }
+    try { source = await fetchCachedSource(node, "proxy"); } catch { source = null; }
+    if (!source) { try { source = await fetchCachedSource(node, "main"); } catch { source = null; } }
     if (!source) source = connectedVideoSource(node, ["proxy_video"]);
     if (!source) source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
     if (!source) { app.canvas?.prompt?.("Run the workflow once to cache the connected video input before opening the selector", ""); return; }

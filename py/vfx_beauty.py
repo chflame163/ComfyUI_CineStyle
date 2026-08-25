@@ -821,7 +821,7 @@ def _cache_vfx_input(
                     if isinstance(value, (list, tuple)) and len(value) >= 2 and str(value[0]) not in visited:
                         visited.add(str(value[0]))
                         pending.append(prompt.get(str(value[0])) or prompt.get(value[0]))
-        _preview_cache_store().put(key, image, fps, encode_video=True)
+        _preview_cache_store().put_preview(key, image, fps, encode_video=True)
     except Exception as exc:
         print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
     try:
@@ -831,7 +831,7 @@ def _cache_vfx_input(
                 proxy_fps = float(proxy_video.get_components().frame_rate)
             except Exception:
                 proxy_fps = 24.0
-            proxy_present = _preview_cache_store().put(f"{key}:proxy", proxy_images, proxy_fps, encode_video=True) is not None
+            proxy_present = _preview_cache_store().put_preview(key, proxy_images, proxy_fps, proxy=True, encode_video=True) is not None
     except Exception as exc:
         print(f"[CineStyle] VFX Beauty proxy cache failed for node {key}: {exc}")
     cached_mask = None
@@ -847,7 +847,7 @@ def _cache_vfx_input(
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     try:
-        return _preview_cache_store().get_node(node_id)
+        return _preview_cache_store().get_preview_variant(node_id, proxy=False)
     except Exception:
         return None
 
@@ -857,7 +857,7 @@ def _preview_proxy_cache_entry(node_id: str) -> dict[str, Any] | None:
         if not _VFX_PROXY_PRESENT.get(node_id, False):
             return None
     try:
-        return _preview_cache_store().get_node(f"{node_id}:proxy")
+        return _preview_cache_store().get_preview_variant(node_id, proxy=True)
     except Exception:
         return None
 
@@ -866,7 +866,7 @@ def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str)
     """Map a proxy frame to the corresponding original mask frame."""
     try:
         source_entry = _preview_cache_store().get_token(source_token)
-        original_entry = _preview_cache_store().get_node(node_id)
+        original_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
         source_count = int((source_entry or {}).get("info", {}).get("frames") or 0)
         original_count = int((original_entry or {}).get("info", {}).get("frames") or 0)
         if source_count > 1 and original_count > 1 and source_count != original_count:
@@ -955,13 +955,13 @@ def _preview_float(payload: dict[str, Any], name: str, default: float) -> float:
 
 async def _vfx_beauty_cache_info_route(request: web.Request) -> web.Response:
     node_id = str(request.query.get("node_id") or "").strip()
-    entry = _preview_proxy_cache_entry(node_id) or _preview_cache_entry(node_id)
+    entry = _preview_cache_store().get_preview(node_id)
     if entry is None:
         return web.json_response({"error": "Run the workflow once to cache the VFX Beauty input."}, status=404)
     info = dict(entry.get("info") or {})
     with _VFX_CACHE_LOCK:
         has_mask = node_id in _VFX_MASK_CACHE and _VFX_MASK_CACHE[node_id] is not None
-        uses_proxy = bool(_VFX_PROXY_PRESENT.get(node_id, False)) and _preview_proxy_cache_entry(node_id) is not None
+        uses_proxy = bool(entry and entry.get("variant") == "proxy")
     return web.json_response(
         {
             "token": str(entry.get("token") or ""),

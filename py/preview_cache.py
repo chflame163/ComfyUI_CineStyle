@@ -192,9 +192,53 @@ class PreviewCacheStore:
         self._evict()
         return entry
 
+    def put_preview(
+        self,
+        node_id: Any,
+        frames: Any,
+        fps: Any,
+        *,
+        proxy: bool = False,
+        encode_video: bool = True,
+        info: dict[str, Any] | None = None,
+        audio: Any = None,
+        progress: Any = None,
+    ) -> dict[str, Any]:
+        """Store a node-owned preview using the shared main/proxy variants."""
+        return self.put(
+            node_id,
+            frames,
+            fps,
+            variant="proxy" if proxy else "main",
+            encode_video=encode_video,
+            info=info,
+            audio=audio,
+            progress=progress,
+        )
+
     def get_node(self, node_id: Any, variant: str = "") -> dict[str, Any] | None:
         with self.lock:
             return self.entries.get(self._key(node_id, variant))
+
+    def get_preview_variant(self, node_id: Any, *, proxy: bool = False) -> dict[str, Any] | None:
+        """Return one canonical preview variant, with legacy-key compatibility."""
+        variant = "proxy" if proxy else "main"
+        entry = self.get_node(node_id, variant)
+        if entry is not None:
+            return entry
+        # Older nodes stored proxy data by appending ':proxy' to node_id.
+        if proxy:
+            entry = self.get_node(f"{str(node_id or '').strip()}:proxy")
+            if entry is not None:
+                return entry
+            # Subtitle caches used the name 'preview' before the shared API.
+            return self.get_node(node_id, "preview")
+        entry = self.get_node(node_id, "main")
+        return entry if entry is not None else self.get_node(node_id)
+
+    def get_preview(self, node_id: Any) -> dict[str, Any] | None:
+        """Return a node's proxy preview, falling back to its main preview."""
+        return self.get_preview_variant(node_id, proxy=True) or self.get_preview_variant(node_id, proxy=False)
 
     def get_token(self, token: Any) -> dict[str, Any] | None:
         resolved = str(token or "").strip()

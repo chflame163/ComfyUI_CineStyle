@@ -30,6 +30,7 @@ _ROUTE_REGISTERED = False
 _TIME_RE = re.compile(r"^(\d+):(\d{2}):(\d{2})[,.](\d{3})$")
 _SUBTITLE_SRT_CACHE: dict[str, dict[str, str]] = {}
 _SUBTITLE_PROXY_RENDER_SIZE: dict[str, tuple[int, int]] = {}
+_SUBTITLE_TIMELINE_OPEN: set[str] = set()
 _PREVIEW_CACHE_STORE = None
 _SUBTITLE_LOGGER = logging.getLogger("CineStyleVideoSubtitle")
 
@@ -459,15 +460,18 @@ class CSVideoSubtitle(io.ComfyNode):
             _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = render_size
         if node_id:
             _clear_video_caches(node_id)
-        _subtitle_info("stage 2/6: preparing preview caches")
-        main_cached = _cache_main_video(video, node_id)
-        if proxy_video is None:
-            if main_cached:
-                _subtitle_info("preview uses the main video cache")
+        if node_id and str(node_id) in _SUBTITLE_TIMELINE_OPEN:
+            _subtitle_info("stage 2/6: preparing preview caches")
+            main_cached = _cache_main_video(video, node_id)
+            if proxy_video is None:
+                if main_cached:
+                    _subtitle_info("preview uses the main video cache")
+            else:
+                cached_preview = _cache_proxy_preview(proxy_video, node_id, render_size=render_size)
+                if not cached_preview and main_cached:
+                    _subtitle_info("proxy cache failed; preview uses the main video cache")
         else:
-            cached_preview = _cache_proxy_preview(proxy_video, node_id, render_size=render_size)
-            if not cached_preview and main_cached:
-                _subtitle_info("proxy cache failed; preview uses the main video cache")
+            _subtitle_info("stage 2/6: preview cache generation skipped (Edit Timeline is closed)")
         cache_entry = _SUBTITLE_SRT_CACHE.get(cache_key, {}) if cache_key else {}
         cached_edited_srt = (
             str(cache_entry.get("srt", ""))
@@ -599,6 +603,23 @@ async def _subtitle_srt_cache_update_route(request):
     return web.json_response({"ok": True})
 
 
+async def _subtitle_timeline_state_route(request):
+    from aiohttp import web
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON payload."}, status=400)
+    node_id = str(payload.get("node_id", "")).strip()
+    if not node_id:
+        return web.json_response({"error": "Missing subtitle node id."}, status=400)
+    if bool(payload.get("open")):
+        _SUBTITLE_TIMELINE_OPEN.add(node_id)
+    else:
+        _SUBTITLE_TIMELINE_OPEN.discard(node_id)
+    return web.json_response({"ok": True})
+
+
 async def _subtitle_preview_route(request):
     from aiohttp import web
 
@@ -704,6 +725,7 @@ class CineStyleVideoSubtitleExtension(ComfyExtension):
             server_instance.routes.get("/cinestyle/font/{font:.*}")(_font_file_route)
             server_instance.routes.get("/cinestyle/video-subtitle-srt-cache")(_subtitle_srt_cache_route)
             server_instance.routes.post("/cinestyle/video-subtitle-srt-cache")(_subtitle_srt_cache_update_route)
+            server_instance.routes.post("/cinestyle/video-subtitle-timeline-state")(_subtitle_timeline_state_route)
             server_instance.routes.get("/cinestyle/video-subtitle-preview-info")(_subtitle_preview_info_route)
             server_instance.routes.get("/cinestyle/video-subtitle-preview-video")(_subtitle_preview_video_route)
             server_instance.routes.post("/cinestyle/video-subtitle-preview")(_subtitle_preview_route)

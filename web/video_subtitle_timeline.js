@@ -140,6 +140,15 @@ async function fetchCachedProxy(node, filename = "") {
     if (!response.ok) throw new Error(result.error || "Unable to read subtitle preview cache");
     return { url: api.apiURL(String(result.video_url || "")), info: result.info || {}, label: String(result.label || "Subtitle preview cache") };
 }
+async function setTimelineOpen(node, open) {
+    const nodeId = String(node?.id ?? "").trim();
+    if (!nodeId) return;
+    await api.fetchApi("/cinestyle/video-subtitle-timeline-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: nodeId, open: Boolean(open) }),
+    });
+}
 async function fetchCachedSrt(node) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId) return null;
@@ -353,6 +362,7 @@ async function openTimeline(node) {
       </div>`;
     document.body.append(dialog);
     dialog.showModal();
+    await setTimelineOpen(node, true).catch(() => {});
     const textEditor = createCineStyleTextEditor(dialog);
 
     const video = dialog.querySelector(".cs-subtitle-video");
@@ -819,7 +829,7 @@ async function openTimeline(node) {
     function setFrame(frame) { video.currentTime = clamp(frame / fps, 0, duration); renderTimeline(); }
     function currentFrame() { return Math.round((video.currentTime || 0) * fps); }
     function normalizeRange() { const max = Math.max(0, Math.round(duration * fps) - 1); inFrame = clamp(Math.round(inFrame), 0, max); outFrame = outFrame < 0 ? max : clamp(Math.round(outFrame), 0, max); if (outFrame <= inFrame) outFrame = Math.min(max, inFrame + 1); }
-    function close() { video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
+    function close() { void setTimelineOpen(node, false).catch(() => {}); video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
 
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });

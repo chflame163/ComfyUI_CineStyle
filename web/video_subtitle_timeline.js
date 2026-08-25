@@ -276,6 +276,7 @@ function addStyles() {
       .cs-subtitle-preview-loading[hidden] { display:none; }
       .cs-subtitle-preview-loading::before { content:""; width:16px; height:16px; margin-right:9px; border:2px solid #5c7185; border-top-color:#7dc6ff; border-radius:50%; animation:cs-subtitle-spin .8s linear infinite; }
       @keyframes cs-subtitle-spin { to { transform:rotate(360deg); } }
+      .cs-subtitle-overlay-clip { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
       .cs-subtitle-overlay-image { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; pointer-events:none; display:none; }
       .cs-subtitle-interaction-box { position:absolute; display:none; box-sizing:border-box; border:1px dashed transparent; z-index:4; cursor:grab; touch-action:none; }
       .cs-subtitle-interaction-box:hover { border-color:#8bc7f5; }
@@ -382,7 +383,7 @@ async function openTimeline(node) {
     dialog.innerHTML = `
       <div class="cs-subtitle-shell">
         <div class="cs-subtitle-head"><div><h2 class="cs-subtitle-title">Subtitle Timeline</h2><div class="cs-subtitle-muted cs-subtitle-file"></div></div><button class="cs-subtitle-close" type="button" aria-label="Close">&times;</button></div>
-         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><img class="cs-subtitle-overlay-image" alt="" draggable="false"><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div><div class="cs-subtitle-preview-loading" role="status" aria-live="polite"><span class="cs-subtitle-preview-loading-text">Preparing subtitle preview...</span></div></div>
+         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><div class="cs-subtitle-overlay-clip"><img class="cs-subtitle-overlay-image" alt="" draggable="false"></div><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div><div class="cs-subtitle-preview-loading" role="status" aria-live="polite"><span class="cs-subtitle-preview-loading-text">Preparing subtitle preview...</span></div></div>
         <div class="cs-subtitle-readout"><span class="current">00:00.00</span><span class="range"></span><span class="duration">00:00.00</span></div>
         <div class="cs-subtitle-pointer-row"><button class="cs-subtitle-pointer" type="button" aria-label="Current time"></button></div>
         <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-audio" aria-label="Audio"><span class="cs-subtitle-track-label">Audio</span><div class="cs-subtitle-track-body"><canvas class="cs-subtitle-waveform" aria-hidden="true"></canvas></div></div></div>
@@ -403,6 +404,7 @@ async function openTimeline(node) {
 
     const video = dialog.querySelector(".cs-subtitle-video");
     const previewWrap = dialog.querySelector(".cs-subtitle-preview-wrap");
+    const overlayClip = dialog.querySelector(".cs-subtitle-overlay-clip");
     const overlayImage = dialog.querySelector(".cs-subtitle-overlay-image");
     const interactionBox = dialog.querySelector(".cs-subtitle-interaction-box");
     const viewport = dialog.querySelector(".cs-subtitle-viewport");
@@ -506,7 +508,22 @@ async function openTimeline(node) {
         overlayImage.style.transform = "";
         interactionBox.style.transform = "";
     }
+    function updateOverlayClip() {
+        if (!overlayClip) return;
+        const content = imageContentRect();
+        if (!content) {
+            overlayClip.style.clipPath = "";
+            return;
+        }
+        const previewRect = previewWrap.getBoundingClientRect();
+        const left = Math.max(0, content.left - previewRect.left);
+        const top = Math.max(0, content.top - previewRect.top);
+        const right = Math.max(0, previewRect.right - (content.left + content.width));
+        const bottom = Math.max(0, previewRect.bottom - (content.top + content.height));
+        overlayClip.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+    }
     function updateInteractionBox() {
+        updateOverlayClip();
         if (!previewBounds) { interactionBox.style.display = "none"; return; }
         const content = imageContentRect();
         if (!content) return;

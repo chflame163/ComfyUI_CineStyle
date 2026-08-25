@@ -200,6 +200,41 @@ def _normalize_hex(value: Any, default: str) -> str:
     return text if re.fullmatch(r"#[0-9A-F]{6}", text) else default
 
 
+def _output_style_matching_preview(
+    style: dict[str, Any],
+    output_width: int,
+    output_height: int,
+    proxy_video: Any,
+) -> dict[str, Any]:
+    """Mirror preview proxy scaling and renderer bounds on final output text."""
+    if proxy_video is None or output_width <= 0 or output_height <= 0:
+        return style
+    try:
+        proxy_components = proxy_video.get_components()
+        proxy_images = proxy_components.images
+        proxy_width = int(proxy_images.shape[2])
+        proxy_height = int(proxy_images.shape[1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return style
+    scale = min(proxy_width / float(output_width), proxy_height / float(output_height))
+    if not np.isfinite(scale) or scale <= 0 or abs(scale - 1.0) <= 1e-6:
+        return style
+    adjusted = dict(style)
+    bounds = {
+        "font_size": (8.0, 200.0),
+        "outline_size": (0.0, 20.0),
+        "shadow_size": (0.0, 20.0),
+    }
+    for name, (minimum, maximum) in bounds.items():
+        try:
+            value = float(style.get(name, minimum))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        preview_value = max(minimum, min(maximum, round(value * scale)))
+        adjusted[name] = int(round(preview_value / scale))
+    return adjusted
+
+
 def _clear_video_caches(node_id: Any) -> None:
     key = str(node_id or "").strip()
     if not key:
@@ -783,6 +818,12 @@ class CSVideoSubtitle(io.ComfyNode):
             "shadow_size": shadow_size,
             "shadow_color": shadow_color,
         }
+        output_style = _output_style_matching_preview(
+            style,
+            int(images.shape[2]),
+            int(images.shape[1]),
+            proxy_video,
+        )
         _subtitle_info("subtitle cues ready: count=%d", len(cues))
         _subtitle_info("stage 4/6: rendering subtitles onto %d frames", int(images.shape[0]))
         rendered = []
@@ -792,7 +833,7 @@ class CSVideoSubtitle(io.ComfyNode):
                 time_seconds = index / frame_rate
                 active = [cue for cue in cues if float(cue["start"]) <= time_seconds < float(cue["end"])]
                 rendered.append(
-                    _renderer_module().render_frame(frame, active, style, _fonts_root())
+                    _renderer_module().render_frame(frame, active, output_style, _fonts_root())
                     if active
                     else frame[..., :3].detach().cpu().float()
                 )

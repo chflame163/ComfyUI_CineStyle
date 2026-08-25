@@ -8,8 +8,6 @@ import json
 import hashlib
 import importlib.util
 import logging
-import os
-from fractions import Fraction
 from urllib.parse import quote, unquote
 from pathlib import Path
 from typing import Any
@@ -32,7 +30,6 @@ _ROUTE_REGISTERED = False
 _TIME_RE = re.compile(r"^(\d+):(\d{2}):(\d{2})[,.](\d{3})$")
 _SUBTITLE_SRT_CACHE: dict[str, dict[str, str]] = {}
 _SUBTITLE_PROXY_RENDER_SIZE: dict[str, tuple[int, int]] = {}
-_SUBTITLE_SOURCE_INFO: dict[str, dict[str, Any]] = {}
 _PREVIEW_CACHE_STORE = None
 _SUBTITLE_LOGGER = logging.getLogger("CineStyleVideoSubtitle")
 
@@ -206,94 +203,6 @@ def _clear_video_caches(node_id: Any) -> None:
     _preview_cache_store().clear_node(key)
 
 
-def _source_filename_from_metadata(metadata: dict[str, Any]) -> str:
-    for name in ("source_filename", "filename", "source_file", "video_file", "video_path", "path", "source"):
-        value = metadata.get(name)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _video_source_filename(video: Any, metadata: dict[str, Any]) -> str:
-    value = _source_filename_from_metadata(metadata)
-    if value:
-        return value
-    getter = getattr(video, "get_stream_source", None)
-    if callable(getter):
-        try:
-            source = getter()
-            if isinstance(source, (str, os.PathLike)) and str(source).strip():
-                return str(source).strip()
-        except Exception:
-            pass
-    return ""
-
-
-def _source_info_for_node(node_id: Any) -> dict[str, Any]:
-    return _SUBTITLE_SOURCE_INFO.get(str(node_id or "").strip(), {})
-
-
-def _adapt_source_frames(array: np.ndarray, source_fps: float, source_info: dict[str, Any]) -> tuple[np.ndarray, float]:
-    metadata = source_info.get("metadata") if isinstance(source_info.get("metadata"), dict) else {}
-    frame_count = int(array.shape[0])
-    start_frame = 0
-    end_frame = frame_count - 1
-    has_frame_window = "start_frame" in metadata or "end_frame" in metadata
-    if not has_frame_window:
-        try:
-            trim_start = float(metadata.get("active_start_seconds", 0.0) or 0.0)
-            trim_duration = float(metadata.get("active_duration_seconds", 0.0) or 0.0)
-            if trim_start > 0:
-                start_frame = max(0, min(frame_count - 1, int(round(trim_start * source_fps))))
-            if trim_duration > 0:
-                end_frame = min(frame_count - 1, start_frame + max(1, int(round(trim_duration * source_fps))) - 1)
-        except (TypeError, ValueError, OverflowError):
-            pass
-    try:
-        if has_frame_window:
-            start_frame = max(0, min(frame_count - 1, int(float(metadata.get("start_frame", 0) or 0))))
-    except (TypeError, ValueError, OverflowError):
-        start_frame = 0
-    try:
-        if has_frame_window:
-            requested_end = int(float(metadata.get("end_frame", -1) or -1))
-            if requested_end >= 0:
-                end_frame = min(frame_count - 1, requested_end)
-    except (TypeError, ValueError, OverflowError):
-        end_frame = frame_count - 1
-    if end_frame < start_frame:
-        end_frame = start_frame
-    array = array[start_frame:end_frame + 1]
-
-    target_fps = source_fps
-    try:
-        candidate_fps = float(metadata.get("loaded_fps", source_fps) or source_fps)
-        if np.isfinite(candidate_fps) and candidate_fps > 0:
-            target_fps = candidate_fps
-    except (TypeError, ValueError, OverflowError):
-        pass
-    if array.shape[0] > 1 and abs(source_fps - target_fps) >= 1e-6:
-        output_count = max(1, int(round(array.shape[0] * target_fps / source_fps)))
-        indices = np.rint(np.linspace(0, array.shape[0] - 1, output_count)).astype(np.int64)
-        array = array[indices]
-
-    try:
-        target_width = int(float(metadata.get("loaded_width", 0) or 0))
-        target_height = int(float(metadata.get("loaded_height", 0) or 0))
-    except (TypeError, ValueError, OverflowError):
-        target_width = target_height = 0
-    if target_width > 0 and target_height > 0 and (array.shape[2] != target_width or array.shape[1] != target_height):
-        resized = []
-        for frame in array:
-            resized.append(
-                av.VideoFrame.from_ndarray(frame, format="rgb24")
-                .reformat(width=target_width, height=target_height, format="rgb24")
-                .to_ndarray(format="rgb24")
-            )
-        array = np.stack(resized, axis=0).astype(np.uint8, copy=False)
-    return array, target_fps
-
-
 def _extract_video_frames(video: Any) -> tuple[np.ndarray, float, dict[str, Any], Any]:
     components = video.get_components()
     images = components.images
@@ -382,7 +291,7 @@ def _store_frame_cache(
         variant=variant,
         encode_video=encode_video,
         info=info,
-        audio=_prepare_audio(audio) if not encode_video else None,
+        audio=_prepare_audio(audio),
     )
     _subtitle_info(
         "%s cache ready: frames=%d, size=%dx%d, fps=%.3f",
@@ -395,78 +304,6 @@ def _store_frame_cache(
     return entry is not None
 
 
-def _resolve_video_file(filename: str) -> Path:
-    value = str(filename or "").strip()
-    if not value:
-        raise FileNotFoundError(value)
-    if folder_paths.exists_annotated_filepath(value):
-        return Path(folder_paths.get_annotated_filepath(value)).resolve()
-    candidate = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(value))))
-    if candidate.is_file():
-        return candidate
-    raise FileNotFoundError(value)
-
-
-def _cache_main_video_from_file(filename: str, node_id: Any) -> bool:
-    """Decode the connected source file when an editor requests a deferred cache."""
-    if not filename or not node_id:
-        return False
-    try:
-        path = _resolve_video_file(filename)
-        with av.open(str(path), mode="r") as container:
-            if not container.streams.video:
-                raise ValueError("No video stream found.")
-            stream = container.streams.video[0]
-            rate = stream.average_rate or stream.guessed_rate or Fraction(24, 1)
-            safe_fps = float(Fraction(rate))
-            frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
-        if not frames:
-            raise ValueError("Video contains no decodable frames.")
-        array = np.stack(frames, axis=0).astype(np.uint8, copy=False)
-        source_info = _source_info_for_node(node_id)
-        array, output_fps = _adapt_source_frames(array, safe_fps, source_info)
-        audio = None
-        try:
-            with av.open(str(path), mode="r") as container:
-                if container.streams.audio:
-                    audio_stream = container.streams.audio[0]
-                    chunks = []
-                    for frame in container.decode(audio_stream):
-                        chunk = frame.to_ndarray()
-                        if chunk.ndim == 1:
-                            chunk = chunk[None, :]
-                        chunks.append(chunk)
-                    if chunks:
-                        sample_rate = int(audio_stream.codec_context.sample_rate or 0)
-                        if sample_rate > 0:
-                            audio = {
-                                "waveform": torch.from_numpy(np.concatenate(chunks, axis=1)).unsqueeze(0),
-                                "sample_rate": sample_rate,
-                            }
-        except Exception as exc:
-            _subtitle_info("source audio cache unavailable: %s", exc)
-        info = {
-            "frames": int(array.shape[0]),
-            "width": int(array.shape[2]),
-            "height": int(array.shape[1]),
-            "fps": output_fps if np.isfinite(output_fps) and output_fps > 0 else 24.0,
-            "duration": float(array.shape[0]) / (output_fps if np.isfinite(output_fps) and output_fps > 0 else 24.0),
-        }
-        return _store_frame_cache(
-            array,
-            float(info["fps"]),
-            info,
-            node_id,
-            "preview",
-            "preview-file",
-            encode_video=False,
-            audio=audio,
-        )
-    except Exception as exc:
-        _subtitle_info("main video file cache unavailable: %s", exc)
-        return False
-
-
 def _cache_proxy_preview(
     proxy_video: Any,
     node_id: Any,
@@ -476,29 +313,11 @@ def _cache_proxy_preview(
 
 
 def _cache_main_video(video: Any, node_id: Any) -> bool:
-    return _cache_video_source(video, node_id, "main", "main", encode_video=False)
-
-
-def _ensure_preview_video(entry: dict[str, Any], node_id: str) -> dict[str, Any] | None:
-    """Lazily encode a video stream when a recovered frame cache needs one."""
-    if Path(str(entry.get("video_path") or entry.get("path") or "")).is_file():
-        return entry
-    progress = _SubtitleProgress(int(entry.get("info", {}).get("frames", 1) or 1), "preview video encoding")
-    try:
-        entry = _preview_cache_store().ensure_video(entry, progress=progress)
-        if not entry:
-            return None
-        _subtitle_info("preview video rebuilt from main video frames")
-        return entry
-    except Exception as exc:
-        _subtitle_info("preview video rebuild unavailable: %s", exc)
-        return None
-    finally:
-        progress.close()
+    return _cache_video_source(video, node_id, "main", "main", encode_video=True)
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
-    """Return a readable preview cache, rebuilding it from the main video cache when needed."""
+    """Return a readable preview cache, falling back to the node's main cache."""
     entry = _preview_cache_store().get_node(node_id, "preview")
     try:
         if entry:
@@ -520,20 +339,7 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
 
 
 def _preview_entry_for_request(node_id: str, video_filename: str = "") -> dict[str, Any] | None:
-    entry = _preview_cache_entry(node_id)
-    if entry is not None:
-        return entry
-    source_info = _source_info_for_node(node_id)
-    candidates = []
-    for candidate in (video_filename, source_info.get("source_filename", "")):
-        value = str(candidate or "").strip()
-        if value and value not in candidates:
-            candidates.append(value)
-    for candidate in candidates:
-        if _cache_main_video_from_file(candidate, node_id):
-            _subtitle_info("preview cache created on demand from source video: %s", candidate)
-            return _preview_cache_entry(node_id)
-    return None
+    return _preview_cache_entry(node_id)
 
 class CSVideoSubtitle(io.ComfyNode):
     @classmethod
@@ -635,19 +441,6 @@ class CSVideoSubtitle(io.ComfyNode):
             _SUBTITLE_SRT_CACHE[cache_key] = {"source_hash": source_hash, "srt": edited_srt, "node_id": cache_key}
         components = video.get_components()
         source_metadata = dict(components.metadata or {})
-        source_filename = _video_source_filename(video, source_metadata)
-        if source_filename and "source_filename" not in source_metadata:
-            source_metadata["source_filename"] = source_filename
-        active_trim = getattr(video, "get_active_trim_window", None)
-        if callable(active_trim):
-            try:
-                trim_start, trim_duration = active_trim()
-                if float(trim_start or 0) > 0:
-                    source_metadata["active_start_seconds"] = float(trim_start)
-                if float(trim_duration or 0) > 0:
-                    source_metadata["active_duration_seconds"] = float(trim_duration)
-            except (TypeError, ValueError, OverflowError):
-                pass
         images = components.images
         if images.ndim != 4 or images.shape[0] == 0:
             raise ValueError("VIDEO contains no decodable frames.")
@@ -666,26 +459,15 @@ class CSVideoSubtitle(io.ComfyNode):
             _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = render_size
         if node_id:
             _clear_video_caches(node_id)
-            _SUBTITLE_SOURCE_INFO[str(node_id)] = {
-                "source_filename": source_filename,
-                "metadata": {
-                    key: source_metadata[key]
-                    for key in (
-                        "source_filename", "filename", "source_file", "video_file", "video_path", "path", "source",
-                        "source_fps", "start_frame", "end_frame", "loaded_fps",
-                        "loaded_width", "loaded_height", "active_start_seconds", "active_duration_seconds",
-                    )
-                    if key in source_metadata
-                },
-                "frames": int(images.shape[0]),
-                "width": int(images.shape[2]),
-                "height": int(images.shape[1]),
-                "fps": frame_rate,
-            }
-        _subtitle_info(
-            "stage 2/6: recording source info; preview cache deferred%s",
-            f" ({source_filename})" if source_filename else " (source filename unavailable)",
-        )
+        _subtitle_info("stage 2/6: preparing preview caches")
+        main_cached = _cache_main_video(video, node_id)
+        if proxy_video is None:
+            if main_cached:
+                _subtitle_info("preview uses the main video cache")
+        else:
+            cached_preview = _cache_proxy_preview(proxy_video, node_id, render_size=render_size)
+            if not cached_preview and main_cached:
+                _subtitle_info("proxy cache failed; preview uses the main video cache")
         cache_entry = _SUBTITLE_SRT_CACHE.get(cache_key, {}) if cache_key else {}
         cached_edited_srt = (
             str(cache_entry.get("srt", ""))
@@ -827,14 +609,29 @@ async def _subtitle_preview_route(request):
     node_id = str(payload.get("node_id", "")).strip()
     if not node_id:
         return web.json_response({"error": "Missing subtitle node id."}, status=400)
-    entry = _preview_entry_for_request(node_id, str(payload.get("video_filename", "")).strip())
-    if not entry:
-        return web.json_response({"error": "Source video file unavailable. Run CS Video Subtitle once after restoring the source video."}, status=404)
+    entry = _preview_entry_for_request(node_id)
     try:
-        frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
-        frame_index = max(0, min(int(payload.get("frame", 0)), int(frames.shape[0]) - 1))
-        proxy_height, proxy_width = int(frames.shape[1]), int(frames.shape[2])
-        fps = float(entry.get("info", {}).get("fps", 24.0) or 24.0)
+        frame_index = max(0, int(payload.get("frame", 0)))
+        if entry:
+            frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
+            frame_index = min(frame_index, int(frames.shape[0]) - 1)
+            proxy_height, proxy_width = int(frames.shape[1]), int(frames.shape[2])
+            fps = float(entry.get("info", {}).get("fps", 24.0) or 24.0)
+        else:
+            source = str(payload.get("video_filename", "")).strip()
+            if not source:
+                return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once or provide a source video."}, status=404)
+            frame = _preview_cache_store().decode_frame({"video": source, "source_kind": "video"}, frame_index)
+            proxy_height, proxy_width = int(frame.shape[1]), int(frame.shape[2])
+            fps = 24.0
+            try:
+                source_path = _preview_cache_store()._resolve_file(source)
+                with av.open(source_path, mode="r") as source_container:
+                    source_rate = source_container.streams.video[0].average_rate or source_container.streams.video[0].guessed_rate
+                    if source_rate:
+                        fps = float(source_rate)
+            except Exception:
+                pass
         current_time = frame_index / max(0.001, fps)
         cues = payload.get("cues") if isinstance(payload.get("cues"), list) else []
         active = [
@@ -867,16 +664,15 @@ async def _subtitle_preview_info_route(request):
     from aiohttp import web
 
     node_id = str(request.query.get("node_id", "")).strip()
-    entry = _preview_entry_for_request(node_id, str(request.query.get("video_filename", "")).strip())
-    entry = _ensure_preview_video(entry, node_id) if entry else None
+    entry = _preview_entry_for_request(node_id)
     video_path = Path(str(entry.get("video_path", ""))) if entry else None
     if not entry or video_path is None or not video_path.is_file():
-        return web.json_response({"error": "Source video file unavailable. Run CS Video Subtitle once after restoring the source video."}, status=404)
+        return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once to build it."}, status=404)
     return web.json_response(
         {
             "video_url": f"/cinestyle/video-subtitle-preview-video?node_id={quote(node_id)}",
             "info": dict(entry.get("info") or {}),
-            "label": "Subtitle preview cache generated on demand",
+            "label": "Subtitle preview cache from the last workflow run",
         }
     )
 
@@ -885,11 +681,10 @@ async def _subtitle_preview_video_route(request):
     from aiohttp import web
 
     node_id = str(request.query.get("node_id", "")).strip()
-    entry = _preview_entry_for_request(node_id, str(request.query.get("video_filename", "")).strip())
-    entry = _ensure_preview_video(entry, node_id) if entry else None
+    entry = _preview_entry_for_request(node_id)
     video_path = Path(str(entry.get("video_path", ""))) if entry else None
     if not entry or video_path is None or not video_path.is_file():
-        return web.json_response({"error": "Source video file unavailable. Subtitle preview cache cannot be generated."}, status=404)
+        return web.json_response({"error": "Subtitle preview cache is unavailable."}, status=404)
     return web.FileResponse(
         path=video_path,
         headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"},

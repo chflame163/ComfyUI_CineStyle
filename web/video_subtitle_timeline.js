@@ -362,8 +362,10 @@ async function openTimeline(node) {
     const connectedSource = connectedVideoSource(node, ["proxy_video", "video"]);
     const filename = String(connectedSource?.filename || "");
     const sourceTrim = connectedSource?.isCSLoad ? connectedSource : null;
-    const externalSrt = graphSrtText(node) || String(widget(node, "srt")?.value || "");
-    const persistedSrt = String(widget(node, "edited_srt")?.value || "").trim();
+    const externalSrtCandidate = graphSrtText(node) || String(widget(node, "srt")?.value || "");
+    const externalSrt = parseSrt(externalSrtCandidate).length ? externalSrtCandidate : "";
+    const editedSrtCandidate = String(widget(node, "edited_srt")?.value || "").trim();
+    const persistedSrt = parseSrt(editedSrtCandidate).length ? editedSrtCandidate : "";
     let cachedSrt = null;
     let cachedProxy = null;
     let sourceSrt = persistedSrt || externalSrt;
@@ -1115,7 +1117,7 @@ async function openTimeline(node) {
         setLoading("Reading subtitle cache...");
         cachedSrt = await fetchCachedSrt(node).catch(() => null);
         sourceHash = cachedSrt?.sourceHash || (externalSrt ? await srtSourceHash(externalSrt).catch(() => "") : "");
-        if (!persistedSrt && cachedSrt?.srt) {
+        if (!sourceSrt && parseSrt(cachedSrt?.srt || "").length) {
             sourceSrt = cachedSrt.srt;
             replaceCues(sourceSrt);
         }

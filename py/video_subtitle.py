@@ -260,11 +260,27 @@ def _srt_source_hash(value: str) -> str:
 
 
 def _coerce_srt_input(value: Any) -> str:
+    if value is None:
+        return ""
     if isinstance(value, str):
         return value
     if isinstance(value, (tuple, list)) and len(value) == 1 and isinstance(value[0], str):
         return value[0]
-    raise ValueError("srt input must be a text value containing valid SRT cues.")
+    return ""
+
+
+def _select_srt_text(edited_srt: Any, srt: Any, cached_srt: Any = "") -> tuple[str, str]:
+    """Prefer edited SRT, then connected SRT, then a matching cached SRT."""
+    edited_text = _coerce_srt_input(edited_srt).strip()
+    source_text = _coerce_srt_input(srt).strip()
+    cached_text = _coerce_srt_input(cached_srt).strip()
+    if edited_text and parse_srt(edited_text):
+        return edited_text, source_text if source_text and parse_srt(source_text) else edited_text
+    if source_text and parse_srt(source_text):
+        return source_text, source_text
+    if cached_text and parse_srt(cached_text):
+        return cached_text, cached_text
+    raise ValueError("Provide valid SRT cues in edited_srt or the optional srt input.")
 
 
 def _safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -1230,13 +1246,18 @@ class CSVideoSubtitle(io.ComfyNode):
             inputs=[
                 io.Video.Input("video", tooltip="Connect any compatible VIDEO output."),
                 io.Video.Input("proxy_video", optional=True, tooltip="Optional compatible proxy VIDEO output for Edit Timeline preview."),
-                io.String.Input("srt", force_input=True, tooltip="Connect any STRING output containing valid SRT cues."),
+                io.String.Input(
+                    "srt",
+                    force_input=True,
+                    optional=True,
+                    tooltip="Optional STRING input containing valid SRT cues. edited_srt is preferred when valid.",
+                ),
                 io.String.Input(
                     "edited_srt",
                     default="",
                     multiline=True,
                     optional=True,
-                    tooltip="Persisted SRT text edited in Edit Timeline. When non-empty, it overrides the connected SRT.",
+                    tooltip="Persisted SRT text edited in Edit Timeline. When valid, it takes priority over the optional srt input.",
                 ),
                 io.Int.Input("preview_in", default=0, min=0, max=10000000, step=1, advanced=True),
                 io.Int.Input("preview_out", default=-1, min=-1, max=10000000, step=1, advanced=True),
@@ -1298,9 +1319,7 @@ class CSVideoSubtitle(io.ComfyNode):
         primary_color = _normalize_hex(primary_color, "#FFFFFF")
         secondary_color = _normalize_hex(secondary_color, "#FF0000")
         srt = _coerce_srt_input(srt)
-        if not srt.strip():
-            raise ValueError("Connect an external SRT source to the srt input.")
-        edited_srt = str(edited_srt or "")
+        edited_input = _coerce_srt_input(edited_srt)
         raw_node_id = getattr(getattr(cls, "hidden", None), "unique_id", None)
         cache_key = str(raw_node_id or "").strip()
         node_id = cache_key or None
@@ -1311,7 +1330,9 @@ class CSVideoSubtitle(io.ComfyNode):
             if cached_srt and (not cached_srt.get("source_hash") or cached_srt.get("source_hash") == source_hash)
             else ""
         )
-        edited_srt = edited_srt.strip() or cached_edited_srt or str(srt)
+        edited_srt, srt_source = _select_srt_text(edited_input, srt, cached_edited_srt)
+        srt = srt_source
+        source_hash = _srt_source_hash(srt)
         if cache_key:
             _SUBTITLE_SRT_CACHE[cache_key] = {"source_hash": source_hash, "srt": edited_srt, "node_id": cache_key}
         components = video.get_components()
@@ -1351,13 +1372,6 @@ class CSVideoSubtitle(io.ComfyNode):
                     _subtitle_info("proxy cache failed; preview uses the main video cache")
         else:
             _subtitle_info("stage 2/6: preview cache generation skipped (Edit Timeline is closed)")
-        cache_entry = _SUBTITLE_SRT_CACHE.get(cache_key, {}) if cache_key else {}
-        cached_edited_srt = (
-            str(cache_entry.get("srt", ""))
-            if cache_entry and (not cache_entry.get("source_hash") or cache_entry.get("source_hash") == _srt_source_hash(srt))
-            else ""
-        )
-        edited_srt = edited_srt.strip() or cached_edited_srt or str(srt)
         _subtitle_info("stage 3/6: parsing subtitle cues")
         cues = _coerce_cues(srt, edited_srt)
         source_offset = 0.0

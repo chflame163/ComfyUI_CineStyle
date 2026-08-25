@@ -112,6 +112,10 @@ function appendVideoTrimParams(params, trim) {
     if (Number.isFinite(Number(trim.startFrame))) params.set("start_frame", String(Math.max(0, Math.round(Number(trim.startFrame)))));
     if (Number.isFinite(Number(trim.endFrame))) params.set("end_frame", String(Math.round(Number(trim.endFrame))));
     if (Number.isFinite(Number(trim.targetFps)) && Number(trim.targetFps) > 0) params.set("loaded_fps", String(Number(trim.targetFps)));
+    if (Number.isFinite(Number(trim.outputWidth)) && Number(trim.outputWidth) > 0) params.set("width", String(Math.round(Number(trim.outputWidth))));
+    if (Number.isFinite(Number(trim.outputHeight)) && Number(trim.outputHeight) > 0) params.set("height", String(Math.round(Number(trim.outputHeight))));
+    if (Number.isFinite(Number(trim.multiple)) && Number(trim.multiple) > 0) params.set("multiple", String(Math.round(Number(trim.multiple))));
+    if (trim.keepAspectRatio != null) params.set("keep_aspect_ratio", trim.keepAspectRatio ? "1" : "0");
     return params;
 }
 async function fetchCachedProxy(node, filename = "", trim = null) {
@@ -119,8 +123,8 @@ async function fetchCachedProxy(node, filename = "", trim = null) {
     if (!nodeId) return null;
     const params = appendVideoTrimParams(new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) }), trim);
     const response = await api.fetchApi(`/cinestyle/video-subtitle-preview-info?${params}`);
-    if (response.status === 404) return null;
     const result = await response.json();
+    if (response.status === 404) return result?.warning ? { warning: String(result.warning) } : null;
     if (!response.ok) throw new Error(result.error || "Unable to read subtitle preview cache");
     return { url: api.apiURL(String(result.video_url || "")), info: result.info || {}, label: String(result.label || "Subtitle preview cache") };
 }
@@ -357,13 +361,7 @@ function addStyles() {
 async function openTimeline(node) {
     const connectedSource = connectedVideoSource(node, ["proxy_video", "video"]);
     const filename = String(connectedSource?.filename || "");
-    const sourceTrim = connectedSource?.isCSLoad && (
-        Number(connectedSource.startFrame) > 0
-        || Number(connectedSource.endFrame) >= 0
-        || Number(connectedSource.targetFps) > 0
-    )
-        ? connectedSource
-        : null;
+    const sourceTrim = connectedSource?.isCSLoad ? connectedSource : null;
     const externalSrt = graphSrtText(node) || String(widget(node, "srt")?.value || "");
     const persistedSrt = String(widget(node, "edited_srt")?.value || "").trim();
     let cachedSrt = null;
@@ -1123,6 +1121,10 @@ async function openTimeline(node) {
         }
         setLoading("Preparing video preview cache...");
         cachedProxy = await fetchCachedProxy(node, filename, sourceTrim).catch(() => null);
+        if (cachedProxy?.warning) {
+            status.textContent = cachedProxy.warning;
+            cachedProxy = null;
+        }
         dialog.querySelector(".cs-subtitle-file").textContent = cachedProxy?.label || filename || "Subtitle preview cache";
         if (cachedProxy) {
             setLoading("Loading preview video...");

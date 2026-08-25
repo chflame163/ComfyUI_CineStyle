@@ -14,6 +14,10 @@ _FONT_SIZE_MIN = 8
 _FONT_SIZE_MAX = 200
 _DEFAULT_FONT_SIZE = 36
 _SUPERSAMPLE_SCALE = 2
+# Subtitle sizes are logical values defined on a one-megapixel canvas.  Both
+# the timeline proxy and the final VIDEO convert that logical value to pixels
+# from their own frame area, so their rendered text remains visually aligned.
+_FONT_REFERENCE_PIXELS = 1_000_000.0
 
 
 def font_files(fonts_root: Path) -> list[str]:
@@ -118,23 +122,25 @@ def _draw_text_layer(
     if supersample and width > 0 and height > 0:
         scale = _SUPERSAMPLE_SCALE
         enlarged = image.resize((width * scale, height * scale), Image.Resampling.BICUBIC)
-        scaled_style = dict(style)
-        for key in ("font_size", "outline_size", "shadow_size", "letter_spacing"):
-            scaled_style[key] = _safe_number(style.get(key), 0) * scale
         rendered = _draw_text_layer(
             enlarged,
             active,
-            scaled_style,
+            # Keep logical values unchanged.  The recursive call resolves
+            # pixel sizes from the enlarged canvas and naturally supersamples
+            # every typographic measurement by the same factor.
+            dict(style),
             fonts_root,
             supersample=False,
-            font_size_max=font_size_max * scale,
+            font_size_max=font_size_max,
         )
         return rendered.resize((width, height), Image.Resampling.LANCZOS)
+    reference_scale = max(0.01, (float(width * height) / _FONT_REFERENCE_PIXELS) ** 0.5)
     font_path = resolve_font(str(style.get("font", "")), fonts_root)
-    font_size = max(
+    logical_font_size = max(
         _FONT_SIZE_MIN,
-        min(font_size_max, int(round(_safe_number(style.get("font_size", _DEFAULT_FONT_SIZE), _DEFAULT_FONT_SIZE)))),
+        min(float(font_size_max), _safe_number(style.get("font_size", _DEFAULT_FONT_SIZE), _DEFAULT_FONT_SIZE)),
     )
+    font_size = max(1, int(round(logical_font_size * reference_scale)))
     try:
         font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default()
     except (OSError, ValueError):
@@ -144,9 +150,9 @@ def _draw_text_layer(
     fill_2 = _parse_colour(style.get("secondary_color", "#FF0000"), fill_1)
     outline_color = _parse_colour(style.get("outline_color", "#000000"), (0, 0, 0, 255))
     shadow_color = _parse_colour(style.get("shadow_color", "#000000"), (0, 0, 0, 190))
-    outline_size = max(0, min(20, int(round(_safe_number(style.get("outline_size", 2), 2)))))
-    shadow_size = max(0, min(20, int(round(_safe_number(style.get("shadow_size", 3), 3)))))
-    spacing = max(-10, min(50, int(round(_safe_number(style.get("letter_spacing", 0), 0)))))
+    outline_size = max(0, int(round(max(0.0, min(20.0, _safe_number(style.get("outline_size", 2), 2))) * reference_scale)))
+    shadow_size = max(0, int(round(max(0.0, min(20.0, _safe_number(style.get("shadow_size", 3), 3))) * reference_scale)))
+    spacing = int(round(max(-10.0, min(50.0, _safe_number(style.get("letter_spacing", 0), 0))) * reference_scale))
     align = str(style.get("text_align", "center")).lower()
     if align not in {"left", "center", "right"}:
         align = "center"

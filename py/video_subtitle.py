@@ -6,6 +6,7 @@ import re
 import sys
 import json
 import hashlib
+import os
 import importlib.util
 import logging
 import threading
@@ -42,10 +43,96 @@ _SUBTITLE_GPU_MAX_BATCH = 16
 _SUBTITLE_GPU_BYTES_PER_PIXEL = 40
 _SUBTITLE_CPU_OVERLAY_CACHE_MAX = 128
 _DEFAULT_FONT_SIZE = 36
+_SUBTITLE_ASPECT_TOLERANCE = 0.05
+_SUBTITLE_DIMENSION_TOLERANCE_PIXELS = 32
+_SUBTITLE_FRAME_SIMILARITY_THRESHOLD = 0.20
+_SUBTITLE_RUNTIME_STATE_VERSION = 1
+_SUBTITLE_PREVIEW_WARNINGS: dict[str, str] = {}
 
 
 def _subtitle_info(message: str, *args: Any) -> None:
     _SUBTITLE_LOGGER.info("[CS Video Subtitle] " + message, *args)
+
+
+def _subtitle_runtime_state_dir() -> Path | None:
+    """Return a restart-safe directory for the last executed VIDEO shape."""
+    try:
+        user_dir = Path(folder_paths.get_user_directory())
+    except (AttributeError, OSError, TypeError):
+        return None
+    path = user_dir / "cinestyle" / "subtitle_preview_state"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return path
+
+
+def _subtitle_runtime_state_path(node_id: Any) -> Path | None:
+    key = str(node_id or "").strip()
+    root = _subtitle_runtime_state_dir()
+    if not key or root is None:
+        return None
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return root / f"{digest}.json"
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items() if str(key)}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _source_fingerprint(value: Any) -> str:
+    try:
+        source = _preview_cache_store()._resolve_file(str(value or ""))
+        stat = os.stat(source)
+        payload = f"{Path(source).resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return ""
+
+
+def _load_runtime_descriptor(node_id: Any) -> dict[str, Any]:
+    path = _subtitle_runtime_state_path(node_id)
+    if path is None or not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return dict(value) if isinstance(value, dict) and value.get("version") == _SUBTITLE_RUNTIME_STATE_VERSION else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_runtime_descriptor(node_id: Any, descriptor: dict[str, Any]) -> None:
+    path = _subtitle_runtime_state_path(node_id)
+    if path is None:
+        return
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        payload = _json_safe({"version": _SUBTITLE_RUNTIME_STATE_VERSION, **descriptor})
+        temporary.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        _subtitle_info("runtime preview descriptor unavailable: %s", exc)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _set_preview_warning(node_id: Any, message: str | None) -> None:
+    key = str(node_id or "").strip()
+    if not key:
+        return
+    if message:
+        _SUBTITLE_PREVIEW_WARNINGS[key] = str(message)
+    else:
+        _SUBTITLE_PREVIEW_WARNINGS.pop(key, None)
 
 
 def _preview_cache_store():
@@ -212,33 +299,8 @@ def _output_style_matching_preview(
     output_height: int,
     proxy_video: Any,
 ) -> dict[str, Any]:
-    """Mirror preview proxy scaling and renderer bounds on final output text."""
-    if proxy_video is None or output_width <= 0 or output_height <= 0:
-        return style
-    try:
-        proxy_components = proxy_video.get_components()
-        proxy_images = proxy_components.images
-        proxy_width = int(proxy_images.shape[2])
-        proxy_height = int(proxy_images.shape[1])
-    except (AttributeError, IndexError, TypeError, ValueError):
-        return style
-    scale = min(proxy_width / float(output_width), proxy_height / float(output_height))
-    if not np.isfinite(scale) or scale <= 0 or abs(scale - 1.0) <= 1e-6:
-        return style
-    adjusted = dict(style)
-    bounds = {
-        "font_size": (8.0, 200.0),
-        "outline_size": (0.0, 20.0),
-        "shadow_size": (0.0, 20.0),
-    }
-    for name, (minimum, maximum) in bounds.items():
-        try:
-            value = float(style.get(name, minimum))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        preview_value = max(minimum, min(maximum, round(value * scale)))
-        adjusted[name] = int(round(preview_value / scale))
-    return adjusted
+    """Keep logical style values unchanged across preview and final output."""
+    return dict(style)
 
 
 def _subtitle_active_frames(
@@ -467,7 +529,10 @@ def _clear_video_caches(node_id: Any) -> None:
     _preview_cache_store().clear_node(key)
 
 
-def _extract_video_frames(video: Any) -> tuple[np.ndarray, float, dict[str, Any], Any]:
+def _extract_video_frames(
+    video: Any,
+    loaded_dimensions: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, float, dict[str, Any], Any]:
     components = video.get_components()
     images = components.images
     if not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[0] == 0:
@@ -485,25 +550,221 @@ def _extract_video_frames(video: Any) -> tuple[np.ndarray, float, dict[str, Any]
         .contiguous()
         .numpy()
     )
+    actual_width = int(frames.shape[2])
+    actual_height = int(frames.shape[1])
+    loaded_width, loaded_height = loaded_dimensions or (actual_width, actual_height)
     info = {
         "frames": int(frames.shape[0]),
-        "width": int(frames.shape[2]),
-        "height": int(frames.shape[1]),
+        "width": actual_width,
+        "height": actual_height,
         "fps": safe_fps,
         "duration": float(frames.shape[0]) / safe_fps,
+        "loaded_frame_count": int(frames.shape[0]),
+        "loaded_width": int(loaded_width),
+        "loaded_height": int(loaded_height),
+        "loaded_fps": safe_fps,
     }
-    # Preserve loader metadata so a downstream timeline can distinguish a
+    # Preserve source/trim metadata so a downstream timeline can distinguish a
     # trimmed VIDEO from the original source file when it builds a preview.
-    metadata = getattr(components, "metadata", None)
-    if isinstance(metadata, dict):
+    metadata: dict[str, Any] = {}
+    attached_metadata = getattr(video, "_cinestyle_runtime_metadata", None)
+    if isinstance(attached_metadata, dict):
+        metadata.update(attached_metadata)
+    component_metadata = getattr(components, "metadata", None)
+    if isinstance(component_metadata, dict):
+        metadata.update(component_metadata)
+    if metadata:
         for key in (
             "source_filename", "source_fps", "source_frame_count", "source_duration",
-            "source_width", "source_height", "start_frame", "end_frame", "loaded_fps",
-            "loaded_frame_count", "loaded_duration", "loaded_width", "loaded_height",
+            "source_width", "source_height", "start_frame", "end_frame",
+            "loaded_duration",
         ):
             if key in metadata:
                 info[key] = metadata[key]
+    # The tensor is authoritative for the value that this subtitle node will
+    # actually render.  Upstream metadata can be stale after ComfyUI reuses a
+    # cached VIDEO, so never let it replace the observed shape/frame count.
+    info.update(
+        {
+            "frames": int(frames.shape[0]),
+            "width": actual_width,
+            "height": actual_height,
+            "fps": safe_fps,
+            "loaded_frame_count": int(frames.shape[0]),
+            "loaded_width": int(loaded_width),
+            "loaded_height": int(loaded_height),
+            "loaded_fps": safe_fps,
+            "duration": float(frames.shape[0]) / safe_fps,
+        }
+    )
+    if info.get("source_filename"):
+        fingerprint = _source_fingerprint(info["source_filename"])
+        if fingerprint:
+            info["source_fingerprint"] = fingerprint
     return frames, safe_fps, info, getattr(components, "audio", None)
+
+
+def _runtime_descriptor_from_input(
+    source_metadata: dict[str, Any],
+    images: torch.Tensor,
+    frame_rate: float,
+) -> dict[str, Any]:
+    """Build a descriptor from the actual VIDEO tensor, not optional metadata."""
+    descriptor = dict(source_metadata or {})
+    loaded_width = int(images.shape[2])
+    loaded_height = int(images.shape[1])
+    loaded_frames = int(images.shape[0])
+    safe_fps = float(frame_rate) if np.isfinite(frame_rate) and frame_rate > 0 else 24.0
+    descriptor.update(
+        {
+            "loaded_width": loaded_width,
+            "loaded_height": loaded_height,
+            "loaded_frame_count": loaded_frames,
+            "loaded_fps": safe_fps,
+            "loaded_duration": float(loaded_frames) / safe_fps,
+        }
+    )
+    descriptor.setdefault("frames", loaded_frames)
+    descriptor.setdefault("width", loaded_width)
+    descriptor.setdefault("height", loaded_height)
+    descriptor.setdefault("fps", safe_fps)
+    source_filename = descriptor.get("source_filename")
+    if source_filename:
+        fingerprint = _source_fingerprint(source_filename)
+        if fingerprint:
+            descriptor["source_fingerprint"] = fingerprint
+    return descriptor
+
+
+def _aspect_delta(width_a: Any, height_a: Any, width_b: Any, height_b: Any) -> float | None:
+    try:
+        ratio_a = float(width_a) / float(height_a)
+        ratio_b = float(width_b) / float(height_b)
+        if ratio_a <= 0 or ratio_b <= 0:
+            return None
+        return abs(ratio_a - ratio_b) / ratio_b
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+
+
+def _resize_validation_frame(array: np.ndarray, size: int = 64) -> torch.Tensor:
+    value = np.asarray(array, dtype=np.float32)
+    if value.ndim != 3:
+        raise ValueError("validation frame must be HWC")
+    if value.max(initial=0.0) > 1.0:
+        value = value / 255.0
+    tensor = torch.from_numpy(np.ascontiguousarray(value[..., :3])).permute(2, 0, 1).unsqueeze(0)
+    return torch.nn.functional.interpolate(tensor, size=(size, size), mode="bilinear", align_corners=False).flatten()
+
+
+def _source_validation_frame(source_path: str, frame_index: int) -> np.ndarray | None:
+    try:
+        target = max(0, int(frame_index))
+        with av.open(source_path, mode="r") as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            for index, decoded in enumerate(container.decode(stream)):
+                if index == target:
+                    return decoded.to_ndarray(format="rgb24")
+    except (OSError, ValueError, av.error.FFmpegError):
+        return None
+    return None
+
+
+def _preview_endpoints_match_source(entry: dict[str, Any], descriptor: dict[str, Any], source: str) -> bool | None:
+    """Compare low-resolution first/last frames when a source file is known.
+
+    ``None`` means the source could not be decoded, so dimension/fingerprint
+    checks remain authoritative instead of rejecting a usable cache.
+    """
+    # Only compare against a file that the executed VIDEO explicitly declared
+    # as its source.  A graph may expose an upstream filename even when an
+    # intermediate node has transformed the frames, in which case decoding
+    # that file would produce a false mismatch.
+    source_filename = str(descriptor.get("source_filename") or "").strip()
+    if not source_filename:
+        return None
+    try:
+        source_path = _preview_cache_store()._resolve_file(source_filename)
+        cached = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
+        if cached.ndim != 4 or cached.shape[0] <= 0:
+            return False
+        start = int(descriptor.get("start_frame", 0) or 0)
+        end = descriptor.get("end_frame")
+        if end is None or int(end) < 0:
+            end = int(descriptor.get("source_frame_count") or 0) - 1
+        if int(end) < start:
+            end = start
+        source_first = _source_validation_frame(source_path, start)
+        source_last = _source_validation_frame(source_path, int(end))
+        if source_first is None or source_last is None:
+            return None
+        cached_first = _resize_validation_frame(np.asarray(cached[0]))
+        cached_last = _resize_validation_frame(np.asarray(cached[-1]))
+        expected_first = _resize_validation_frame(source_first)
+        expected_last = _resize_validation_frame(source_last)
+        first_error = float(torch.mean(torch.abs(cached_first - expected_first)))
+        last_error = float(torch.mean(torch.abs(cached_last - expected_last)))
+        return max(first_error, last_error) <= _SUBTITLE_FRAME_SIMILARITY_THRESHOLD
+    except (OSError, ValueError, KeyError, IndexError, TypeError, av.error.FFmpegError):
+        return None
+
+
+def _preview_entry_matches_runtime(entry: dict[str, Any], descriptor: dict[str, Any], source: str) -> bool:
+    if not descriptor:
+        return True
+    expected_fingerprint = str(descriptor.get("source_fingerprint") or "")
+    current_fingerprint = _source_fingerprint(descriptor.get("source_filename")) if descriptor.get("source_filename") else ""
+    if expected_fingerprint and current_fingerprint and expected_fingerprint != current_fingerprint:
+        return False
+    validation_key = hashlib.sha1(
+        json.dumps(
+            _json_safe({**descriptor, "_current_source_fingerprint": current_fingerprint}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if entry.get("_subtitle_runtime_validation_key") == validation_key:
+        return True
+    info = dict(entry.get("info") or {})
+    expected_width = descriptor.get("loaded_width")
+    expected_height = descriptor.get("loaded_height")
+    actual_width = info.get("loaded_width") or (info.get("width") if expected_width and info.get("width") == expected_width else None)
+    actual_height = info.get("loaded_height") or (info.get("height") if expected_height and info.get("height") == expected_height else None)
+    try:
+        if expected_width and abs(int(actual_width or 0) - int(expected_width)) > max(_SUBTITLE_DIMENSION_TOLERANCE_PIXELS, int(round(float(expected_width) * _SUBTITLE_ASPECT_TOLERANCE))):
+            return False
+        if expected_height and abs(int(actual_height or 0) - int(expected_height)) > max(_SUBTITLE_DIMENSION_TOLERANCE_PIXELS, int(round(float(expected_height) * _SUBTITLE_ASPECT_TOLERANCE))):
+            return False
+    except (TypeError, ValueError):
+        return False
+    expected_frames = descriptor.get("loaded_frame_count")
+    if expected_frames:
+        try:
+            actual_frames = int(info.get("loaded_frame_count") or info.get("frames") or 0)
+            if abs(actual_frames - int(expected_frames)) > 1:
+                return False
+        except (TypeError, ValueError):
+            return False
+    expected_fps = descriptor.get("loaded_fps")
+    if expected_fps:
+        try:
+            if abs(float(info.get("loaded_fps") or info.get("fps")) - float(expected_fps)) > 1e-3:
+                return False
+        except (TypeError, ValueError):
+            return False
+    delta = _aspect_delta(info.get("loaded_width") or info.get("width"), info.get("loaded_height") or info.get("height"), expected_width, expected_height)
+    if delta is not None and delta > _SUBTITLE_ASPECT_TOLERANCE + 1e-6:
+        return False
+    actual_fingerprint = str(info.get("source_fingerprint") or "")
+    if expected_fingerprint and actual_fingerprint and expected_fingerprint != actual_fingerprint:
+        return False
+    endpoint_match = _preview_endpoints_match_source(entry, descriptor, source)
+    if endpoint_match is False:
+        return False
+    entry["_subtitle_runtime_validation_key"] = validation_key
+    return True
 
 
 def _cache_video_source(
@@ -520,7 +781,8 @@ def _cache_video_source(
     if render_size is not None and variant == "preview":
         _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = (int(render_size[0]), int(render_size[1]))
     try:
-        frames, safe_fps, info, audio = _extract_video_frames(video)
+        dimensions = render_size if str(variant or "").lower() in {"proxy", "preview"} else None
+        frames, safe_fps, info, audio = _extract_video_frames(video, dimensions)
         return _store_frame_cache(frames, safe_fps, info, node_id, variant, cache_label, encode_video, audio)
     except Exception as exc:
         _subtitle_info("%s cache unavailable: %s", cache_label, exc)
@@ -657,6 +919,9 @@ def _preview_entry_for_request(
                 return None
         except (TypeError, ValueError):
             return None
+    descriptor = _load_runtime_descriptor(node_id)
+    if descriptor and not _preview_entry_matches_runtime(entry, descriptor, video_filename):
+        return None
     return entry
 
 
@@ -723,6 +988,37 @@ def _audio_from_video_file(source_path: str, start_seconds: float, duration: flo
         return None
 
 
+def _round_dimension(value: float, multiple: int) -> int:
+    multiple = max(1, int(multiple))
+    return max(multiple, int(np.floor(float(value) / multiple + 0.5)) * multiple)
+
+
+def _infer_loaded_dimensions(source_width: int, source_height: int, metadata: dict[str, Any]) -> tuple[int, int] | None:
+    """Reproduce CS Load Video's dimension rounding for a lazy cache request."""
+    if not any(name in metadata for name in ("output_width", "output_height", "multiple", "keep_aspect_ratio")):
+        return None
+    try:
+        width = int(float(metadata.get("output_width") or metadata.get("width") or 0))
+        height = int(float(metadata.get("output_height") or metadata.get("height") or 0))
+        multiple = max(1, int(float(metadata.get("multiple") or 1)))
+        keep_aspect = bool(metadata.get("keep_aspect_ratio", True))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if source_width <= 0 or source_height <= 0:
+        return None
+    aspect = float(source_width) / float(source_height)
+    if keep_aspect:
+        if width > 0:
+            return _round_dimension(width, multiple), _round_dimension(width / aspect, multiple)
+        if height > 0:
+            return _round_dimension(height * aspect, multiple), _round_dimension(height, multiple)
+        return _round_dimension(source_width, multiple), _round_dimension(source_width / aspect, multiple)
+    return (
+        _round_dimension(source_width, multiple) if width <= 0 else width,
+        _round_dimension(source_height, multiple) if height <= 0 else height,
+    )
+
+
 def _lazy_cache_trimmed_preview(
     node_id: str,
     video_filename: str,
@@ -739,13 +1035,30 @@ def _lazy_cache_trimmed_preview(
             existing_info = dict(existing.get("info") or {})
             if existing.get("audio") is not None or "has_audio" in existing_info:
                 return existing
-        metadata = dict(_SUBTITLE_SOURCE_METADATA.get(key) or {})
+        metadata = dict(_load_runtime_descriptor(key))
+        metadata.update(dict(_SUBTITLE_SOURCE_METADATA.get(key) or {}))
         if metadata.get("source_filename") and str(metadata.get("source_filename")).strip() != source:
             metadata = {}
         if requested_metadata:
             metadata.update({name: value for name, value in requested_metadata.items() if value is not None})
         try:
             source_path = _preview_cache_store()._resolve_file(source)
+            current_source_fingerprint = _source_fingerprint(source)
+            source_changed = bool(
+                current_source_fingerprint
+                and metadata.get("source_fingerprint")
+                and metadata.get("source_fingerprint") != current_source_fingerprint
+            )
+            if source_changed:
+                # The file changed after the last execution.  Re-probe source
+                # geometry/rate and recompute dimensions from saved CS Load
+                # Video settings instead of reusing stale source metadata.
+                metadata["source_fingerprint"] = current_source_fingerprint
+                for name in (
+                    "source_fps", "source_frame_count", "source_width", "source_height",
+                    "loaded_width", "loaded_height", "loaded_frame_count", "loaded_duration",
+                ):
+                    metadata.pop(name, None)
             source_fps = float(metadata.get("source_fps") or 0.0)
             source_count = int(metadata.get("source_frame_count") or 0)
             source_width = int(metadata.get("source_width") or 0)
@@ -769,8 +1082,24 @@ def _lazy_cache_trimmed_preview(
             requested_end = metadata.get("end_frame")
             end = source_count - 1 if requested_end is None or int(requested_end) < 0 else min(int(requested_end), source_count - 1)
             end = max(start, end)
-            loaded_width = int(metadata.get("loaded_width") or source_width)
-            loaded_height = int(metadata.get("loaded_height") or source_height)
+            loaded_width = int(metadata.get("loaded_width") or 0)
+            loaded_height = int(metadata.get("loaded_height") or 0)
+            if loaded_width <= 0 or loaded_height <= 0:
+                inferred = _infer_loaded_dimensions(source_width, source_height, metadata)
+                if inferred is not None:
+                    loaded_width, loaded_height = inferred
+            # A trim request without an executed descriptor is commonly a CS
+            # Load Video output.  Falling back to source dimensions here would
+            # silently produce a cache with the wrong canvas, so ask the user
+            # to execute once when no target shape can be inferred.
+            if (loaded_width <= 0 or loaded_height <= 0) and requested_metadata:
+                _set_preview_warning(
+                    key,
+                    "无法确认上游视频的实际输出尺寸，时间线预览缓存未重建。请先执行一次 CS Video Subtitle。",
+                )
+                return None
+            loaded_width = loaded_width or source_width
+            loaded_height = loaded_height or source_height
             if loaded_width <= 0 or loaded_height <= 0 or source_fps <= 0 or target_fps <= 0:
                 return None
             proxy_width, proxy_height = _subtitle_proxy_dimensions(loaded_width, loaded_height)
@@ -799,6 +1128,7 @@ def _lazy_cache_trimmed_preview(
             )
             info = {
                 "source_filename": source,
+                "source_fingerprint": _source_fingerprint(source),
                 "source_fps": source_fps,
                 "source_frame_count": source_count,
                 "source_width": source_width,
@@ -812,7 +1142,7 @@ def _lazy_cache_trimmed_preview(
                 "has_audio": bool(preview_audio),
             }
             _SUBTITLE_PROXY_RENDER_SIZE[key] = (loaded_width, loaded_height)
-            return _preview_cache_store().put_preview(
+            result = _preview_cache_store().put_preview(
                 key,
                 np.stack(frames, axis=0),
                 target_fps,
@@ -821,8 +1151,16 @@ def _lazy_cache_trimmed_preview(
                 info=info,
                 audio=preview_audio,
             )
+            if metadata.get("source_filename") or metadata.get("source_fingerprint"):
+                _save_runtime_descriptor(key, {**metadata, **info})
+            _set_preview_warning(key, None)
+            return result
         except (OSError, ValueError, KeyError, IndexError, av.error.FFmpegError) as exc:
             _subtitle_info("lazy trimmed preview unavailable: %s", exc)
+            _set_preview_warning(
+                key,
+                "时间线预览缓存与真实输入不匹配，且无法自动重建。请检查视频画幅（允许偏差 5%）并先执行一次 CS Video Subtitle。",
+            )
             return None
 
 
@@ -977,7 +1315,8 @@ class CSVideoSubtitle(io.ComfyNode):
         if cache_key:
             _SUBTITLE_SRT_CACHE[cache_key] = {"source_hash": source_hash, "srt": edited_srt, "node_id": cache_key}
         components = video.get_components()
-        source_metadata = dict(components.metadata or {})
+        source_metadata = dict(getattr(video, "_cinestyle_runtime_metadata", None) or {})
+        source_metadata.update(dict(components.metadata or {}))
         images = components.images
         if images.ndim != 4 or images.shape[0] == 0:
             raise ValueError("VIDEO contains no decodable frames.")
@@ -992,9 +1331,12 @@ class CSVideoSubtitle(io.ComfyNode):
             frame_rate,
         )
         render_size = (int(images.shape[2]), int(images.shape[1]))
+        runtime_descriptor = _runtime_descriptor_from_input(source_metadata, images, frame_rate)
         if node_id:
             _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = render_size
-            _SUBTITLE_SOURCE_METADATA[str(node_id)] = dict(source_metadata)
+            _SUBTITLE_SOURCE_METADATA[str(node_id)] = dict(runtime_descriptor)
+            _save_runtime_descriptor(node_id, runtime_descriptor)
+            _set_preview_warning(node_id, None)
         if node_id:
             _clear_video_caches(node_id)
         if node_id and str(node_id) in _SUBTITLE_TIMELINE_OPEN:
@@ -1043,12 +1385,7 @@ class CSVideoSubtitle(io.ComfyNode):
             "shadow_size": shadow_size,
             "shadow_color": shadow_color,
         }
-        output_style = _output_style_matching_preview(
-            style,
-            int(images.shape[2]),
-            int(images.shape[1]),
-            proxy_video,
-        )
+        output_style = _output_style_matching_preview(style, int(images.shape[2]), int(images.shape[1]), proxy_video)
         _subtitle_info("subtitle cues ready: count=%d", len(cues))
         _subtitle_info("stage 4/6: rendering subtitles onto %d frames", int(images.shape[0]))
         active_keys, active_by_key = _subtitle_active_frames(cues, int(images.shape[0]), frame_rate)
@@ -1108,7 +1445,12 @@ class CSVideoSubtitle(io.ComfyNode):
                 frame_rate=components.frame_rate,
             )
         _subtitle_info("stage 6/6: complete, output frames=%d", int(output_images.shape[0]))
-        return io.NodeOutput(InputImpl.VideoFromComponents(output_components), edited_srt)
+        output_video = InputImpl.VideoFromComponents(output_components)
+        try:
+            output_video._cinestyle_runtime_metadata = dict(runtime_descriptor)
+        except (AttributeError, TypeError):
+            pass
+        return io.NodeOutput(output_video, edited_srt)
 
 
 async def _fonts_route(request):
@@ -1205,6 +1547,19 @@ def _trim_metadata_from_values(values) -> dict[str, Any]:
                 metadata["loaded_fps"] = loaded_fps
         except (TypeError, ValueError, OverflowError):
             pass
+    for source_name, target_name in (("loaded_width", "loaded_width"), ("loaded_height", "loaded_height"), ("width", "output_width"), ("height", "output_height"), ("multiple", "multiple")):
+        value = values.get(source_name)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            numeric = int(float(value))
+            if numeric > 0:
+                metadata[target_name] = numeric
+        except (TypeError, ValueError, OverflowError):
+            continue
+    keep_aspect = values.get("keep_aspect_ratio")
+    if keep_aspect is not None and str(keep_aspect).strip() != "":
+        metadata["keep_aspect_ratio"] = str(keep_aspect).strip().lower() in {"1", "true", "yes", "on"}
     return metadata
 
 
@@ -1266,12 +1621,6 @@ async def _subtitle_preview_route(request):
             and str(cue.get("text", "")).strip()
         ]
         style = dict(payload.get("style") or {})
-        target_width, target_height = _SUBTITLE_PROXY_RENDER_SIZE.get(node_id, (proxy_width, proxy_height))
-        scale = min(proxy_width / max(1, target_width), proxy_height / max(1, target_height))
-        if abs(scale - 1.0) > 1e-6:
-            for key in ("font_size", "outline_size", "shadow_size"):
-                if key in style:
-                    style[key] = float(style[key]) * scale
         renderer = _renderer_module()
         body, bounds = renderer.render_overlay_png_with_bounds(proxy_width, proxy_height, active, style, _fonts_root())
         headers = {"Cache-Control": "no-store"}
@@ -1293,7 +1642,7 @@ async def _subtitle_waveform_route(request):
     filename = str(request.query.get("video_filename", "")).strip()
     trim_metadata = _trim_metadata_from_request(request)
     entry = _preview_entry_for_request(node_id, filename, trim_metadata) if node_id else None
-    if entry is None and node_id and filename and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA):
+    if entry is None and node_id and filename and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA or _load_runtime_descriptor(node_id)):
         entry = _lazy_cache_trimmed_preview(node_id, filename, trim_metadata)
     # Decode the exact media file used by the <video> element. This keeps the
     # waveform and playback on one source, including codec/container timing.
@@ -1319,11 +1668,15 @@ async def _subtitle_preview_info_route(request):
     filename = str(request.query.get("video_filename", "")).strip()
     trim_metadata = _trim_metadata_from_request(request)
     entry = _preview_entry_for_request(node_id, filename, trim_metadata)
-    if entry is None and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA):
+    if entry is None and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA or _load_runtime_descriptor(node_id)):
         entry = _lazy_cache_trimmed_preview(node_id, filename, trim_metadata)
     video_path = Path(str(entry.get("video_path", ""))) if entry else None
     if not entry or video_path is None or not video_path.is_file():
-        return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once to build it."}, status=404)
+        warning = _SUBTITLE_PREVIEW_WARNINGS.get(node_id)
+        payload = {"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once to build it."}
+        if warning:
+            payload["warning"] = warning
+        return web.json_response(payload, status=404)
     return web.json_response(
         {
             "video_url": f"/cinestyle/video-subtitle-preview-video?node_id={quote(node_id)}",

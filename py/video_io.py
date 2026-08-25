@@ -622,6 +622,14 @@ class CSLoadVideo(io.ComfyNode):
                 metadata=info,
             )
         )
+        # ComfyUI's VideoFromComponents currently drops ``metadata`` when a
+        # downstream node calls get_components(). Keep a CineStyle-private
+        # descriptor on the VIDEO object so subtitle preview recovery can
+        # still identify the source range and actual output canvas.
+        try:
+            output_video._cinestyle_runtime_metadata = dict(info)
+        except (AttributeError, TypeError):
+            pass
         if proxy_required:
             proxy_width, proxy_height = _proxy_dimensions(
                 output_width,
@@ -638,6 +646,10 @@ class CSLoadVideo(io.ComfyNode):
                     metadata=info,
                 )
             )
+            try:
+                proxy_video._cinestyle_runtime_metadata = dict(info)
+            except (AttributeError, TypeError):
+                pass
         else:
             proxy_video = output_video
         _LOGGER.info("[CS Load Video] stage 7/7: complete, output frames=%d", selected.shape[0])

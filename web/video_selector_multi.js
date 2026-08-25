@@ -60,7 +60,18 @@ function sourceFromOrigin(origin, visited = new Set()) {
     const filename = sourceFilename(origin);
     if (isCSLoadVideo(origin) || /\.(mp4|mov|mkv|avi|webm|m4v|mpg|mpeg|wmv|flv)(?:\s*\[[^\]]*\])?$/i.test(filename)) {
         if (!filename) return null;
-        return { filename, kind: "video", isCSLoad: isCSLoadVideo(origin), startFrame: Math.max(0, Number(widget(origin, "start_frame")?.value ?? 0)), endFrame: Number(widget(origin, "end_frame")?.value ?? -1), targetFps: Number(widget(origin, "fps")?.value ?? 0) };
+        return {
+            filename,
+            kind: "video",
+            isCSLoad: isCSLoadVideo(origin),
+            startFrame: Math.max(0, Number(widget(origin, "start_frame")?.value ?? 0)),
+            endFrame: Number(widget(origin, "end_frame")?.value ?? -1),
+            targetFps: Number(widget(origin, "fps")?.value ?? 0),
+            outputWidth: Number(widget(origin, "width")?.value ?? 0),
+            outputHeight: Number(widget(origin, "height")?.value ?? 0),
+            multiple: Number(widget(origin, "multiple")?.value ?? 1),
+            keepAspectRatio: !["0", "false", "no", "off"].includes(String(widget(origin, "keep_aspect_ratio")?.value ?? true).toLowerCase()),
+        };
     }
     if (isLoadImage(origin) || isImageFilename(filename)) {
         if (!filename) return null;

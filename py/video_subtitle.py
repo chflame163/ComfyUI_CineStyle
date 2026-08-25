@@ -8,6 +8,7 @@ import json
 import hashlib
 import importlib.util
 import logging
+import threading
 from urllib.parse import quote, unquote
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ _ROUTE_REGISTERED = False
 _TIME_RE = re.compile(r"^(\d+):(\d{2}):(\d{2})[,.](\d{3})$")
 _SUBTITLE_SRT_CACHE: dict[str, dict[str, str]] = {}
 _SUBTITLE_PROXY_RENDER_SIZE: dict[str, tuple[int, int]] = {}
+_SUBTITLE_SOURCE_METADATA: dict[str, dict[str, Any]] = {}
+_SUBTITLE_LAZY_CACHE_LOCK = threading.RLock()
 _SUBTITLE_TIMELINE_OPEN: set[str] = set()
 _PREVIEW_CACHE_STORE = None
 _SUBTITLE_LOGGER = logging.getLogger("CineStyleVideoSubtitle")
@@ -343,6 +346,83 @@ def _preview_entry_for_request(node_id: str, video_filename: str = "") -> dict[s
     return _preview_cache_entry(node_id)
 
 
+def _subtitle_proxy_dimensions(width: int, height: int, target_pixels: int = 800_000) -> tuple[int, int]:
+    width = max(2, int(width))
+    height = max(2, int(height))
+    if width * height <= target_pixels:
+        return width - width % 2, height - height % 2
+    scale = (target_pixels / float(width * height)) ** 0.5
+    proxy_width = max(2, int(width * scale) // 2 * 2)
+    proxy_height = max(2, int(height * scale) // 2 * 2)
+    return proxy_width, proxy_height
+
+
+def _lazy_cache_trimmed_preview(node_id: str, video_filename: str) -> dict[str, Any] | None:
+    """Build a lightweight trimmed preview when execution skipped cache generation."""
+    key = str(node_id or "").strip()
+    source = str(video_filename or "").strip()
+    if not key or not source:
+        return None
+    with _SUBTITLE_LAZY_CACHE_LOCK:
+        existing = _preview_cache_entry(key)
+        if existing is not None:
+            return existing
+        metadata = dict(_SUBTITLE_SOURCE_METADATA.get(key) or {})
+        if not metadata:
+            return None
+        try:
+            source_path = _preview_cache_store()._resolve_file(source)
+            source_fps = float(metadata.get("source_fps") or 24.0)
+            target_fps = float(metadata.get("loaded_fps") or source_fps)
+            start = max(0, int(metadata.get("start_frame") or 0))
+            end = max(start, int(metadata.get("end_frame") if metadata.get("end_frame") is not None else start))
+            loaded_width = int(metadata.get("loaded_width") or metadata.get("source_width") or 0)
+            loaded_height = int(metadata.get("loaded_height") or metadata.get("source_height") or 0)
+            if loaded_width <= 0 or loaded_height <= 0 or source_fps <= 0 or target_fps <= 0:
+                return None
+            proxy_width, proxy_height = _subtitle_proxy_dimensions(loaded_width, loaded_height)
+            output_count = max(1, int(round((end - start + 1) * target_fps / source_fps)))
+            requested = np.rint(np.linspace(start, end, output_count)).astype(np.int64)
+            frames: list[np.ndarray] = []
+            requested_index = 0
+            with av.open(source_path, mode="r") as container:
+                if not container.streams.video:
+                    return None
+                stream = container.streams.video[0]
+                for source_index, decoded in enumerate(container.decode(stream)):
+                    if requested_index >= len(requested):
+                        break
+                    if source_index < int(requested[requested_index]):
+                        continue
+                    while requested_index < len(requested) and int(requested[requested_index]) == source_index:
+                        frames.append(decoded.reformat(width=proxy_width, height=proxy_height, format="rgb24").to_ndarray())
+                        requested_index += 1
+            if not frames:
+                return None
+            info = {
+                "source_fps": source_fps,
+                "source_frame_count": int(metadata.get("source_frame_count") or 0),
+                "start_frame": start,
+                "end_frame": end,
+                "loaded_fps": target_fps,
+                "loaded_frame_count": len(frames),
+                "loaded_width": loaded_width,
+                "loaded_height": loaded_height,
+            }
+            _SUBTITLE_PROXY_RENDER_SIZE[key] = (loaded_width, loaded_height)
+            return _preview_cache_store().put_preview(
+                key,
+                np.stack(frames, axis=0),
+                target_fps,
+                proxy=True,
+                encode_video=True,
+                info=info,
+            )
+        except (OSError, ValueError, KeyError, IndexError, av.error.FFmpegError) as exc:
+            _subtitle_info("lazy trimmed preview unavailable: %s", exc)
+            return None
+
+
 def _downsample_waveform_peaks(values: Any, target: int = 1600) -> list[float]:
     array = np.asarray(values, dtype=np.float32).reshape(-1)
     if array.size == 0:
@@ -533,6 +613,7 @@ class CSVideoSubtitle(io.ComfyNode):
         render_size = (int(images.shape[2]), int(images.shape[1]))
         if node_id:
             _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = render_size
+            _SUBTITLE_SOURCE_METADATA[str(node_id)] = dict(source_metadata)
         if node_id:
             _clear_video_caches(node_id)
         if node_id and str(node_id) in _SUBTITLE_TIMELINE_OPEN:
@@ -708,6 +789,7 @@ async def _subtitle_preview_route(request):
     entry = _preview_entry_for_request(node_id)
     try:
         frame_index = max(0, int(payload.get("frame", 0)))
+        source_frame_index = max(0, int(payload.get("source_frame", frame_index)))
         if entry:
             frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
             frame_index = min(frame_index, int(frames.shape[0]) - 1)
@@ -721,7 +803,7 @@ async def _subtitle_preview_route(request):
                 source = str(payload.get("video_filename", "")).strip()
                 if not source:
                     return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once or provide a source video."}, status=404)
-                frame = _preview_cache_store().decode_frame({"video": source, "source_kind": "video"}, frame_index)
+                frame = _preview_cache_store().decode_frame({"video": source, "source_kind": "video"}, source_frame_index)
                 proxy_height, proxy_width = int(frame.shape[1]), int(frame.shape[2])
                 if fps <= 0:
                     fps = 24.0
@@ -789,6 +871,8 @@ async def _subtitle_preview_info_route(request):
 
     node_id = str(request.query.get("node_id", "")).strip()
     entry = _preview_entry_for_request(node_id)
+    if entry is None:
+        entry = _lazy_cache_trimmed_preview(node_id, str(request.query.get("video_filename", "")).strip())
     video_path = Path(str(entry.get("video_path", ""))) if entry else None
     if not entry or video_path is None or not video_path.is_file():
         return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once to build it."}, status=404)

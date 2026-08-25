@@ -36,6 +36,11 @@ _SUBTITLE_LAZY_CACHE_LOCK = threading.RLock()
 _SUBTITLE_TIMELINE_OPEN: set[str] = set()
 _PREVIEW_CACHE_STORE = None
 _SUBTITLE_LOGGER = logging.getLogger("CineStyleVideoSubtitle")
+_SUBTITLE_GPU_MEMORY_FRACTION = 0.45
+_SUBTITLE_GPU_RESERVE_BYTES = 512 * 1024 * 1024
+_SUBTITLE_GPU_MAX_BATCH = 16
+_SUBTITLE_GPU_BYTES_PER_PIXEL = 40
+_SUBTITLE_CPU_OVERLAY_CACHE_MAX = 128
 
 
 def _subtitle_info(message: str, *args: Any) -> None:
@@ -233,6 +238,225 @@ def _output_style_matching_preview(
         preview_value = max(minimum, min(maximum, round(value * scale)))
         adjusted[name] = int(round(preview_value / scale))
     return adjusted
+
+
+def _subtitle_active_frames(
+    cues: list[dict[str, Any]],
+    total_frames: int,
+    frame_rate: float,
+) -> tuple[list[tuple[Any, ...] | None], dict[tuple[Any, ...], list[dict[str, Any]]]]:
+    active_keys: list[tuple[Any, ...] | None] = []
+    active_by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for index in range(total_frames):
+        time_seconds = index / frame_rate
+        active = [cue for cue in cues if float(cue["start"]) <= time_seconds < float(cue["end"])]
+        if not active:
+            active_keys.append(None)
+            continue
+        key = tuple(
+            (cue.get("id"), float(cue.get("start", 0.0)), float(cue.get("end", 0.0)), str(cue.get("text", "")))
+            for cue in active
+        )
+        active_keys.append(key)
+        active_by_key.setdefault(key, active)
+    return active_keys, active_by_key
+
+
+def _subtitle_overlay_crop(
+    width: int,
+    height: int,
+    active: list[dict[str, Any]],
+    style: dict[str, Any],
+    fonts_root: Path,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int, int]] | None:
+    """Rasterize one subtitle layer on CPU and keep only its visible crop."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    body, bounds = _renderer_module().render_overlay_png_with_bounds(
+        width,
+        height,
+        active,
+        style,
+        fonts_root,
+    )
+    if not bounds:
+        return None
+    left, top, right, bottom = (int(value) for value in bounds)
+    if right <= left or bottom <= top:
+        return None
+    with Image.open(BytesIO(body)) as image:
+        rgba = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255.0
+    cropped = np.ascontiguousarray(rgba[top:bottom, left:right])
+    return (
+        torch.from_numpy(np.ascontiguousarray(cropped[..., :3])),
+        torch.from_numpy(np.ascontiguousarray(cropped[..., 3:4])),
+        (left, top, right, bottom),
+    )
+
+
+def _subtitle_gpu_device(images: torch.Tensor) -> torch.device | None:
+    if not torch.cuda.is_available():
+        return None
+    if isinstance(images, torch.Tensor) and images.device.type == "cuda":
+        return images.device
+    try:
+        return torch.device(f"cuda:{torch.cuda.current_device()}")
+    except (RuntimeError, AttributeError, TypeError):
+        return None
+
+
+def _subtitle_gpu_batch_size(images: torch.Tensor, device: torch.device) -> int:
+    total_frames = int(images.shape[0])
+    if total_frames <= 1:
+        return 1
+    height, width = int(images.shape[1]), int(images.shape[2])
+    estimated_per_frame = max(1, height * width * _SUBTITLE_GPU_BYTES_PER_PIXEL)
+    try:
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+        available = max(0, int(free_bytes) - _SUBTITLE_GPU_RESERVE_BYTES)
+        budget = max(estimated_per_frame, int(available * _SUBTITLE_GPU_MEMORY_FRACTION))
+        return max(1, min(total_frames, _SUBTITLE_GPU_MAX_BATCH, budget // estimated_per_frame))
+    except (RuntimeError, AttributeError, TypeError, ValueError):
+        return 1
+
+
+def _render_subtitles_cpu(
+    images: torch.Tensor,
+    active_keys: list[tuple[Any, ...] | None],
+    active_by_key: dict[tuple[Any, ...], list[dict[str, Any]]],
+    style: dict[str, Any],
+    fonts_root: Path,
+    progress: _SubtitleProgress,
+) -> torch.Tensor:
+    rendered = []
+    for index, frame in enumerate(images):
+        key = active_keys[index]
+        active = active_by_key.get(key, []) if key is not None else []
+        rendered.append(
+            _renderer_module().render_frame(frame, active, style, fonts_root)
+            if active
+            else frame[..., :3].detach().cpu().float()
+        )
+        progress.update()
+    return torch.stack(rendered, dim=0).clamp(0, 1)
+
+
+def _render_subtitles_gpu(
+    images: torch.Tensor,
+    active_keys: list[tuple[Any, ...] | None],
+    active_by_key: dict[tuple[Any, ...], list[dict[str, Any]]],
+    style: dict[str, Any],
+    fonts_root: Path,
+    progress: _SubtitleProgress,
+) -> torch.Tensor:
+    device = _subtitle_gpu_device(images)
+    if device is None:
+        raise RuntimeError("CUDA is unavailable for subtitle rendering")
+    total_frames = int(images.shape[0])
+    height, width = int(images.shape[1]), int(images.shape[2])
+    output_store = torch.empty((total_frames, height, width, 3), device="cpu", dtype=torch.float32)
+    cpu_overlay_cache: dict[tuple[Any, ...], tuple[torch.Tensor, torch.Tensor, tuple[int, int, int, int]] | None] = {}
+    gpu_overlay_cache: dict[tuple[Any, ...], tuple[torch.Tensor, torch.Tensor, tuple[int, int, int, int]] | None] = {}
+    batch_size = _subtitle_gpu_batch_size(images, device)
+    _subtitle_info("GPU subtitle render: device=%s; batch=%d; overlay_groups=%d", device, batch_size, len(active_by_key))
+    start = 0
+    with torch.inference_mode():
+        while start < total_frames:
+            end = min(total_frames, start + batch_size)
+            gpu_frames = None
+            result = None
+            overlay = overlay_rgb = overlay_alpha = indices = region = alpha = colour = None
+            try:
+                local_keys = active_keys[start:end]
+                grouped: dict[tuple[Any, ...], list[int]] = {}
+                inactive: list[int] = []
+                for local_index, key in enumerate(local_keys):
+                    if key is None:
+                        inactive.append(local_index)
+                    else:
+                        grouped.setdefault(key, []).append(local_index)
+                source = images[start:end, ..., :3]
+                if not grouped:
+                    output_store[start:end].copy_(source.detach().to(device="cpu", dtype=torch.float32))
+                    progress.update(end - start)
+                    start = end
+                    continue
+                gpu_frames = source.to(device=device, dtype=torch.float32)
+                gpu_frames = gpu_frames.clamp(0.0, 1.0).mul(255.0).to(torch.uint8).to(torch.float32).div(255.0)
+                for key, local_indices in grouped.items():
+                    overlay = gpu_overlay_cache.get(key)
+                    if overlay is None and key not in gpu_overlay_cache:
+                        if key not in cpu_overlay_cache:
+                            if len(cpu_overlay_cache) >= _SUBTITLE_CPU_OVERLAY_CACHE_MAX:
+                                cpu_overlay_cache.pop(next(iter(cpu_overlay_cache)))
+                            cpu_overlay_cache[key] = _subtitle_overlay_crop(
+                                width,
+                                height,
+                                active_by_key[key],
+                                style,
+                                fonts_root,
+                            )
+                        cpu_overlay = cpu_overlay_cache[key]
+                        if cpu_overlay is None:
+                            gpu_overlay_cache[key] = None
+                            continue
+                        overlay = (
+                            cpu_overlay[0].to(device=device, non_blocking=True),
+                            cpu_overlay[1].to(device=device, non_blocking=True),
+                            cpu_overlay[2],
+                        )
+                        gpu_overlay_cache[key] = overlay
+                    if overlay is None:
+                        continue
+                    overlay_rgb, overlay_alpha, bounds = overlay
+                    left, top, right, bottom = bounds
+                    indices = torch.tensor(local_indices, device=device, dtype=torch.long)
+                    region = gpu_frames.index_select(0, indices)[:, top:bottom, left:right, :]
+                    alpha = overlay_alpha.unsqueeze(0)
+                    colour = overlay_rgb.unsqueeze(0)
+                    region = region * (1.0 - alpha) + colour * alpha
+                    gpu_frames[indices, top:bottom, left:right, :] = region
+                gpu_frames = gpu_frames.clamp(0.0, 1.0).mul(255.0).round().div(255.0)
+                result = gpu_frames.to(device="cpu", dtype=torch.float32)
+                if inactive:
+                    inactive_indices = torch.tensor(inactive, dtype=torch.long)
+                    source_indices = inactive_indices.to(device=source.device)
+                    result[inactive_indices] = source.index_select(0, source_indices).detach().to(device="cpu", dtype=torch.float32)
+                output_store[start:end].copy_(result)
+                progress.update(end - start)
+                gpu_overlay_cache.clear()
+                start = end
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc).lower():
+                    raise
+                if gpu_frames is not None:
+                    del gpu_frames
+                if result is not None:
+                    del result
+                if overlay is not None:
+                    del overlay
+                if overlay_rgb is not None:
+                    del overlay_rgb
+                if overlay_alpha is not None:
+                    del overlay_alpha
+                if indices is not None:
+                    del indices
+                if region is not None:
+                    del region
+                if alpha is not None:
+                    del alpha
+                if colour is not None:
+                    del colour
+                gpu_overlay_cache.clear()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                if batch_size <= 1:
+                    raise
+                batch_size = max(1, batch_size // 2)
+                _subtitle_info("GPU subtitle render OOM; retrying with batch=%d", batch_size)
+    return output_store
 
 
 def _clear_video_caches(node_id: Any) -> None:
@@ -826,22 +1050,45 @@ class CSVideoSubtitle(io.ComfyNode):
         )
         _subtitle_info("subtitle cues ready: count=%d", len(cues))
         _subtitle_info("stage 4/6: rendering subtitles onto %d frames", int(images.shape[0]))
-        rendered = []
+        active_keys, active_by_key = _subtitle_active_frames(cues, int(images.shape[0]), frame_rate)
         progress = _SubtitleProgress(int(images.shape[0]))
         try:
-            for index, frame in enumerate(images):
-                time_seconds = index / frame_rate
-                active = [cue for cue in cues if float(cue["start"]) <= time_seconds < float(cue["end"])]
-                rendered.append(
-                    _renderer_module().render_frame(frame, active, output_style, _fonts_root())
-                    if active
-                    else frame[..., :3].detach().cpu().float()
+            if _subtitle_gpu_device(images) is not None and active_by_key:
+                try:
+                    output_images = _render_subtitles_gpu(
+                        images,
+                        active_keys,
+                        active_by_key,
+                        output_style,
+                        _fonts_root(),
+                        progress,
+                    )
+                except RuntimeError as exc:
+                    if "out of memory" not in str(exc).lower():
+                        raise
+                    progress.close()
+                    _subtitle_info("GPU subtitle rendering unavailable; falling back to CPU")
+                    progress = _SubtitleProgress(int(images.shape[0]))
+                    output_images = _render_subtitles_cpu(
+                        images,
+                        active_keys,
+                        active_by_key,
+                        output_style,
+                        _fonts_root(),
+                        progress,
+                    )
+            else:
+                output_images = _render_subtitles_cpu(
+                    images,
+                    active_keys,
+                    active_by_key,
+                    output_style,
+                    _fonts_root(),
+                    progress,
                 )
-                progress.update()
         finally:
             progress.close()
-        _subtitle_info("frame rendering complete: %d frames", len(rendered))
-        output_images = torch.stack(rendered, dim=0).clamp(0, 1)
+        _subtitle_info("frame rendering complete: %d frames", int(output_images.shape[0]))
         _subtitle_info("stage 5/6: assembling output video")
         metadata = source_metadata
         edited_srt = _cues_to_srt(cues)

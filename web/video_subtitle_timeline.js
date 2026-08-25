@@ -140,6 +140,18 @@ async function fetchCachedProxy(node, filename = "") {
     if (!response.ok) throw new Error(result.error || "Unable to read subtitle preview cache");
     return { url: api.apiURL(String(result.video_url || "")), info: result.info || {}, label: String(result.label || "Subtitle preview cache") };
 }
+async function fetchAudioWaveform(node, filename = "") {
+    const nodeId = String(node?.id ?? "").trim();
+    if (!nodeId && !filename) return null;
+    const params = new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) });
+    const response = await api.fetchApi(`/cinestyle/video-subtitle-waveform?${params}`);
+    if (!response.ok) return null;
+    const result = await response.json();
+    return {
+        peaks: Array.isArray(result.peaks) ? result.peaks.map((value) => Math.max(0, Math.min(1, Number(value) || 0))) : [],
+        duration: Number(result.duration) || 0,
+    };
+}
 async function setTimelineOpen(node, open) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId) return;
@@ -328,6 +340,9 @@ function addStyles() {
       .cs-subtitle-status { min-width:0; flex:1; color:#9299a8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .cs-subtitle-foot { justify-content:flex-end; }
       .cs-subtitle-foot .apply { background:#317ec4; border-color:#4b9de8; }
+      .cs-subtitle-track-audio { cursor:default !important; pointer-events:none !important; }
+      .cs-subtitle-track-audio .cs-subtitle-track-body { background:#252a31; pointer-events:none !important; }
+      .cs-subtitle-waveform { display:block; width:100%; height:100%; opacity:.82; pointer-events:none; }
       @media(max-width:760px) { .cs-subtitle-style-section .cs-subtitle-fields,.cs-subtitle-position-section .cs-subtitle-fields{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media(max-width:460px) { .cs-subtitle-style-section .cs-subtitle-fields{grid-template-columns:1fr;} .cs-subtitle-shell{padding:10px;} }
     `;
@@ -350,7 +365,7 @@ async function openTimeline(node) {
          <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><img class="cs-subtitle-overlay-image" alt="" draggable="false"><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div><div class="cs-subtitle-preview-loading" role="status" aria-live="polite"><span class="cs-subtitle-preview-loading-text">Preparing subtitle preview...</span></div></div>
         <div class="cs-subtitle-readout"><span class="current">00:00.00</span><span class="range"></span><span class="duration">00:00.00</span></div>
         <div class="cs-subtitle-pointer-row"><button class="cs-subtitle-pointer" type="button" aria-label="Current time"></button></div>
-        <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-video"><span class="cs-subtitle-track-label">Video</span><div class="cs-subtitle-track-body"></div></div></div>
+        <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-audio" aria-label="Audio"><span class="cs-subtitle-track-label">Audio</span><div class="cs-subtitle-track-body"><canvas class="cs-subtitle-waveform" aria-hidden="true"></canvas></div></div></div>
         <div class="cs-subtitle-controls"><button class="set-in">Set In</button><button class="cs-subtitle-point-frame in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="back">|&lt;</button><button class="play">Play</button><button class="forward">&gt;|</button><button class="cs-subtitle-point-frame out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="set-out">Set Out</button></div>
         <div class="cs-subtitle-style-section"><div class="cs-subtitle-style-section-title">Typography</div><div class="cs-subtitle-fields"><label class="cs-subtitle-field">Font<select class="font"></select></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-font-size">Size</label><input id="cs-subtitle-font-size" class="font-size" type="range" min="8" max="100" step="1"><output data-subtitle-output="font_size">30</output><button class="cs-subtitle-param-reset" data-reset="font_size" type="button" title="Reset Size">&#8634;</button></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="italic" type="checkbox"> Italic</span></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-letter-spacing">Spacing</label><input id="cs-subtitle-letter-spacing" class="letter-spacing" type="range" min="-10" max="50" step="1"><output data-subtitle-output="letter_spacing">0</output><button class="cs-subtitle-param-reset" data-reset="letter_spacing" type="button" title="Reset Letter Spacing">&#8634;</button></div></div></div>
         <div class="cs-subtitle-style-section"><div class="cs-subtitle-style-section-title">Fill</div><div class="cs-subtitle-fields"><label class="cs-subtitle-field">Primary Color<div class="cs-subtitle-color-row"><input class="primary-color" type="color"><output class="cs-subtitle-hex primary-color-hex">#FFFFFF</output></div></label><label class="cs-subtitle-field">Secondary Color<div class="cs-subtitle-color-row"><input class="secondary-color" type="color" value="#FF0000"><output class="cs-subtitle-hex secondary-color-hex">#FF0000</output></div></label><label class="cs-subtitle-field cs-subtitle-check"><span><input class="gradient" type="checkbox"> Vertical Gradient</span></label></div></div>
@@ -370,6 +385,7 @@ async function openTimeline(node) {
     const overlayImage = dialog.querySelector(".cs-subtitle-overlay-image");
     const interactionBox = dialog.querySelector(".cs-subtitle-interaction-box");
     const viewport = dialog.querySelector(".cs-subtitle-viewport");
+    const waveformCanvas = dialog.querySelector(".cs-subtitle-waveform");
     const axis = dialog.querySelector(".cs-subtitle-axis");
     const body = dialog.querySelector(".cs-subtitle-track-subtitles .cs-subtitle-track-body");
     const rangeBand = dialog.querySelector(".cs-subtitle-range-band");
@@ -411,6 +427,8 @@ async function openTimeline(node) {
     let outFrame = clamp(finiteNumber(widget(node, "preview_out")?.value, -1), -1, 10000000);
     let viewStart = 0;
     let viewDuration = duration;
+    let waveformPeaks = [];
+    let waveformDuration = 0;
     let drag = null;
     let playingSelection = false;
     let previewTimer = null;
@@ -637,6 +655,36 @@ async function openTimeline(node) {
         schedulePreview();
     }
     function updateReadout() { const now = video.currentTime || 0; current.textContent = formatTime(now); range.textContent = `In ${formatTime(rangeStartSeconds())}  -  Out ${formatTime(rangeEndSeconds())}`; durationLabel.textContent = formatTime(duration); }
+    function drawAudioWaveform() {
+        if (!waveformCanvas) return;
+        const width = Math.max(1, Math.round(waveformCanvas.clientWidth));
+        const height = Math.max(1, Math.round(waveformCanvas.clientHeight));
+        const ratio = window.devicePixelRatio || 1;
+        if (waveformCanvas.width !== Math.round(width * ratio) || waveformCanvas.height !== Math.round(height * ratio)) {
+            waveformCanvas.width = Math.round(width * ratio);
+            waveformCanvas.height = Math.round(height * ratio);
+        }
+        const context = waveformCanvas.getContext("2d");
+        if (!context) return;
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        context.clearRect(0, 0, width, height);
+        context.strokeStyle = "rgba(210,216,223,.24)";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(0, height / 2 + 0.5);
+        context.lineTo(width, height / 2 + 0.5);
+        context.stroke();
+        if (!waveformPeaks.length || waveformDuration <= 0 || viewDuration <= 0) return;
+        const start = Math.max(0, Math.floor((viewStart / waveformDuration) * waveformPeaks.length));
+        const end = Math.min(waveformPeaks.length, Math.ceil(((viewStart + viewDuration) / waveformDuration) * waveformPeaks.length));
+        if (end <= start) return;
+        context.fillStyle = "rgba(210,216,223,.78)";
+        for (let x = 0; x < width; x += 1) {
+            const index = Math.min(end - 1, start + Math.floor((x / width) * (end - start)));
+            const amplitude = Math.max(1, Math.round(Math.min(1, Number(waveformPeaks[index]) || 0) * (height * 0.44)));
+            context.fillRect(x, Math.round(height / 2 - amplitude), 1, amplitude * 2);
+        }
+    }
     function cuePosition(cue) { const start = ((cue.start - viewStart) / viewDuration) * 100; const width = ((cue.end - cue.start) / viewDuration) * 100; return { left: `${start}%`, width: `${Math.max(0.35, width)}%` }; }
     let contextMenu = null;
     let contextMenuOutsidePointer = null;
@@ -816,7 +864,7 @@ async function openTimeline(node) {
         pointer.style.left = `${clamp(ratio, 0, 1) * 100}%`;
         inFrameButton.textContent = String(inFrame);
         outFrameButton.textContent = String(outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame);
-        updateReadout(); updateOverlay();
+        drawAudioWaveform(); updateReadout(); updateOverlay();
     }
     function secondsAtEvent(event) { const rect = body.getBoundingClientRect(); return viewStart + clamp((event.clientX - rect.left) / rect.width, 0, 1) * viewDuration; }
     function handleTimelineContextMenu(event) {
@@ -885,7 +933,7 @@ async function openTimeline(node) {
     function setFrame(frame) { video.currentTime = clamp(frame / fps, 0, duration); renderTimeline(); }
     function currentFrame() { return Math.round((video.currentTime || 0) * fps); }
     function normalizeRange() { const max = Math.max(0, Math.round(duration * fps) - 1); inFrame = clamp(Math.round(inFrame), 0, max); outFrame = outFrame < 0 ? max : clamp(Math.round(outFrame), 0, max); if (outFrame <= inFrame) outFrame = Math.min(max, inFrame + 1); }
-    function close() { void setTimelineOpen(node, false).catch(() => {}); video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
+    function close() { void setTimelineOpen(node, false).catch(() => {}); video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("resize", drawAudioWaveform); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
 
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });
@@ -964,6 +1012,7 @@ async function openTimeline(node) {
         else beginTextDrag(event);
     });
     window.addEventListener("resize", updateInteractionBox);
+    window.addEventListener("resize", drawAudioWaveform);
     dialog.querySelector(".cs-subtitle-pointer-row").addEventListener("pointerdown", (event) => { const row = event.currentTarget; const move = (moveEvent) => { const rect = row.getBoundingClientRect(); setFrame(Math.round(clamp((moveEvent.clientX - rect.left) / rect.width, 0, 1) * Math.max(0, Math.round(duration * fps) - 1))); }; const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); move(event); });
     video.addEventListener("timeupdate", () => { if (playingSelection && video.currentTime >= rangeEndSeconds()) { video.pause(); video.currentTime = rangeEndSeconds(); playingSelection = false; } renderTimeline(); });
     video.addEventListener("pause", () => { playingSelection = false; dialog.querySelector(".play").textContent = "Play"; });
@@ -983,6 +1032,12 @@ async function openTimeline(node) {
             status.textContent = error.message;
         }
     });
+    async function loadAudioWaveform() {
+        const result = await fetchAudioWaveform(node, filename).catch(() => null);
+        waveformPeaks = result?.peaks || [];
+        waveformDuration = Number(result?.duration) || duration;
+        drawAudioWaveform();
+    }
     fetchFonts().then((fonts) => { inputs.font.innerHTML = ""; for (const font of fonts) { const option = document.createElement("option"); option.value = font; option.textContent = font; inputs.font.append(option); } if (!style.font && fonts.length) style.font = fonts[0]; inputs.font.value = style.font; updateOverlay(); }).catch(() => {});
     const initialize = async () => {
         setLoading("Reading subtitle cache...");
@@ -1036,6 +1091,7 @@ async function openTimeline(node) {
             renderTimeline();
         }
         setLoading("", false);
+        void loadAudioWaveform();
     };
     void initialize().catch((error) => {
         setLoading("Unable to initialize subtitle preview", false);

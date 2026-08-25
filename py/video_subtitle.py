@@ -342,6 +342,78 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
 def _preview_entry_for_request(node_id: str, video_filename: str = "") -> dict[str, Any] | None:
     return _preview_cache_entry(node_id)
 
+
+def _downsample_waveform_peaks(values: Any, target: int = 1600) -> list[float]:
+    array = np.asarray(values, dtype=np.float32).reshape(-1)
+    if array.size == 0:
+        return []
+    array = np.nan_to_num(np.abs(array), nan=0.0, posinf=1.0, neginf=0.0)
+    target = max(1, min(int(target), int(array.size)))
+    edges = np.linspace(0, int(array.size), target + 1, dtype=np.int64)
+    peaks = []
+    for index in range(target):
+        start, end = int(edges[index]), int(edges[index + 1])
+        peaks.append(float(np.max(array[start:end])) if end > start else 0.0)
+    return [max(0.0, min(1.0, peak)) for peak in peaks]
+
+
+def _waveform_from_audio(audio: Any) -> tuple[list[float], float]:
+    if not isinstance(audio, dict):
+        return [], 0.0
+    waveform = audio.get("waveform")
+    if not isinstance(waveform, torch.Tensor) or waveform.numel() == 0:
+        return [], 0.0
+    try:
+        samples = waveform.detach().to(device="cpu", dtype=torch.float32)
+        if samples.ndim == 3:
+            samples = samples[0]
+        if samples.ndim == 2:
+            samples = samples.mean(dim=0)
+        if samples.ndim != 1 or samples.numel() == 0:
+            return [], 0.0
+        sample_rate = float(int(audio.get("sample_rate", 0) or 0))
+        if sample_rate <= 0:
+            return [], 0.0
+        return _downsample_waveform_peaks(samples.numpy()), float(samples.numel()) / sample_rate
+    except (TypeError, ValueError, RuntimeError):
+        return [], 0.0
+
+
+def _waveform_from_video_file(source: str) -> tuple[list[float], float]:
+    if not source:
+        return [], 0.0
+    try:
+        source_path = _preview_cache_store()._resolve_file(source)
+        with av.open(source_path, mode="r") as container:
+            if not container.streams.audio:
+                return [], 0.0
+            stream = container.streams.audio[0]
+            sample_rate = int(stream.codec_context.sample_rate or stream.rate or 0)
+            if sample_rate <= 0:
+                return [], 0.0
+            frame_peaks: list[float] = []
+            sample_count = 0
+            for audio_frame in container.decode(stream):
+                try:
+                    samples = audio_frame.to_ndarray(format="fltp")
+                except Exception:
+                    samples = audio_frame.to_ndarray()
+                samples = np.asarray(samples, dtype=np.float32)
+                if samples.ndim == 1:
+                    samples = samples[None, :]
+                elif samples.ndim > 2:
+                    samples = samples.reshape(samples.shape[0], -1)
+                if samples.ndim != 2 or samples.shape[1] == 0:
+                    continue
+                mono = samples.mean(axis=0)
+                frame_peaks.append(float(np.max(np.abs(mono))))
+                sample_count += int(mono.size)
+            duration = float(sample_count) / sample_rate if sample_count else 0.0
+            return _downsample_waveform_peaks(frame_peaks), duration
+    except Exception as exc:
+        _subtitle_info("audio waveform unavailable: %s", exc)
+        return [], 0.0
+
 class CSVideoSubtitle(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -688,6 +760,27 @@ async def _subtitle_preview_route(request):
         return web.json_response({"error": f"Unable to render subtitle preview: {exc}"}, status=500)
 
 
+async def _subtitle_waveform_route(request):
+    import asyncio
+    from aiohttp import web
+
+    node_id = str(request.query.get("node_id", "")).strip()
+    filename = str(request.query.get("video_filename", "")).strip()
+    entry = _preview_entry_for_request(node_id) if node_id else None
+    peaks, duration = await asyncio.to_thread(_waveform_from_audio, entry.get("audio") if entry else None)
+    if not peaks and node_id:
+        main_entry = _preview_cache_store().get_node(node_id, "main")
+        peaks, duration = await asyncio.to_thread(_waveform_from_audio, main_entry.get("audio") if main_entry else None)
+    if not peaks and filename:
+        peaks, duration = await asyncio.to_thread(_waveform_from_video_file, filename)
+    if entry:
+        duration = float((entry.get("info") or {}).get("duration", duration) or duration)
+    return web.json_response(
+        {"peaks": peaks, "duration": max(0.0, duration), "has_audio": bool(peaks)},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def _subtitle_preview_info_route(request):
     from aiohttp import web
 
@@ -735,6 +828,7 @@ class CineStyleVideoSubtitleExtension(ComfyExtension):
             server_instance.routes.post("/cinestyle/video-subtitle-timeline-state")(_subtitle_timeline_state_route)
             server_instance.routes.get("/cinestyle/video-subtitle-preview-info")(_subtitle_preview_info_route)
             server_instance.routes.get("/cinestyle/video-subtitle-preview-video")(_subtitle_preview_video_route)
+            server_instance.routes.get("/cinestyle/video-subtitle-waveform")(_subtitle_waveform_route)
             server_instance.routes.post("/cinestyle/video-subtitle-preview")(_subtitle_preview_route)
             _ROUTE_REGISTERED = True
 

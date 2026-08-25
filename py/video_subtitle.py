@@ -232,6 +232,17 @@ def _extract_video_frames(video: Any) -> tuple[np.ndarray, float, dict[str, Any]
         "fps": safe_fps,
         "duration": float(frames.shape[0]) / safe_fps,
     }
+    # Preserve loader metadata so a downstream timeline can distinguish a
+    # trimmed VIDEO from the original source file when it builds a preview.
+    metadata = getattr(components, "metadata", None)
+    if isinstance(metadata, dict):
+        for key in (
+            "source_filename", "source_fps", "source_frame_count", "source_duration",
+            "source_width", "source_height", "start_frame", "end_frame", "loaded_fps",
+            "loaded_frame_count", "loaded_duration", "loaded_width", "loaded_height",
+        ):
+            if key in metadata:
+                info[key] = metadata[key]
     return frames, safe_fps, info, getattr(components, "audio", None)
 
 
@@ -342,8 +353,51 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _preview_entry_for_request(node_id: str, video_filename: str = "") -> dict[str, Any] | None:
-    return _preview_cache_entry(node_id)
+def _preview_entry_for_request(
+    node_id: str,
+    video_filename: str = "",
+    trim_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    entry = _preview_cache_entry(node_id)
+    if entry is None:
+        return entry
+    info = dict(entry.get("info") or {})
+    if video_filename and info.get("source_filename") and str(info.get("source_filename")).strip() != str(video_filename).strip():
+        return None
+    if not trim_metadata:
+        return entry
+    requested_start = trim_metadata.get("start_frame")
+    requested_end = trim_metadata.get("end_frame")
+    requested_fps = trim_metadata.get("loaded_fps")
+    if requested_start is not None:
+        try:
+            if int(info.get("start_frame")) != int(requested_start):
+                return None
+        except (TypeError, ValueError):
+            return None
+    if requested_end is not None:
+        try:
+            requested_end = int(requested_end)
+        except (TypeError, ValueError):
+            return None
+    if requested_end is not None:
+        try:
+            expected_end = requested_end
+            if requested_end < 0:
+                source_count = int(info.get("source_frame_count") or 0)
+                expected_end = source_count - 1 if source_count > 0 else None
+            if expected_end is not None and int(info.get("end_frame")) != expected_end:
+                return None
+        except (TypeError, ValueError):
+            return None
+    if requested_fps is not None:
+        try:
+            requested_fps = float(requested_fps)
+            if requested_fps > 0 and abs(float(info.get("loaded_fps")) - requested_fps) > 1e-4:
+                return None
+        except (TypeError, ValueError):
+            return None
+    return entry
 
 
 def _subtitle_proxy_dimensions(width: int, height: int, target_pixels: int = 800_000) -> tuple[int, int]:
@@ -357,27 +411,52 @@ def _subtitle_proxy_dimensions(width: int, height: int, target_pixels: int = 800
     return proxy_width, proxy_height
 
 
-def _lazy_cache_trimmed_preview(node_id: str, video_filename: str) -> dict[str, Any] | None:
+def _lazy_cache_trimmed_preview(
+    node_id: str,
+    video_filename: str,
+    requested_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Build a lightweight trimmed preview when execution skipped cache generation."""
     key = str(node_id or "").strip()
     source = str(video_filename or "").strip()
     if not key or not source:
         return None
     with _SUBTITLE_LAZY_CACHE_LOCK:
-        existing = _preview_cache_entry(key)
+        existing = _preview_entry_for_request(key, source, requested_metadata)
         if existing is not None:
             return existing
         metadata = dict(_SUBTITLE_SOURCE_METADATA.get(key) or {})
-        if not metadata:
-            return None
+        if metadata.get("source_filename") and str(metadata.get("source_filename")).strip() != source:
+            metadata = {}
+        if requested_metadata:
+            metadata.update({name: value for name, value in requested_metadata.items() if value is not None})
         try:
             source_path = _preview_cache_store()._resolve_file(source)
-            source_fps = float(metadata.get("source_fps") or 24.0)
+            source_fps = float(metadata.get("source_fps") or 0.0)
+            source_count = int(metadata.get("source_frame_count") or 0)
+            source_width = int(metadata.get("source_width") or 0)
+            source_height = int(metadata.get("source_height") or 0)
+            if source_fps <= 0 or source_count <= 0 or source_width <= 0 or source_height <= 0:
+                with av.open(source_path, mode="r") as container:
+                    if not container.streams.video:
+                        return None
+                    stream = container.streams.video[0]
+                    rate = stream.average_rate or stream.guessed_rate
+                    source_fps = source_fps if source_fps > 0 else float(rate or 24.0)
+                    source_width = source_width or int(stream.width or 0)
+                    source_height = source_height or int(stream.height or 0)
+                    source_count = source_count or int(stream.frames or 0)
+                    if source_count <= 0 and container.duration and source_fps > 0:
+                        source_count = max(1, int(round(float(container.duration / av.time_base) * source_fps)))
+            if source_fps <= 0 or source_count <= 0 or source_width <= 0 or source_height <= 0:
+                return None
             target_fps = float(metadata.get("loaded_fps") or source_fps)
-            start = max(0, int(metadata.get("start_frame") or 0))
-            end = max(start, int(metadata.get("end_frame") if metadata.get("end_frame") is not None else start))
-            loaded_width = int(metadata.get("loaded_width") or metadata.get("source_width") or 0)
-            loaded_height = int(metadata.get("loaded_height") or metadata.get("source_height") or 0)
+            start = max(0, min(int(metadata.get("start_frame") or 0), source_count - 1))
+            requested_end = metadata.get("end_frame")
+            end = source_count - 1 if requested_end is None or int(requested_end) < 0 else min(int(requested_end), source_count - 1)
+            end = max(start, end)
+            loaded_width = int(metadata.get("loaded_width") or source_width)
+            loaded_height = int(metadata.get("loaded_height") or source_height)
             if loaded_width <= 0 or loaded_height <= 0 or source_fps <= 0 or target_fps <= 0:
                 return None
             proxy_width, proxy_height = _subtitle_proxy_dimensions(loaded_width, loaded_height)
@@ -400,8 +479,11 @@ def _lazy_cache_trimmed_preview(node_id: str, video_filename: str) -> dict[str, 
             if not frames:
                 return None
             info = {
+                "source_filename": source,
                 "source_fps": source_fps,
-                "source_frame_count": int(metadata.get("source_frame_count") or 0),
+                "source_frame_count": source_count,
+                "source_width": source_width,
+                "source_height": source_height,
                 "start_frame": start,
                 "end_frame": end,
                 "loaded_fps": target_fps,
@@ -776,6 +858,32 @@ async def _subtitle_timeline_state_route(request):
     return web.json_response({"ok": True})
 
 
+def _trim_metadata_from_values(values) -> dict[str, Any]:
+    """Read optional upstream CS Load Video range hints from request values."""
+    metadata: dict[str, Any] = {}
+    for name in ("start_frame", "end_frame"):
+        value = values.get(name)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            metadata[name] = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    value = values.get("loaded_fps")
+    if value is not None and str(value).strip() != "":
+        try:
+            loaded_fps = float(value)
+            if np.isfinite(loaded_fps) and loaded_fps > 0:
+                metadata["loaded_fps"] = loaded_fps
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return metadata
+
+
+def _trim_metadata_from_request(request) -> dict[str, Any]:
+    return _trim_metadata_from_values(request.query)
+
+
 async def _subtitle_preview_route(request):
     from aiohttp import web
 
@@ -786,7 +894,11 @@ async def _subtitle_preview_route(request):
     node_id = str(payload.get("node_id", "")).strip()
     if not node_id:
         return web.json_response({"error": "Missing subtitle node id."}, status=400)
-    entry = _preview_entry_for_request(node_id)
+    video_filename = str(payload.get("video_filename", "")).strip()
+    trim_metadata = _trim_metadata_from_values(payload)
+    entry = _preview_entry_for_request(node_id, video_filename, trim_metadata)
+    if entry is None and video_filename and trim_metadata:
+        entry = _lazy_cache_trimmed_preview(node_id, video_filename, trim_metadata)
     try:
         frame_index = max(0, int(payload.get("frame", 0)))
         source_frame_index = max(0, int(payload.get("source_frame", frame_index)))
@@ -851,7 +963,10 @@ async def _subtitle_waveform_route(request):
 
     node_id = str(request.query.get("node_id", "")).strip()
     filename = str(request.query.get("video_filename", "")).strip()
-    entry = _preview_entry_for_request(node_id) if node_id else None
+    trim_metadata = _trim_metadata_from_request(request)
+    entry = _preview_entry_for_request(node_id, filename, trim_metadata) if node_id else None
+    if entry is None and node_id and filename and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA):
+        entry = _lazy_cache_trimmed_preview(node_id, filename, trim_metadata)
     peaks, duration = await asyncio.to_thread(_waveform_from_audio, entry.get("audio") if entry else None)
     if not peaks and node_id:
         main_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
@@ -870,9 +985,11 @@ async def _subtitle_preview_info_route(request):
     from aiohttp import web
 
     node_id = str(request.query.get("node_id", "")).strip()
-    entry = _preview_entry_for_request(node_id)
-    if entry is None:
-        entry = _lazy_cache_trimmed_preview(node_id, str(request.query.get("video_filename", "")).strip())
+    filename = str(request.query.get("video_filename", "")).strip()
+    trim_metadata = _trim_metadata_from_request(request)
+    entry = _preview_entry_for_request(node_id, filename, trim_metadata)
+    if entry is None and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA):
+        entry = _lazy_cache_trimmed_preview(node_id, filename, trim_metadata)
     video_path = Path(str(entry.get("video_path", ""))) if entry else None
     if not entry or video_path is None or not video_path.is_file():
         return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once to build it."}, status=404)

@@ -1,6 +1,7 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { createCineStyleTextEditor } from "./cinestyle_text_editor.js";
+import { connectedVideoSource } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
@@ -62,39 +63,13 @@ function serializeSubtitleWidgetValues(node) {
     return PERSISTED_WIDGET_NAMES.map((name) => widget(node, name)?.value ?? null);
 }
 function graphNode(graph, id) { return graph?.getNodeById?.(id) || (graph?._nodes || []).find((item) => String(item?.id) === String(id)) || null; }
-function filenameValue(value) {
-    if (typeof value === "string") return value.trim();
-    if (!value || typeof value !== "object") return "";
-    for (const key of ["filename", "video", "video_path", "path", "source"]) {
-        if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
-    }
-    return "";
-}
-function connectedVideoFilename(node) {
-    const visited = new Set();
-    function findFilename(origin) {
-        if (!origin) return "";
-        const identity = String(origin.id ?? origin.type ?? visited.size);
-        if (visited.has(identity)) return "";
-        visited.add(identity);
-        for (const name of ["video", "file", "filename", "video_file", "path", "filepath", "input", "source"]) {
-            const value = filenameValue(widget(origin, name)?.value);
-            if (/\.(mp4|mov|mkv|avi|webm|m4v|mpg|mpeg|wmv|flv)(?:\s*\[[^\]]+\])?$/i.test(value)) return value;
-        }
-        for (const input of origin.inputs || []) {
-            const upstream = connectedOrigin(origin, input.name);
-            const value = findFilename(upstream);
-            if (value) return value;
-        }
-        return "";
-    }
-    return findFilename(connectedOrigin(node, "video"));
-}
 function connectedOrigin(node, inputName) {
-    const input = node.inputs?.find((item) => item.name === inputName);
+    const index = node.inputs?.findIndex((item) => item.name === inputName) ?? -1;
+    const input = index >= 0 ? node.inputs?.[index] : null;
     if (!input) return null;
     const graph = node.graph || app.graph;
-    const candidates = [];
+    const call = (method, argument) => { try { return typeof method === "function" ? method.call(node, argument) : null; } catch { return null; } };
+    const candidates = [call(node.getInputNode, index), call(node.getInputNode, inputName), call(node.getInputLink, index), call(node.getInputLink, inputName)];
     if (input.link != null) candidates.push(input.link);
     if (Array.isArray(input.links)) candidates.push(...input.links);
     for (const candidate of candidates) {
@@ -131,19 +106,27 @@ function graphSrtText(node) {
     }
     return findText(connectedOrigin(node, "srt"));
 }
-async function fetchCachedProxy(node, filename = "") {
+function appendVideoTrimParams(params, trim) {
+    if (!trim) return params;
+    if (Number.isFinite(Number(trim.startFrame))) params.set("start_frame", String(Math.max(0, Math.round(Number(trim.startFrame)))));
+    if (Number.isFinite(Number(trim.endFrame))) params.set("end_frame", String(Math.round(Number(trim.endFrame))));
+    if (Number.isFinite(Number(trim.targetFps)) && Number(trim.targetFps) > 0) params.set("loaded_fps", String(Number(trim.targetFps)));
+    return params;
+}
+async function fetchCachedProxy(node, filename = "", trim = null) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId) return null;
-    const response = await api.fetchApi(`/cinestyle/video-subtitle-preview-info?${new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) })}`);
+    const params = appendVideoTrimParams(new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) }), trim);
+    const response = await api.fetchApi(`/cinestyle/video-subtitle-preview-info?${params}`);
     if (response.status === 404) return null;
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Unable to read subtitle preview cache");
     return { url: api.apiURL(String(result.video_url || "")), info: result.info || {}, label: String(result.label || "Subtitle preview cache") };
 }
-async function fetchAudioWaveform(node, filename = "") {
+async function fetchAudioWaveform(node, filename = "", trim = null) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId && !filename) return null;
-    const params = new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) });
+    const params = appendVideoTrimParams(new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) }), trim);
     const response = await api.fetchApi(`/cinestyle/video-subtitle-waveform?${params}`);
     if (!response.ok) return null;
     const result = await response.json();
@@ -371,7 +354,15 @@ function addStyles() {
 }
 
 async function openTimeline(node) {
-    const filename = String(connectedVideoFilename(node) || "");
+    const connectedSource = connectedVideoSource(node, ["proxy_video", "video"]);
+    const filename = String(connectedSource?.filename || "");
+    const sourceTrim = connectedSource?.isCSLoad && (
+        Number(connectedSource.startFrame) > 0
+        || Number(connectedSource.endFrame) >= 0
+        || Number(connectedSource.targetFps) > 0
+    )
+        ? connectedSource
+        : null;
     const externalSrt = graphSrtText(node) || String(widget(node, "srt")?.value || "");
     const persistedSrt = String(widget(node, "edited_srt")?.value || "").trim();
     let cachedSrt = null;
@@ -454,6 +445,8 @@ async function openTimeline(node) {
     let waveformDuration = 0;
     let drag = null;
     let playingSelection = false;
+    let selectionSeeking = false;
+    let playbackToken = 0;
     let previewTimer = null;
     let previewRequest = 0;
     let previewInFlight = false;
@@ -589,6 +582,9 @@ async function openTimeline(node) {
                 preview_width: preview.width,
                 preview_height: preview.height,
                 preview_fps: preview.previewFps,
+                start_frame: sourceTrim?.startFrame,
+                end_frame: sourceTrim?.endFrame,
+                loaded_fps: sourceTrim?.targetFps,
                 cues,
                 style,
             }),
@@ -971,13 +967,51 @@ async function openTimeline(node) {
     function setFrame(frame) { video.currentTime = clamp(frame / fps, 0, duration); renderTimeline(); }
     function currentFrame() { return Math.round((video.currentTime || 0) * fps); }
     function normalizeRange() { const max = Math.max(0, Math.round(duration * fps) - 1); inFrame = clamp(Math.round(inFrame), 0, max); outFrame = outFrame < 0 ? max : clamp(Math.round(outFrame), 0, max); if (outFrame <= inFrame) outFrame = Math.min(max, inFrame + 1); }
+    function playSelection() {
+        normalizeRange();
+        const start = rangeStartSeconds();
+        const end = rangeEndSeconds();
+        const currentTime = Number(video.currentTime);
+        const needsSeek = !Number.isFinite(currentTime) || currentTime < start - 0.0005 || currentTime >= end - 0.0005;
+        const token = ++playbackToken;
+        const playAfterSeek = () => {
+            if (token !== playbackToken || !playingSelection) return;
+            selectionSeeking = false;
+            video.play().catch(() => { if (token === playbackToken) playingSelection = false; });
+        };
+        if (!needsSeek) {
+            playingSelection = true;
+            playAfterSeek();
+            return;
+        }
+        video.pause();
+        playingSelection = true;
+        selectionSeeking = true;
+        let settled = false;
+        const finishSeek = () => {
+            if (settled) return;
+            settled = true;
+            video.removeEventListener("seeked", finishSeek);
+            video.removeEventListener("loadedmetadata", retrySeek);
+            playAfterSeek();
+        };
+        const retrySeek = () => {
+            if (token !== playbackToken || !playingSelection) return;
+            video.currentTime = start;
+            if (video.readyState >= 2 && Math.abs(Number(video.currentTime) - start) <= 0.0005) queueMicrotask(finishSeek);
+        };
+        video.addEventListener("seeked", finishSeek, { once: true });
+        video.addEventListener("loadedmetadata", retrySeek, { once: true });
+        video.currentTime = start;
+        if (video.readyState >= 2 && Math.abs(Number(video.currentTime) - start) <= 0.0005) queueMicrotask(finishSeek);
+    }
     function close() { void setTimelineOpen(node, false).catch(() => {}); video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("resize", drawAudioWaveform); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
 
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".back").addEventListener("click", () => setFrame(currentFrame() - 1));
     dialog.querySelector(".forward").addEventListener("click", () => setFrame(currentFrame() + 1));
-    dialog.querySelector(".play").addEventListener("click", () => { if (!video.paused) { video.pause(); return; } normalizeRange(); if (video.currentTime < rangeStartSeconds() || video.currentTime >= rangeEndSeconds()) video.currentTime = rangeStartSeconds(); playingSelection = true; video.play().catch(() => { playingSelection = false; }); });
+    dialog.querySelector(".play").addEventListener("click", () => { if (!video.paused) { ++playbackToken; selectionSeeking = false; video.pause(); return; } playSelection(); });
     dialog.querySelector(".move-reset").addEventListener("click", () => { setStyleInput("position_x", 0.5); setStyleInput("position_y", 0.88); renderTimeline(); updateOverlay(); });
     function setStyleInput(name, value) {
         if (name === "position_x" || name === "position_y") value = normalizePosition(value, name === "position_x" ? 0.5 : 0.88);
@@ -1052,7 +1086,8 @@ async function openTimeline(node) {
     window.addEventListener("resize", updateInteractionBox);
     window.addEventListener("resize", drawAudioWaveform);
     dialog.querySelector(".cs-subtitle-pointer-row").addEventListener("pointerdown", (event) => { const row = event.currentTarget; const move = (moveEvent) => { const rect = row.getBoundingClientRect(); setFrame(Math.round(clamp((moveEvent.clientX - rect.left) / rect.width, 0, 1) * Math.max(0, Math.round(duration * fps) - 1))); }; const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); move(event); });
-    video.addEventListener("timeupdate", () => { if (playingSelection && video.currentTime >= rangeEndSeconds()) { video.pause(); video.currentTime = rangeEndSeconds(); playingSelection = false; } renderTimeline(); });
+    video.addEventListener("timeupdate", () => { if (playingSelection && !selectionSeeking && video.currentTime >= rangeEndSeconds()) { ++playbackToken; video.pause(); video.currentTime = Math.min(rangeEndSeconds(), duration); playingSelection = false; } renderTimeline(); });
+    video.addEventListener("ended", () => { if (playingSelection) { ++playbackToken; selectionSeeking = false; playingSelection = false; video.currentTime = Math.min(rangeEndSeconds(), duration); } renderTimeline(); });
     video.addEventListener("pause", () => { playingSelection = false; dialog.querySelector(".play").textContent = "Play"; });
     video.addEventListener("play", () => { dialog.querySelector(".play").textContent = "Pause"; });
     dialog.querySelector(".cs-subtitle-close").addEventListener("click", close); dialog.querySelector(".cancel").addEventListener("click", close); dialog.addEventListener("cancel", close);
@@ -1071,7 +1106,7 @@ async function openTimeline(node) {
         }
     });
     async function loadAudioWaveform() {
-        const result = await fetchAudioWaveform(node, filename).catch(() => null);
+        const result = await fetchAudioWaveform(node, filename, sourceTrim).catch(() => null);
         waveformPeaks = result?.peaks || [];
         waveformDuration = Number(result?.duration) || duration;
         drawAudioWaveform();
@@ -1086,7 +1121,7 @@ async function openTimeline(node) {
             replaceCues(sourceSrt);
         }
         setLoading("Preparing video preview cache...");
-        cachedProxy = await fetchCachedProxy(node, filename).catch(() => null);
+        cachedProxy = await fetchCachedProxy(node, filename, sourceTrim).catch(() => null);
         dialog.querySelector(".cs-subtitle-file").textContent = cachedProxy?.label || filename || "Subtitle preview cache";
         if (cachedProxy) {
             setLoading("Loading preview video...");

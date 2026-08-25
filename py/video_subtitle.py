@@ -354,6 +354,9 @@ def _downsample_waveform_peaks(values: Any, target: int = 1600) -> list[float]:
     for index in range(target):
         start, end = int(edges[index]), int(edges[index + 1])
         peaks.append(float(np.max(array[start:end])) if end > start else 0.0)
+    peak_max = max(peaks, default=0.0)
+    if peak_max > 0.0:
+        peaks = [peak / peak_max for peak in peaks]
     return [max(0.0, min(1.0, peak)) for peak in peaks]
 
 

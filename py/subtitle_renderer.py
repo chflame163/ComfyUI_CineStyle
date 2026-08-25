@@ -12,6 +12,7 @@ import torch
 _FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
 _FONT_SIZE_MIN = 8
 _FONT_SIZE_MAX = 200
+_DEFAULT_FONT_SIZE = 36
 _SUPERSAMPLE_SCALE = 2
 
 
@@ -132,7 +133,7 @@ def _draw_text_layer(
     font_path = resolve_font(str(style.get("font", "")), fonts_root)
     font_size = max(
         _FONT_SIZE_MIN,
-        min(font_size_max, int(round(_safe_number(style.get("font_size", 30), 30)))),
+        min(font_size_max, int(round(_safe_number(style.get("font_size", _DEFAULT_FONT_SIZE), _DEFAULT_FONT_SIZE)))),
     )
     try:
         font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default()

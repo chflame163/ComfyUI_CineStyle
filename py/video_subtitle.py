@@ -41,6 +41,7 @@ _SUBTITLE_GPU_RESERVE_BYTES = 512 * 1024 * 1024
 _SUBTITLE_GPU_MAX_BATCH = 16
 _SUBTITLE_GPU_BYTES_PER_PIXEL = 40
 _SUBTITLE_CPU_OVERLAY_CACHE_MAX = 128
+_DEFAULT_FONT_SIZE = 36
 
 
 def _subtitle_info(message: str, *args: Any) -> None:
@@ -902,7 +903,7 @@ class CSVideoSubtitle(io.ComfyNode):
                 io.Int.Input("preview_in", default=0, min=0, max=10000000, step=1, advanced=True),
                 io.Int.Input("preview_out", default=-1, min=-1, max=10000000, step=1, advanced=True),
                 io.Combo.Input("font", options=fonts or [""], default=fonts[0] if fonts else "", advanced=True),
-                io.Int.Input("font_size", default=30, min=8, max=200, step=1, advanced=True),
+                io.Int.Input("font_size", default=_DEFAULT_FONT_SIZE, min=8, max=200, step=1, advanced=True),
                 io.String.Input("primary_color", default="#FFFFFF", advanced=True),
                 io.String.Input("secondary_color", default="#FF0000", advanced=True),
                 io.Boolean.Input("gradient", default=False, advanced=True),
@@ -930,7 +931,7 @@ class CSVideoSubtitle(io.ComfyNode):
         preview_in: int = 0,
         preview_out: int = -1,
         font: str = "",
-        font_size: int = 30,
+        font_size: int = _DEFAULT_FONT_SIZE,
         primary_color: str = "#FFFFFF",
         secondary_color: str = "#FF0000",
         gradient: bool = False,
@@ -950,7 +951,7 @@ class CSVideoSubtitle(io.ComfyNode):
         _subtitle_info("stage 1/6: validating video and subtitle inputs")
         preview_in = _safe_int(preview_in, 0, 0, 10000000)
         preview_out = _safe_int(preview_out, -1, -1, 10000000)
-        font_size = _safe_int(font_size, 30, 8, 200)
+        font_size = _safe_int(font_size, _DEFAULT_FONT_SIZE, 8, 200)
         outline_size = _safe_int(outline_size, 2, 0, 20)
         shadow_size = _safe_int(shadow_size, 3, 0, 20)
         letter_spacing = _safe_int(letter_spacing, 0, -10, 50)

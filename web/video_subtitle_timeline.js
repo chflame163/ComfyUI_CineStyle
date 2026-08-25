@@ -5,6 +5,7 @@ import { connectedVideoSource } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
+const DEFAULT_FONT_SIZE = 36;
 const SOURCE_VIDEO_REQUIRED_MESSAGE = "找不到可访问的源视频文件，请先执行一次节点并保持源视频路径有效。";
 const PERSISTED_WIDGET_NAMES = [
     "edited_srt", "preview_in", "preview_out", "font", "font_size", "primary_color", "secondary_color",
@@ -380,7 +381,7 @@ async function openTimeline(node) {
         <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-audio" aria-label="Audio"><span class="cs-subtitle-track-label">Audio</span><div class="cs-subtitle-track-body"><canvas class="cs-subtitle-waveform" aria-hidden="true"></canvas></div></div></div>
         <div class="cs-subtitle-controls"><button class="set-in">Set In</button><button class="cs-subtitle-point-frame in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="back">|&lt;</button><button class="play">Play</button><button class="forward">&gt;|</button><button class="cs-subtitle-point-frame out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="set-out">Set Out</button></div>
         <div class="cs-subtitle-style-section cs-subtitle-style-editor"><div class="cs-subtitle-style-section-title">Text Style</div><div class="cs-subtitle-style-grid">
-          <div class="cs-subtitle-style-group"><div class="cs-subtitle-style-group-title">Typography</div><div class="cs-subtitle-style-group-fields cs-subtitle-typography-fields"><label class="cs-subtitle-field">Font<select class="font"></select></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-font-size">Size</label><input id="cs-subtitle-font-size" class="font-size" type="range" min="8" max="200" step="1"><output data-subtitle-output="font_size">30</output><button class="cs-subtitle-param-reset" data-reset="font_size" type="button" title="Reset Size">&#8634;</button></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="italic" type="checkbox"> Italic</span></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-letter-spacing">Spacing</label><input id="cs-subtitle-letter-spacing" class="letter-spacing" type="range" min="-10" max="50" step="1"><output data-subtitle-output="letter_spacing">0</output><button class="cs-subtitle-param-reset" data-reset="letter_spacing" type="button" title="Reset Letter Spacing">&#8634;</button></div></div></div>
+          <div class="cs-subtitle-style-group"><div class="cs-subtitle-style-group-title">Typography</div><div class="cs-subtitle-style-group-fields cs-subtitle-typography-fields"><label class="cs-subtitle-field">Font<select class="font"></select></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-font-size">Size</label><input id="cs-subtitle-font-size" class="font-size" type="range" min="8" max="200" step="1"><output data-subtitle-output="font_size">${DEFAULT_FONT_SIZE}</output><button class="cs-subtitle-param-reset" data-reset="font_size" type="button" title="Reset Size">&#8634;</button></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="italic" type="checkbox"> Italic</span></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-letter-spacing">Spacing</label><input id="cs-subtitle-letter-spacing" class="letter-spacing" type="range" min="-10" max="50" step="1"><output data-subtitle-output="letter_spacing">0</output><button class="cs-subtitle-param-reset" data-reset="letter_spacing" type="button" title="Reset Letter Spacing">&#8634;</button></div></div></div>
           <div class="cs-subtitle-style-group"><div class="cs-subtitle-style-group-title">Fill</div><div class="cs-subtitle-style-group-fields cs-subtitle-fill-fields"><div class="cs-subtitle-field">Primary Color<div class="cs-subtitle-color-row"><input class="primary-color" type="color"><output class="cs-subtitle-hex primary-color-hex">#FFFFFF</output></div></div><div class="cs-subtitle-field">Secondary Color<div class="cs-subtitle-color-row"><input class="secondary-color" type="color" value="#FF0000"><output class="cs-subtitle-hex secondary-color-hex">#FF0000</output></div></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="gradient" type="checkbox"> Vertical Gradient</span></label></div></div>
           <div class="cs-subtitle-style-group cs-subtitle-effects-group"><div class="cs-subtitle-style-group-title">Shadow</div><div class="cs-subtitle-effect-row"><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-shadow-size">Size</label><input id="cs-subtitle-shadow-size" class="shadow-size" type="range" min="0" max="20" step="1"><output data-subtitle-output="shadow_size">3</output><button class="cs-subtitle-param-reset" data-reset="shadow_size" type="button" title="Reset Shadow">&#8634;</button></div><div class="cs-subtitle-effect-color"><span>Color</span><div class="cs-subtitle-color-row"><input class="shadow-color" type="color"><output class="cs-subtitle-hex shadow-color-hex">#000000</output></div></div></div><div class="cs-subtitle-style-group-title cs-subtitle-effect-divider">Outline</div><div class="cs-subtitle-effect-row"><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-outline-size">Size</label><input id="cs-subtitle-outline-size" class="outline-size" type="range" min="0" max="20" step="1"><output data-subtitle-output="outline_size">2</output><button class="cs-subtitle-param-reset" data-reset="outline_size" type="button" title="Reset Outline">&#8634;</button></div><div class="cs-subtitle-effect-color"><span>Color</span><div class="cs-subtitle-color-row"><input class="outline-color" type="color"><output class="cs-subtitle-hex outline-color-hex">#000000</output></div></div></div></div>
         </div></div>
@@ -458,7 +459,7 @@ async function openTimeline(node) {
     let localTransformActive = false;
     const style = {
         font: String(widget(node, "font")?.value || ""),
-        font_size: clamp(finiteNumber(widget(node, "font_size")?.value, 30), 8, 200),
+        font_size: clamp(finiteNumber(widget(node, "font_size")?.value, DEFAULT_FONT_SIZE), 8, 200),
         primary_color: normalizeHex(widget(node, "primary_color")?.value, "#FFFFFF"),
         secondary_color: normalizeHex(widget(node, "secondary_color")?.value, "#FF0000"),
         gradient: boolValue(widget(node, "gradient")?.value || false),
@@ -1021,7 +1022,7 @@ async function openTimeline(node) {
         if (input) input.value = value;
         updateParamOutput(name, value);
     }
-    const paramDefaults = { font_size: 30, letter_spacing: 0, position_x: 0.5, position_y: 0.88, outline_size: 2, shadow_size: 3 };
+    const paramDefaults = { font_size: DEFAULT_FONT_SIZE, letter_spacing: 0, position_x: 0.5, position_y: 0.88, outline_size: 2, shadow_size: 3 };
     dialog.querySelectorAll(".cs-subtitle-param-reset").forEach((button) => {
         button.addEventListener("click", () => { const name = button.dataset.reset; setStyleInput(name, paramDefaults[name]); updateOverlay(); });
     });
@@ -1068,7 +1069,7 @@ async function openTimeline(node) {
         const anchorX = isRightHandle ? box.left : box.right;
         const anchorY = isBottomHandle ? box.top : box.bottom;
         const startDistance = Math.max(8, Math.max(Math.abs(event.clientX - anchorX), Math.abs(event.clientY - anchorY)));
-        const originSize = finiteNumber(style.font_size, 30);
+        const originSize = finiteNumber(style.font_size, DEFAULT_FONT_SIZE);
         const move = (moveEvent) => {
             const distance = Math.max(8, Math.max(Math.abs(moveEvent.clientX - anchorX), Math.abs(moveEvent.clientY - anchorY)));
             const nextSize = clamp(Math.round(originSize * distance / startDistance), 8, 200);

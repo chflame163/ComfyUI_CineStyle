@@ -71,14 +71,22 @@ _SEC_WEIGHT_SPECS = {
     "SeC-4B-fp16.safetensors": (torch.float16, "https://huggingface.co/VeryAladeen/Sec-4B/resolve/main/SeC-4B-fp16.safetensors"),
 }
 _SEC_DEFAULT_WEIGHT_FILENAME = "SeC-4B-bf16.safetensors"
-_SELECTOR_CACHE_ROOT = Path(tempfile.gettempdir()) / "cinestyle_selector_cache"
-_SELECTOR_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-_SELECTOR_INPUT_CACHE: dict[str, dict[str, Any]] = {}
-_SELECTOR_CACHE_LOCK = threading.RLock()
 _SELECTOR_CACHE_LIMIT = 8
 _SELECTOR_CACHE_MAX_BYTES = 4 * 1024**3
 _SEGMENT_LOGGER = logging.getLogger("CineStyleVideoSegment")
 _NESTED_TQDM_LOCK = threading.Lock()
+_PREVIEW_CACHE_STORE = None
+
+
+def _preview_cache_store():
+    global _PREVIEW_CACHE_STORE
+    if _PREVIEW_CACHE_STORE is None:
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        if module is None:
+            raise RuntimeError("CineStyle preview cache module is unavailable.")
+        _PREVIEW_CACHE_STORE = module.PreviewCacheStore("video_segment", max_entries=_SELECTOR_CACHE_LIMIT, max_bytes=_SELECTOR_CACHE_MAX_BYTES)
+    return _PREVIEW_CACHE_STORE
 
 
 def _no_nested_tqdm(iterable: Any, *args: Any, **kwargs: Any) -> Any:
@@ -338,128 +346,29 @@ def _video_input_fps(video_input: Any, prompt: Any = None, node_id: Any = None) 
     return _prompt_selector_fps(prompt, node_id) or 24.0
 
 
-def _encode_selector_cache(path: Path, frames: torch.Tensor, fps: float) -> None:
-    height, width = map(int, frames.shape[1:3])
-    encoded_width = width + (width % 2)
-    encoded_height = height + (height % 2)
-    rate = Fraction(float(fps)).limit_denominator(1000)
-    with av.open(str(path), mode="w", format="mp4") as container:
-        try:
-            stream = container.add_stream("libx264", rate=rate)
-            stream.options = {"preset": "ultrafast", "crf": "20"}
-        except (av.error.FFmpegError, ValueError):
-            stream = container.add_stream("mpeg4", rate=rate)
-        stream.width = encoded_width
-        stream.height = encoded_height
-        stream.pix_fmt = "yuv420p"
-        for frame in frames:
-            array = frame.numpy()
-            if encoded_width != width or encoded_height != height:
-                array = np.pad(
-                    array,
-                    ((0, encoded_height - height), (0, encoded_width - width), (0, 0)),
-                    mode="edge",
-                )
-            video_frame = av.VideoFrame.from_ndarray(array, format="rgb24")
-            for packet in stream.encode(video_frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-
-
-def _remove_selector_cache_entry(entry: dict[str, Any] | None) -> None:
-    if not entry:
-        return
-    for name in ("path", "frames_path"):
-        try:
-            Path(str(entry.get(name) or "")).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
 def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float) -> str | None:
     key = str(node_id or "").strip()
     if not key or not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[0] == 0:
         return None
-    frames = (
-        images[..., :3]
-        .detach()
-        .to(device="cpu", dtype=torch.float32)
-        .clamp(0.0, 1.0)
-        .mul(255.0)
-        .round()
-        .to(torch.uint8)
-        .contiguous()
-    )
     safe_fps = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else 24.0
-    token = uuid.uuid4().hex
-    path = _SELECTOR_CACHE_ROOT / f"{token}.mp4"
-    frames_path = _SELECTOR_CACHE_ROOT / f"{token}.npy"
     try:
-        np.save(frames_path, frames.numpy(), allow_pickle=False)
-        _encode_selector_cache(path, frames, safe_fps)
+        entry = _preview_cache_store().put(key, images, safe_fps, encode_video=True)
     except Exception as exc:
-        path.unlink(missing_ok=True)
-        frames_path.unlink(missing_ok=True)
         print(f"[CineStyle] Selector input cache failed for node {key}: {exc}")
         return None
-
-    entry = {
-        "token": token,
-        "node_id": key,
-        "path": str(path),
-        "frames_path": str(frames_path),
-        "created": time.time(),
-        "size_bytes": int(path.stat().st_size + frames_path.stat().st_size),
-        "info": {
-            "frames": int(frames.shape[0]),
-            "width": int(frames.shape[2]),
-            "height": int(frames.shape[1]),
-            "fps": safe_fps,
-            "duration": float(frames.shape[0]) / safe_fps,
-            "audio_format": None,
-        },
-    }
-    evicted: list[dict[str, Any]] = []
-    with _SELECTOR_CACHE_LOCK:
-        previous = _SELECTOR_INPUT_CACHE.pop(key, None)
-        if previous:
-            evicted.append(previous)
-        _SELECTOR_INPUT_CACHE[key] = entry
-        while (
-            len(_SELECTOR_INPUT_CACHE) > _SELECTOR_CACHE_LIMIT
-            or (
-                len(_SELECTOR_INPUT_CACHE) > 1
-                and sum(int(item.get("size_bytes") or 0) for item in _SELECTOR_INPUT_CACHE.values())
-                > _SELECTOR_CACHE_MAX_BYTES
-            )
-        ):
-            _, oldest = next(iter(_SELECTOR_INPUT_CACHE.items()))
-            _SELECTOR_INPUT_CACHE.pop(str(oldest["node_id"]), None)
-            evicted.append(oldest)
-    for stale in evicted:
-        _remove_selector_cache_entry(stale)
     print(
         f"[CineStyle] Cached selector input for node {key}: "
-        f"{frames.shape[0]} frames at {safe_fps:.3f} fps."
+        f"{entry['info']['frames']} frames at {safe_fps:.3f} fps."
     )
-    return token
+    return str(entry["token"])
 
 
 def _selector_cache_for_node(node_id: Any) -> dict[str, Any] | None:
-    with _SELECTOR_CACHE_LOCK:
-        return _SELECTOR_INPUT_CACHE.get(str(node_id or "").strip())
+    return _preview_cache_store().get_node(node_id)
 
 
 def _selector_cache_for_token(token: Any) -> dict[str, Any] | None:
-    resolved = str(token or "").strip()
-    if not resolved:
-        return None
-    with _SELECTOR_CACHE_LOCK:
-        return next(
-            (entry for entry in _SELECTOR_INPUT_CACHE.values() if entry.get("token") == resolved),
-            None,
-        )
+    return _preview_cache_store().get_token(token)
 
 
 def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.Tensor:

@@ -9,8 +9,6 @@ import hashlib
 import importlib.util
 import logging
 import os
-import tempfile
-import uuid
 from fractions import Fraction
 from urllib.parse import quote, unquote
 from pathlib import Path
@@ -34,16 +32,24 @@ _ROUTE_REGISTERED = False
 _TIME_RE = re.compile(r"^(\d+):(\d{2}):(\d{2})[,.](\d{3})$")
 _SUBTITLE_SRT_CACHE: dict[str, dict[str, str]] = {}
 _SUBTITLE_PROXY_RENDER_SIZE: dict[str, tuple[int, int]] = {}
-_SUBTITLE_PREVIEW_CACHE_ROOT = Path(tempfile.gettempdir()) / "cinestyle_subtitle_preview_cache"
-_SUBTITLE_PREVIEW_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-_SUBTITLE_PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
-_SUBTITLE_MAIN_VIDEO_CACHE: dict[str, dict[str, Any]] = {}
 _SUBTITLE_SOURCE_INFO: dict[str, dict[str, Any]] = {}
+_PREVIEW_CACHE_STORE = None
 _SUBTITLE_LOGGER = logging.getLogger("CineStyleVideoSubtitle")
 
 
 def _subtitle_info(message: str, *args: Any) -> None:
     _SUBTITLE_LOGGER.info("[CS Video Subtitle] " + message, *args)
+
+
+def _preview_cache_store():
+    global _PREVIEW_CACHE_STORE
+    if _PREVIEW_CACHE_STORE is None:
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        if module is None:
+            raise RuntimeError("CineStyle preview cache module is unavailable.")
+        _PREVIEW_CACHE_STORE = module.PreviewCacheStore("video_subtitle")
+    return _PREVIEW_CACHE_STORE
 
 
 class _SubtitleProgress:
@@ -193,22 +199,11 @@ def _normalize_hex(value: Any, default: str) -> str:
     return text if re.fullmatch(r"#[0-9A-F]{6}", text) else default
 
 
-def _remove_video_cache_entry(entry: dict[str, Any] | None) -> None:
-    if not entry:
-        return
-    for name in ("frames_path", "video_path"):
-        try:
-            Path(str(entry.get(name) or "")).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
 def _clear_video_caches(node_id: Any) -> None:
     key = str(node_id or "").strip()
     if not key:
         return
-    for target_cache in (_SUBTITLE_PREVIEW_CACHE, _SUBTITLE_MAIN_VIDEO_CACHE):
-        _remove_video_cache_entry(target_cache.pop(key, None))
+    _preview_cache_store().clear_node(key)
 
 
 def _source_filename_from_metadata(metadata: dict[str, Any]) -> str:
@@ -330,7 +325,7 @@ def _extract_video_frames(video: Any) -> tuple[np.ndarray, float, dict[str, Any]
 def _cache_video_source(
     video: Any,
     node_id: Any,
-    target_cache: dict[str, dict[str, Any]],
+    variant: str,
     cache_label: str,
     render_size: tuple[int, int] | None = None,
     encode_video: bool = True,
@@ -338,11 +333,11 @@ def _cache_video_source(
     """Write an independent frame/video cache for one subtitle node source."""
     if video is None or not node_id:
         return False
-    if render_size is not None and target_cache is _SUBTITLE_PREVIEW_CACHE:
+    if render_size is not None and variant == "preview":
         _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = (int(render_size[0]), int(render_size[1]))
     try:
         frames, safe_fps, info, audio = _extract_video_frames(video)
-        return _store_frame_cache(frames, safe_fps, info, node_id, target_cache, cache_label, encode_video, audio)
+        return _store_frame_cache(frames, safe_fps, info, node_id, variant, cache_label, encode_video, audio)
     except Exception as exc:
         _subtitle_info("%s cache unavailable: %s", cache_label, exc)
     return False
@@ -375,25 +370,20 @@ def _store_frame_cache(
     safe_fps: float,
     info: dict[str, Any],
     node_id: Any,
-    target_cache: dict[str, dict[str, Any]],
+    variant: str,
     cache_label: str,
     encode_video: bool = True,
     audio: Any = None,
 ) -> bool:
-    key = str(node_id)
-    previous = target_cache.pop(key, None)
-    _remove_video_cache_entry(previous)
-    frames_path = _SUBTITLE_PREVIEW_CACHE_ROOT / f"{key}_{cache_label}_{uuid.uuid4().hex}.npy"
-    video_path = _SUBTITLE_PREVIEW_CACHE_ROOT / f"{key}_{cache_label}_{uuid.uuid4().hex}.mp4" if encode_video else None
-    np.save(frames_path, frames, allow_pickle=False)
-    if video_path is not None:
-        _encode_preview_video(video_path, frames, safe_fps, audio)
-    target_cache[key] = {
-        "frames_path": str(frames_path),
-        "video_path": str(video_path) if video_path is not None else "",
-        "info": info,
-        "audio": _prepare_audio(audio) if video_path is None else None,
-    }
+    entry = _preview_cache_store().put(
+        node_id,
+        frames,
+        safe_fps,
+        variant=variant,
+        encode_video=encode_video,
+        info=info,
+        audio=_prepare_audio(audio) if not encode_video else None,
+    )
     _subtitle_info(
         "%s cache ready: frames=%d, size=%dx%d, fps=%.3f",
         cache_label,
@@ -402,7 +392,7 @@ def _store_frame_cache(
         info["height"],
         safe_fps,
     )
-    return True
+    return entry is not None
 
 
 def _resolve_video_file(filename: str) -> Path:
@@ -467,8 +457,8 @@ def _cache_main_video_from_file(filename: str, node_id: Any) -> bool:
             float(info["fps"]),
             info,
             node_id,
-            _SUBTITLE_MAIN_VIDEO_CACHE,
-            "main-file",
+            "preview",
+            "preview-file",
             encode_video=False,
             audio=audio,
         )
@@ -482,37 +472,34 @@ def _cache_proxy_preview(
     node_id: Any,
     render_size: tuple[int, int] | None = None,
 ) -> bool:
-    return _cache_video_source(proxy_video, node_id, _SUBTITLE_PREVIEW_CACHE, "preview", render_size)
+    return _cache_video_source(proxy_video, node_id, "preview", "preview", render_size)
 
 
 def _cache_main_video(video: Any, node_id: Any) -> bool:
-    return _cache_video_source(video, node_id, _SUBTITLE_MAIN_VIDEO_CACHE, "main", encode_video=False)
+    return _cache_video_source(video, node_id, "main", "main", encode_video=False)
 
 
 def _ensure_preview_video(entry: dict[str, Any], node_id: str) -> dict[str, Any] | None:
     """Lazily encode a video stream when a recovered frame cache needs one."""
-    video_path = Path(str(entry.get("video_path") or ""))
-    if video_path.is_file():
+    if Path(str(entry.get("video_path") or entry.get("path") or "")).is_file():
         return entry
+    progress = _SubtitleProgress(int(entry.get("info", {}).get("frames", 1) or 1), "preview video encoding")
     try:
-        frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
-        if frames.ndim != 4 or frames.shape[0] == 0:
+        entry = _preview_cache_store().ensure_video(entry, progress=progress)
+        if not entry:
             return None
-        fps = float(entry.get("info", {}).get("fps", 24.0) or 24.0)
-        video_path = _SUBTITLE_PREVIEW_CACHE_ROOT / f"{node_id}_rebuild_{uuid.uuid4().hex}.mp4"
-        _encode_preview_video(video_path, np.asarray(frames), fps, entry.get("audio"))
-        entry["video_path"] = str(video_path)
-        _SUBTITLE_PREVIEW_CACHE[node_id] = entry
         _subtitle_info("preview video rebuilt from main video frames")
         return entry
     except Exception as exc:
         _subtitle_info("preview video rebuild unavailable: %s", exc)
         return None
+    finally:
+        progress.close()
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     """Return a readable preview cache, rebuilding it from the main video cache when needed."""
-    entry = _SUBTITLE_PREVIEW_CACHE.get(node_id)
+    entry = _preview_cache_store().get_node(node_id, "preview")
     try:
         if entry:
             frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
@@ -520,14 +507,13 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
                 return entry
     except (OSError, ValueError, KeyError):
         pass
-    main_entry = _SUBTITLE_MAIN_VIDEO_CACHE.get(node_id)
+    main_entry = _preview_cache_store().get_node(node_id, "main")
     try:
         if main_entry:
             frames = np.load(str(main_entry["frames_path"]), mmap_mode="r", allow_pickle=False)
             if frames.ndim == 4 and frames.shape[0] > 0:
-                _SUBTITLE_PREVIEW_CACHE[node_id] = dict(main_entry)
                 _subtitle_info("preview frame cache rebuilt from main video cache")
-                return _SUBTITLE_PREVIEW_CACHE[node_id]
+                return main_entry
     except (OSError, ValueError, KeyError):
         pass
     return None
@@ -545,63 +531,9 @@ def _preview_entry_for_request(node_id: str, video_filename: str = "") -> dict[s
             candidates.append(value)
     for candidate in candidates:
         if _cache_main_video_from_file(candidate, node_id):
-            _SUBTITLE_PREVIEW_CACHE[node_id] = dict(_SUBTITLE_MAIN_VIDEO_CACHE[node_id])
             _subtitle_info("preview cache created on demand from source video: %s", candidate)
             return _preview_cache_entry(node_id)
     return None
-
-
-def _encode_preview_video(path: Path, frames: np.ndarray, fps: float, audio: Any = None) -> None:
-    """Encode RGB preview frames to a small, independently served MP4 cache."""
-    height, width = map(int, frames.shape[1:3])
-    encoded_width = width + (width % 2)
-    encoded_height = height + (height % 2)
-    rate = Fraction(float(fps)).limit_denominator(1000)
-    progress = _SubtitleProgress(int(frames.shape[0]), "preview video encoding")
-    try:
-        with av.open(str(path), mode="w", format="mp4") as container:
-            try:
-                stream = container.add_stream("libx264", rate=rate)
-                stream.options = {"preset": "ultrafast", "crf": "20"}
-            except (av.error.FFmpegError, ValueError):
-                stream = container.add_stream("mpeg4", rate=rate)
-            stream.width = encoded_width
-            stream.height = encoded_height
-            stream.pix_fmt = "yuv420p"
-            audio_stream = None
-            prepared_audio = _prepare_audio(audio)
-            if prepared_audio is not None:
-                waveform = prepared_audio["waveform"]
-                channels = int(waveform.shape[1])
-                layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
-                audio_stream = container.add_stream("aac", rate=int(prepared_audio["sample_rate"]), layout=layout)
-            for array in frames:
-                if encoded_width != width or encoded_height != height:
-                    array = np.pad(
-                        array,
-                        ((0, encoded_height - height), (0, encoded_width - width), (0, 0)),
-                        mode="edge",
-                    )
-                video_frame = av.VideoFrame.from_ndarray(array, format="rgb24")
-                for packet in stream.encode(video_frame):
-                    container.mux(packet)
-                progress.update()
-            for packet in stream.encode():
-                container.mux(packet)
-            if audio_stream is not None and prepared_audio is not None:
-                audio_frame = av.AudioFrame.from_ndarray(
-                    prepared_audio["waveform"][0].numpy(),
-                    format="fltp",
-                    layout=audio_stream.layout.name,
-                )
-                audio_frame.sample_rate = int(prepared_audio["sample_rate"])
-                for packet in audio_stream.encode(audio_frame):
-                    container.mux(packet)
-                for packet in audio_stream.encode():
-                    container.mux(packet)
-    finally:
-        progress.close()
-
 
 class CSVideoSubtitle(io.ComfyNode):
     @classmethod

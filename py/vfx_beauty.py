@@ -44,6 +44,18 @@ _BISE_NET_DOWNLOAD_LOCK = threading.Lock()
 _BISE_NET_HF_URL = "https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth"
 _BISE_NET_OFFICIAL_URL = "https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth"
 _LOGGER = logging.getLogger("CineStyleVFXBeauty")
+_PREVIEW_CACHE_STORE = None
+
+
+def _preview_cache_store():
+    global _PREVIEW_CACHE_STORE
+    if _PREVIEW_CACHE_STORE is None:
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        if module is None:
+            raise RuntimeError("CineStyle preview cache module is unavailable.")
+        _PREVIEW_CACHE_STORE = module.PreviewCacheStore("vfx_beauty")
+    return _PREVIEW_CACHE_STORE
 
 
 def _console_info(node_id: Any, stage: str, detail: str = "") -> None:
@@ -775,18 +787,6 @@ def _run_beauty(
     return output.to(device=source_device, non_blocking=True)
 
 
-def _video_segment_module() -> Any | None:
-    """Return the shared Selector cache module when it is loaded by the package."""
-    package = __name__.rsplit(".", 1)[0]
-    module = sys.modules.get(f"{package}._py_video_segment")
-    if module is not None:
-        return module
-    return next(
-        (candidate for name, candidate in sys.modules.items() if name.endswith("._py_video_segment")),
-        None,
-    )
-
-
 def _cache_vfx_input(
     node_id: Any,
     prompt: Any,
@@ -798,21 +798,42 @@ def _cache_vfx_input(
     key = str(node_id or "").strip()
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
-    selector = _video_segment_module()
     proxy_present = False
-    if selector is not None:
-        try:
-            fps = selector._video_input_fps(None, prompt, key)
-            selector._cache_selector_input(key, image, fps)
-        except Exception as exc:
-            print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
-        try:
-            proxy_images = proxy_video.get_components().images if proxy_video is not None else None
-            if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
-                proxy_fps = selector._video_input_fps(proxy_video, prompt, key)
-                proxy_present = selector._cache_selector_input(f"{key}:proxy", proxy_images, proxy_fps) is not None
-        except Exception as exc:
-            print(f"[CineStyle] VFX Beauty proxy cache failed for node {key}: {exc}")
+    try:
+        fps = 24.0
+        if isinstance(prompt, dict):
+            pending = [prompt.get(str(node_id)) or prompt.get(node_id)]
+            visited = set()
+            while pending and fps == 24.0:
+                current = pending.pop(0)
+                if not isinstance(current, dict):
+                    continue
+                inputs = current.get("inputs") if isinstance(current.get("inputs"), dict) else {}
+                for name in ("fps", "frame_rate", "target_fps"):
+                    try:
+                        candidate = float(inputs.get(name))
+                        if math.isfinite(candidate) and candidate > 0:
+                            fps = candidate
+                            break
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                for value in inputs.values():
+                    if isinstance(value, (list, tuple)) and len(value) >= 2 and str(value[0]) not in visited:
+                        visited.add(str(value[0]))
+                        pending.append(prompt.get(str(value[0])) or prompt.get(value[0]))
+        _preview_cache_store().put(key, image, fps, encode_video=True)
+    except Exception as exc:
+        print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
+    try:
+        proxy_images = proxy_video.get_components().images if proxy_video is not None else None
+        if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
+            try:
+                proxy_fps = float(proxy_video.get_components().frame_rate)
+            except Exception:
+                proxy_fps = 24.0
+            proxy_present = _preview_cache_store().put(f"{key}:proxy", proxy_images, proxy_fps, encode_video=True) is not None
+    except Exception as exc:
+        print(f"[CineStyle] VFX Beauty proxy cache failed for node {key}: {exc}")
     cached_mask = None
     if isinstance(mask, torch.Tensor) and mask.ndim >= 3:
         cached_mask = mask.detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -825,36 +846,27 @@ def _cache_vfx_input(
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
-    selector = _video_segment_module()
-    if selector is None:
-        return None
     try:
-        return selector._selector_cache_for_node(node_id)
+        return _preview_cache_store().get_node(node_id)
     except Exception:
         return None
 
 
 def _preview_proxy_cache_entry(node_id: str) -> dict[str, Any] | None:
-    selector = _video_segment_module()
-    if selector is None:
-        return None
     with _VFX_CACHE_LOCK:
         if not _VFX_PROXY_PRESENT.get(node_id, False):
             return None
     try:
-        return selector._selector_cache_for_node(f"{node_id}:proxy")
+        return _preview_cache_store().get_node(f"{node_id}:proxy")
     except Exception:
         return None
 
 
 def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str) -> int:
     """Map a proxy frame to the corresponding original mask frame."""
-    selector = _video_segment_module()
-    if selector is None:
-        return frame_index
     try:
-        source_entry = selector._selector_cache_for_token(source_token)
-        original_entry = selector._selector_cache_for_node(node_id)
+        source_entry = _preview_cache_store().get_token(source_token)
+        original_entry = _preview_cache_store().get_node(node_id)
         source_count = int((source_entry or {}).get("info", {}).get("frames") or 0)
         original_count = int((original_entry or {}).get("info", {}).get("frames") or 0)
         if source_count > 1 and original_count > 1 and source_count != original_count:
@@ -954,12 +966,22 @@ async def _vfx_beauty_cache_info_route(request: web.Request) -> web.Response:
         {
             "token": str(entry.get("token") or ""),
             "label": "Proxy input from the last workflow run" if uses_proxy else "Cached input from the last workflow run",
-            "video_url": f"/cinestyle/video-selector-cache-video?token={entry.get('token')}",
+            "video_url": f"/cinestyle/vfx-beauty-cache-video?token={entry.get('token')}",
             "info": info,
             "has_mask": has_mask,
             "uses_proxy": uses_proxy,
         }
     )
+
+
+async def _vfx_beauty_cache_video_route(request: web.Request) -> web.StreamResponse:
+    from aiohttp import web
+
+    entry = _preview_cache_store().get_token(request.query.get("token", ""))
+    path = Path(str((entry or {}).get("video_path") or (entry or {}).get("path") or "")) if entry else None
+    if entry is None or path is None or not path.is_file():
+        return web.json_response({"error": "VFX Beauty preview cache not found."}, status=404)
+    return web.FileResponse(path=path, headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"})
 
 
 async def _vfx_beauty_preview_route(request: web.Request) -> web.Response:
@@ -971,10 +993,7 @@ async def _vfx_beauty_preview_route(request: web.Request) -> web.Response:
         if not node_id:
             raise ValueError("node_id is required.")
         frame_index = max(0, int(payload.get("frame", 0)))
-        selector = _video_segment_module()
-        if selector is None:
-            raise ValueError("The shared video selector cache is unavailable.")
-        frame = selector._decode_selector_frame(payload, frame_index)
+        frame = _preview_cache_store().decode_frame(payload, frame_index)
         height, width = int(frame.shape[1]), int(frame.shape[2])
         mask_index = _preview_mask_frame_index(node_id, frame_index, str(payload.get("source_token") or ""))
         mask = _preview_mask_for_node(node_id, mask_index, height, width)
@@ -1118,6 +1137,7 @@ class VFXBeautyExtension(ComfyExtension):
         server_instance = getattr(PromptServer, "instance", None)
         if server_instance is not None:
             server_instance.routes.get("/cinestyle/vfx-beauty-cache")(_vfx_beauty_cache_info_route)
+            server_instance.routes.get("/cinestyle/vfx-beauty-cache-video")(_vfx_beauty_cache_video_route)
             server_instance.routes.post("/cinestyle/vfx-beauty-preview")(_vfx_beauty_preview_route)
             _VFX_ROUTE_REGISTERED = True
 

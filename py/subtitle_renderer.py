@@ -11,7 +11,7 @@ import torch
 
 _FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
 _FONT_SIZE_MIN = 8
-_FONT_SIZE_MAX = 100
+_FONT_SIZE_MAX = 200
 _SUPERSAMPLE_SCALE = 2
 
 

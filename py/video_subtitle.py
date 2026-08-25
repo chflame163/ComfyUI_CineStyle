@@ -411,6 +411,58 @@ def _subtitle_proxy_dimensions(width: int, height: int, target_pixels: int = 800
     return proxy_width, proxy_height
 
 
+def _audio_from_video_file(source_path: str, start_seconds: float, duration: float) -> dict[str, Any] | None:
+    """Decode only the audio samples that belong to a lazy preview range."""
+    try:
+        start_seconds = max(0.0, float(start_seconds))
+        duration = max(0.0, float(duration))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if duration <= 0.0:
+        return None
+    try:
+        with av.open(source_path, mode="r") as container:
+            if not container.streams.audio:
+                return None
+            stream = container.streams.audio[0]
+            sample_rate = int(stream.codec_context.sample_rate or stream.rate or 0)
+            if sample_rate <= 0:
+                return None
+            start_sample = int(round(start_seconds * sample_rate))
+            end_sample = max(start_sample + 1, int(round((start_seconds + duration) * sample_rate)))
+            cursor = 0
+            chunks: list[np.ndarray] = []
+            for audio_frame in container.decode(stream):
+                try:
+                    samples = audio_frame.to_ndarray(format="fltp")
+                except Exception:
+                    samples = audio_frame.to_ndarray()
+                samples = np.asarray(samples, dtype=np.float32)
+                if samples.ndim == 1:
+                    samples = samples[None, :]
+                elif samples.ndim > 2:
+                    samples = samples.reshape(samples.shape[0], -1)
+                if samples.ndim != 2 or samples.shape[1] <= 0:
+                    continue
+                frame_start = cursor
+                frame_end = cursor + int(samples.shape[1])
+                cursor = frame_end
+                if frame_end <= start_sample:
+                    continue
+                if frame_start >= end_sample:
+                    break
+                left = max(0, start_sample - frame_start)
+                right = min(samples.shape[1], end_sample - frame_start)
+                if right > left:
+                    chunks.append(np.ascontiguousarray(samples[:, left:right]))
+            if not chunks:
+                return None
+            waveform = torch.from_numpy(np.ascontiguousarray(np.concatenate(chunks, axis=1))).unsqueeze(0)
+            return {"waveform": waveform, "sample_rate": sample_rate}
+    except (OSError, ValueError, av.error.FFmpegError):
+        return None
+
+
 def _lazy_cache_trimmed_preview(
     node_id: str,
     video_filename: str,
@@ -424,7 +476,9 @@ def _lazy_cache_trimmed_preview(
     with _SUBTITLE_LAZY_CACHE_LOCK:
         existing = _preview_entry_for_request(key, source, requested_metadata)
         if existing is not None:
-            return existing
+            existing_info = dict(existing.get("info") or {})
+            if existing.get("audio") is not None or "has_audio" in existing_info:
+                return existing
         metadata = dict(_SUBTITLE_SOURCE_METADATA.get(key) or {})
         if metadata.get("source_filename") and str(metadata.get("source_filename")).strip() != source:
             metadata = {}
@@ -478,6 +532,11 @@ def _lazy_cache_trimmed_preview(
                         requested_index += 1
             if not frames:
                 return None
+            preview_audio = _audio_from_video_file(
+                source_path,
+                start / source_fps,
+                len(frames) / target_fps,
+            )
             info = {
                 "source_filename": source,
                 "source_fps": source_fps,
@@ -490,6 +549,7 @@ def _lazy_cache_trimmed_preview(
                 "loaded_frame_count": len(frames),
                 "loaded_width": loaded_width,
                 "loaded_height": loaded_height,
+                "has_audio": bool(preview_audio),
             }
             _SUBTITLE_PROXY_RENDER_SIZE[key] = (loaded_width, loaded_height)
             return _preview_cache_store().put_preview(
@@ -499,6 +559,7 @@ def _lazy_cache_trimmed_preview(
                 proxy=True,
                 encode_video=True,
                 info=info,
+                audio=preview_audio,
             )
         except (OSError, ValueError, KeyError, IndexError, av.error.FFmpegError) as exc:
             _subtitle_info("lazy trimmed preview unavailable: %s", exc)
@@ -520,28 +581,6 @@ def _downsample_waveform_peaks(values: Any, target: int = 1600) -> list[float]:
     if peak_max > 0.0:
         peaks = [peak / peak_max for peak in peaks]
     return [max(0.0, min(1.0, peak)) for peak in peaks]
-
-
-def _waveform_from_audio(audio: Any) -> tuple[list[float], float]:
-    if not isinstance(audio, dict):
-        return [], 0.0
-    waveform = audio.get("waveform")
-    if not isinstance(waveform, torch.Tensor) or waveform.numel() == 0:
-        return [], 0.0
-    try:
-        samples = waveform.detach().to(device="cpu", dtype=torch.float32)
-        if samples.ndim == 3:
-            samples = samples[0]
-        if samples.ndim == 2:
-            samples = samples.mean(dim=0)
-        if samples.ndim != 1 or samples.numel() == 0:
-            return [], 0.0
-        sample_rate = float(int(audio.get("sample_rate", 0) or 0))
-        if sample_rate <= 0:
-            return [], 0.0
-        return _downsample_waveform_peaks(samples.numpy()), float(samples.numel()) / sample_rate
-    except (TypeError, ValueError, RuntimeError):
-        return [], 0.0
 
 
 def _waveform_from_video_file(source: str) -> tuple[list[float], float]:
@@ -967,12 +1006,15 @@ async def _subtitle_waveform_route(request):
     entry = _preview_entry_for_request(node_id, filename, trim_metadata) if node_id else None
     if entry is None and node_id and filename and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA):
         entry = _lazy_cache_trimmed_preview(node_id, filename, trim_metadata)
-    peaks, duration = await asyncio.to_thread(_waveform_from_audio, entry.get("audio") if entry else None)
-    if not peaks and node_id:
-        main_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
-        peaks, duration = await asyncio.to_thread(_waveform_from_audio, main_entry.get("audio") if main_entry else None)
-    if not peaks and filename:
+    # Decode the exact media file used by the <video> element. This keeps the
+    # waveform and playback on one source, including codec/container timing.
+    preview_path = Path(str(entry.get("video_path") or entry.get("path") or "")) if entry else None
+    if preview_path is not None and preview_path.is_file():
+        peaks, duration = await asyncio.to_thread(_waveform_from_video_file, str(preview_path))
+    elif filename:
         peaks, duration = await asyncio.to_thread(_waveform_from_video_file, filename)
+    else:
+        peaks, duration = [], 0.0
     if entry:
         duration = float((entry.get("info") or {}).get("duration", duration) or duration)
     return web.json_response(

@@ -346,7 +346,7 @@ function addStyles() {
       .cs-subtitle-position-param { grid-template-columns:18px minmax(90px,1fr) 42px 29px; gap:4px; }
       .cs-subtitle-param input[type=range] { width:100%; accent-color:#55a9f5; }
       .cs-subtitle-color-row { display:flex; align-items:center; gap:7px; }
-      .cs-subtitle-color-row input[type=color] { width:34px; height:29px; box-sizing:border-box; padding:2px; }
+      .cs-subtitle-color-row input[type=color] { width:102px; min-width:102px; height:32px; flex:0 0 102px; box-sizing:border-box; padding:2px; border:1px solid #424956; border-radius:5px; background:#20232a; }
       .cs-subtitle-hex { color:#f7b955; font-variant-numeric:tabular-nums; font-family:ui-monospace,monospace; }
       .cs-subtitle-param output { color:#f7b955; text-align:right; font-variant-numeric:tabular-nums; }
       .cs-subtitle-param-reset { width:29px; min-height:27px; padding:3px; border:1px solid #424956; border-radius:5px; background:#20232a; color:#f2f4f7; cursor:pointer; font-size:15px; line-height:1; }

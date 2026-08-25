@@ -129,10 +129,9 @@ async function openPreview(node) {
     let source = null;
     let cachedSource = null;
     try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
-    if (cachedSource?.usesProxy) source = cachedSource;
+    source = cachedSource;
     if (!source) source = connectedVideoSource(node, ["proxy_video"]);
     if (!source) source = connectedVideoSource(node, ["image", "images", "video_input"]);
-    if (!source) source = cachedSource;
     if (!source) { app.canvas?.prompt?.("Run this VFX node once to cache its own connected image/video input.", ""); return; }
     if (!source.token && !source.filename) { app.canvas?.prompt?.("No previewable input source was found.", ""); return; }
     let info = source.info;

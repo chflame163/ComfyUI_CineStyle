@@ -1495,12 +1495,11 @@ class CSVideoSegmentSeC(io.ComfyNode):
             raise ValueError("images must have shape [frames, height, width, 3 or 4].")
         images = images[..., :3].to("cpu", dtype=torch.float32).clamp_(0, 1)
         _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
-        if not _prompt_has_file_video_source(cls.hidden.prompt, cls.hidden.unique_id):
-            _cache_selector_input(
-                cls.hidden.unique_id,
-                images,
-                _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
-            )
+        _cache_selector_input(
+            cls.hidden.unique_id,
+            images,
+            _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
+        )
         if proxy_video is not None:
             try:
                 proxy_images = proxy_video.get_components().images
@@ -1806,12 +1805,11 @@ class CSVideoSegmentSAM3(io.ComfyNode):
 
         images = images[..., :3].to(device="cpu", dtype=torch.float32).clamp_(0.0, 1.0)
         _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
-        if not _prompt_has_file_video_source(cls.hidden.prompt, cls.hidden.unique_id):
-            _cache_selector_input(
-                cls.hidden.unique_id,
-                images,
-                _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
-            )
+        _cache_selector_input(
+            cls.hidden.unique_id,
+            images,
+            _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
+        )
         if proxy_video is not None:
             try:
                 proxy_images = proxy_video.get_components().images

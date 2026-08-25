@@ -1096,22 +1096,7 @@ async function openTimeline(node) {
             outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
             viewDuration = duration;
             const useCachedPlayback = () => { video.src = cachedProxy.url; video.load(); normalizeRange(); renderTimeline(); };
-            if (filename) {
-                try {
-                    const sourceInfo = await fetchInfo(filename);
-                    info = sourceInfo;
-                    fps = Number(sourceInfo.fps) || fps;
-                    duration = Number(sourceInfo.duration) || duration;
-                    outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
-                    viewDuration = duration;
-                    video.src = sourceInfo.proxy_required ? proxyVideoUrl(filename, sourceInfo.proxy_threshold, sourceInfo.proxy_size) : videoUrl(filename);
-                    video.load();
-                    normalizeRange();
-                    renderTimeline();
-                } catch (_) {
-                    useCachedPlayback();
-                }
-            } else useCachedPlayback();
+            useCachedPlayback();
         } else if (filename) {
             setLoading("Reading video information...");
             const result = await fetchInfo(filename);

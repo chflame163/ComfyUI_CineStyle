@@ -415,6 +415,9 @@ async function openTimeline(node) {
     let playingSelection = false;
     let previewTimer = null;
     let previewRequest = 0;
+    let previewInFlight = false;
+    let previewPending = false;
+    let renderedPreviewKey = null;
     let previewObjectUrl = "";
     let previewBounds = null;
     let previewTransform = { x: 0, y: 0, scale: 1 };
@@ -476,43 +479,96 @@ async function openTimeline(node) {
         interactionBox.style.transformOrigin = "center center";
         overlayImage.style.transformOrigin = `${content.left - previewWrap.getBoundingClientRect().left + (previewBounds.left + previewBounds.width / 2) * content.scale}px ${content.top - previewWrap.getBoundingClientRect().top + (previewBounds.top + previewBounds.height / 2) * content.scale}px`;
     }
+    function activePreviewState() {
+        const frame = currentFrame();
+        const currentTime = frame / Math.max(0.001, Number(fps) || 30);
+        const active = cues.filter((cue) => Number(cue.start) <= currentTime && currentTime < Number(cue.end) && String(cue.text || "").trim());
+        const width = Number(info?.proxy_required && info?.proxy_width ? info.proxy_width : info?.width) || 0;
+        const height = Number(info?.proxy_required && info?.proxy_height ? info.proxy_height : info?.height) || 0;
+        const previewFps = Number(info?.fps) || Number(fps) || 30;
+        const key = JSON.stringify({
+            active: active.map((cue) => ({ id: cue.id, start: cue.start, end: cue.end, text: cue.text })),
+            style,
+            width,
+            height,
+            fps: previewFps,
+        });
+        return { frame, key, active, width, height, previewFps };
+    }
+    function clearRenderedOverlay() {
+        previewBounds = null;
+        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = "";
+        overlayImage.removeAttribute("src");
+        overlayImage.style.display = "none";
+        clearPreviewTransform();
+        interactionBox.style.display = "none";
+    }
     async function renderPreviewFrame() {
+        const preview = activePreviewState();
+        if (preview.key === renderedPreviewKey) return;
+        if (previewInFlight) {
+            previewPending = true;
+            return;
+        }
+        previewInFlight = true;
         const requestId = ++previewRequest;
+        if (!preview.active.length) {
+            clearRenderedOverlay();
+            renderedPreviewKey = preview.key;
+            previewInFlight = false;
+            if (previewPending) {
+                previewPending = false;
+                schedulePreview();
+            }
+            return;
+        }
         const response = await api.fetchApi("/cinestyle/video-subtitle-preview", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 node_id: String(node.id ?? ""),
                 video_filename: filename,
-                frame: currentFrame(),
+                frame: preview.frame,
+                preview_width: preview.width,
+                preview_height: preview.height,
+                preview_fps: preview.previewFps,
                 cues,
                 style,
             }),
         }).catch(() => null);
-        if (!response || requestId !== previewRequest) return;
-        if (!response.ok) {
-            previewBounds = null;
-            overlayImage.removeAttribute("src");
-            overlayImage.style.display = "none";
-            status.textContent = response.status === 404
-                ? SOURCE_VIDEO_REQUIRED_MESSAGE
-                : "Pillow subtitle preview is unavailable.";
-            return;
-        }
-        const blob = await response.blob();
-        if (requestId !== previewRequest) return;
-        try { previewBounds = JSON.parse(response.headers.get("X-CineStyle-Subtitle-Bounds") || "null"); } catch (_) { previewBounds = null; }
-        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
-        previewObjectUrl = URL.createObjectURL(blob);
-        overlayImage.onload = () => {
+        try {
+            if (!response || requestId !== previewRequest) return;
+            if (!response.ok) {
+                clearRenderedOverlay();
+                renderedPreviewKey = preview.key;
+                status.textContent = response.status === 404
+                    ? SOURCE_VIDEO_REQUIRED_MESSAGE
+                    : "Pillow subtitle preview is unavailable.";
+                return;
+            }
+            const blob = await response.blob();
             if (requestId !== previewRequest) return;
-            clearPreviewTransform();
+            try { previewBounds = JSON.parse(response.headers.get("X-CineStyle-Subtitle-Bounds") || "null"); } catch (_) { previewBounds = null; }
+            if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+            previewObjectUrl = URL.createObjectURL(blob);
+            overlayImage.onload = () => {
+                if (requestId !== previewRequest) return;
+                clearPreviewTransform();
+                updateInteractionBox();
+            };
+            overlayImage.src = previewObjectUrl;
+            overlayImage.style.display = "block";
             updateInteractionBox();
-        };
-        overlayImage.src = previewObjectUrl;
-        overlayImage.style.display = "block";
-        updateInteractionBox();
-        status.textContent = "Pillow preview";
+            renderedPreviewKey = preview.key;
+            status.textContent = "Pillow preview";
+        } finally {
+            previewInFlight = false;
+            if (previewPending) {
+                previewPending = false;
+                if (activePreviewState().key !== renderedPreviewKey) schedulePreview();
+            }
+        }
     }
     function schedulePreview() {
         if (previewTimer) clearTimeout(previewTimer);

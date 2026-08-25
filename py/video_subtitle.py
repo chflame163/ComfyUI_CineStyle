@@ -639,20 +639,27 @@ async def _subtitle_preview_route(request):
             proxy_height, proxy_width = int(frames.shape[1]), int(frames.shape[2])
             fps = float(entry.get("info", {}).get("fps", 24.0) or 24.0)
         else:
-            source = str(payload.get("video_filename", "")).strip()
-            if not source:
-                return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once or provide a source video."}, status=404)
-            frame = _preview_cache_store().decode_frame({"video": source, "source_kind": "video"}, frame_index)
-            proxy_height, proxy_width = int(frame.shape[1]), int(frame.shape[2])
-            fps = 24.0
-            try:
-                source_path = _preview_cache_store()._resolve_file(source)
-                with av.open(source_path, mode="r") as source_container:
-                    source_rate = source_container.streams.video[0].average_rate or source_container.streams.video[0].guessed_rate
-                    if source_rate:
-                        fps = float(source_rate)
-            except Exception:
-                pass
+            proxy_width = max(0, int(payload.get("preview_width", 0) or 0))
+            proxy_height = max(0, int(payload.get("preview_height", 0) or 0))
+            fps = float(payload.get("preview_fps", 0) or 0)
+            if proxy_width <= 0 or proxy_height <= 0:
+                source = str(payload.get("video_filename", "")).strip()
+                if not source:
+                    return web.json_response({"error": "Subtitle preview cache is unavailable. Run CS Video Subtitle once or provide a source video."}, status=404)
+                frame = _preview_cache_store().decode_frame({"video": source, "source_kind": "video"}, frame_index)
+                proxy_height, proxy_width = int(frame.shape[1]), int(frame.shape[2])
+                if fps <= 0:
+                    fps = 24.0
+                    try:
+                        source_path = _preview_cache_store()._resolve_file(source)
+                        with av.open(source_path, mode="r") as source_container:
+                            source_rate = source_container.streams.video[0].average_rate or source_container.streams.video[0].guessed_rate
+                            if source_rate:
+                                fps = float(source_rate)
+                    except Exception:
+                        pass
+            if fps <= 0:
+                fps = 24.0
         current_time = frame_index / max(0.001, fps)
         cues = payload.get("cues") if isinstance(payload.get("cues"), list) else []
         active = [

@@ -45,6 +45,10 @@ _BISE_NET_HF_URL = "https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/m
 _BISE_NET_OFFICIAL_URL = "https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth"
 _LOGGER = logging.getLogger("CineStyleVFXBeauty")
 _PREVIEW_CACHE_STORE = None
+_BEAUTY_GPU_MEMORY_FRACTION = 0.45
+_BEAUTY_MEMORY_RESERVE_BYTES = 512 * 1024 * 1024
+_BEAUTY_MAX_GPU_BATCH = 32
+_BEAUTY_CPU_BATCH = 8
 
 
 def _preview_cache_store():
@@ -65,7 +69,7 @@ def _console_info(node_id: Any, stage: str, detail: str = "") -> None:
 
 
 class _BeautyProgress:
-    """Console stage logger for the vectorized Beauty batch."""
+    """Console stage logger for the bounded Beauty batch pipeline."""
 
     def __init__(self, node_id: Any, frame_total: int):
         self.node_id = node_id
@@ -787,6 +791,193 @@ def _run_beauty(
     return output.to(device=source_device, non_blocking=True)
 
 
+def _sample_indices(batch: int, limit: int, device: torch.device | str = "cpu") -> torch.Tensor:
+    count = min(max(1, int(batch)), max(1, int(limit)))
+    return torch.linspace(0, batch - 1, count, device=device).round().to(torch.int64).unique()
+
+
+def _slice_matte_input(
+    matte: torch.Tensor | None,
+    indices: torch.Tensor,
+    total_batch: int,
+) -> torch.Tensor | None:
+    """Select only the frames needed by a batch without moving the full mask."""
+    if matte is None:
+        return None
+    if not isinstance(matte, torch.Tensor):
+        raise ValueError("matte must be an IMAGE or MASK tensor.")
+    if matte.ndim not in (3, 4):
+        raise ValueError("matte must have shape [batch, height, width] or [batch, height, width, channels].")
+    if matte.shape[0] == 1:
+        return matte
+    if matte.shape[0] != total_batch:
+        raise ValueError("matte batch size must be 1 or match front.")
+    return matte.index_select(0, indices.to(device=matte.device))
+
+
+def _estimate_video_colour(
+    image: torch.Tensor,
+    matte_input: torch.Tensor | None,
+    progress: _BeautyProgress | None = None,
+) -> torch.Tensor:
+    """Estimate one clip colour while transferring only sampled frames to the compute device."""
+    if not isinstance(image, torch.Tensor) or image.ndim != 4 or image.shape[-1] < 3:
+        raise ValueError("front must be an IMAGE tensor with shape [batch, height, width, 3 or 4].")
+    batch, height, width = map(int, image.shape[:3])
+    if batch == 0 or height == 0 or width == 0:
+        raise ValueError("front must contain at least one non-empty image.")
+    indices = _sample_indices(batch, _COLOUR_SAMPLE_FRAMES, device=image.device)
+    sample_height, sample_width = height, width
+    if max(height, width) > _COLOUR_LONG_SIDE:
+        colour_scale = _COLOUR_LONG_SIDE / float(max(height, width))
+        sample_height = max(1, int(round(height * colour_scale)))
+        sample_width = max(1, int(round(width * colour_scale)))
+    compute_device = _preferred_device(image.device)
+    sampled_source = _resize_bhwc(
+        _as_rgb(image.index_select(0, indices)), sample_height, sample_width
+    ).to(device=compute_device, non_blocking=True)
+    if isinstance(image, torch.Tensor) and image.shape[-1] >= 4:
+        sampled_alpha = _resize_bhwc(
+            image[..., 3].index_select(0, indices).unsqueeze(-1), sample_height, sample_width
+        )[..., 0].to(device=compute_device, dtype=torch.float32, non_blocking=True)
+    else:
+        sampled_alpha = torch.ones((indices.numel(), sample_height, sample_width), device=compute_device, dtype=torch.float32)
+    sampled_matte = _slice_matte_input(matte_input, indices, batch)
+    if sampled_matte is None:
+        external = None
+    else:
+        sampled_matte = _prepare_matte(
+            sampled_matte,
+            int(indices.numel()),
+            height,
+            width,
+            sampled_matte.device,
+        )
+        external = _resize_bhwc(sampled_matte.unsqueeze(-1), sample_height, sample_width)[..., 0]
+        external = external.to(device=compute_device, dtype=torch.float32, non_blocking=True)
+    try:
+        return _estimate_clip_colour(sampled_source, external, sampled_alpha, progress=progress)
+    finally:
+        del sampled_source, sampled_alpha, sampled_matte, external
+        if compute_device.type == "cuda":
+            torch.cuda.empty_cache()
+
+
+def _beauty_batch_size(image: torch.Tensor, total_batch: int, progress: _BeautyProgress | None = None) -> int:
+    """Choose a conservative frame batch from current free GPU memory."""
+    if total_batch <= 1:
+        return 1
+    source_device = image.device if isinstance(image, torch.Tensor) else torch.device("cpu")
+    compute_device = _preferred_device(source_device)
+    height, width = int(image.shape[1]), int(image.shape[2])
+    longest = max(height, width)
+    if longest > _PROXY_LONG_SIDE:
+        scale = _PROXY_LONG_SIDE / float(longest)
+        proxy_height = max(1, int(round(height * scale)))
+        proxy_width = max(1, int(round(width * scale)))
+    else:
+        proxy_height, proxy_width = height, width
+
+    # Account for the source frame, resized proxy, convolution workspaces and
+    # several same-size intermediates.  This is intentionally conservative;
+    # the OOM retry below adapts to drivers with unusually large workspaces.
+    source_bytes = height * width * 3 * 4
+    proxy_bytes = proxy_height * proxy_width * 4 * 4
+    estimated_per_frame = max(source_bytes * 3, proxy_bytes * 24)
+    if compute_device.type == "cuda":
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info(compute_device)
+            budget = max(
+                estimated_per_frame,
+                int((free_bytes - _BEAUTY_MEMORY_RESERVE_BYTES) * _BEAUTY_GPU_MEMORY_FRACTION),
+            )
+            selected = max(1, min(_BEAUTY_MAX_GPU_BATCH, int(budget // estimated_per_frame)))
+            if progress is not None:
+                progress.info(
+                    "batch plan",
+                    f"GPU free={free_bytes / 1024**3:.2f} GiB; estimated={estimated_per_frame / 1024**2:.1f} MiB/frame; batch={selected}",
+                )
+            return min(total_batch, selected)
+        except (RuntimeError, AttributeError, TypeError):
+            pass
+    selected = min(total_batch, _BEAUTY_CPU_BATCH)
+    if progress is not None:
+        progress.info("batch plan", f"device={compute_device}; batch={selected}")
+    return max(1, selected)
+
+
+def _run_beauty_batched(
+    image: torch.Tensor,
+    matte_input: torch.Tensor | None,
+    colour: torch.Tensor | None,
+    weights: torch.Tensor,
+    blur_m: float,
+    sigma: float,
+    threshold: float,
+    r_spots_blend: float,
+    r_h_blend: float,
+    strength: float,
+    blur_h: float,
+    blur_s: float,
+    o_amount: float,
+    sat_amount: float,
+    hue_amount: float,
+    progress: _BeautyProgress | None = None,
+) -> torch.Tensor:
+    """Run the unchanged Beauty pipeline in bounded frame batches."""
+    total_batch = int(image.shape[0])
+    batch_size = _beauty_batch_size(image, total_batch, progress=progress)
+    output_store = torch.empty(
+        (total_batch, int(image.shape[1]), int(image.shape[2]), 4),
+        device="cpu",
+        dtype=torch.float32,
+    )
+    start = 0
+    while start < total_batch:
+        end = min(total_batch, start + batch_size)
+        frame_indices = torch.arange(start, end, device=image.device)
+        image_chunk = image.index_select(0, frame_indices)
+        matte_chunk = _slice_matte_input(matte_input, frame_indices, total_batch)
+        try:
+            if progress is not None:
+                progress.info("process batch", f"frames={start + 1}-{end}/{total_batch}; batch={end - start}")
+            output_chunk = _run_beauty(
+                image_chunk,
+                matte_chunk,
+                colour,
+                weights,
+                blur_m,
+                sigma,
+                threshold,
+                r_spots_blend,
+                r_h_blend,
+                strength,
+                blur_h,
+                blur_s,
+                o_amount,
+                sat_amount,
+                hue_amount,
+            )
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            del image_chunk, matte_chunk
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if batch_size <= 1:
+                raise
+            batch_size = max(1, batch_size // 2)
+            if progress is not None:
+                progress.info("reduce batch", f"CUDA OOM; retrying with batch={batch_size}")
+            continue
+        output_store[start:end].copy_(output_chunk.to(device="cpu", dtype=torch.float32), non_blocking=True)
+        del output_chunk, image_chunk, matte_chunk
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        start = end
+    return output_store
+
+
 def _cache_vfx_input(
     node_id: Any,
     prompt: Any,
@@ -1098,8 +1289,10 @@ class CSVFXBeauty(io.ComfyNode):
             colour_tensor = _parse_hex_colour(colour)
             weights_tensor = _parse_vec3(weights, (6.0, 0.0, 3.0), "weights")
             progress.info("validate parameters", f"colour={'auto' if colour_tensor is None else 'fixed'}")
-            progress.info("process frame batch", "using the original vectorized Torch path")
-            output = _run_beauty(
+            if colour_tensor is None:
+                progress.info("estimate colour", f"sampling up to {_COLOUR_SAMPLE_FRAMES} frames for the whole clip")
+                colour_tensor = _estimate_video_colour(image, mask, progress=progress).detach().to(device="cpu", dtype=torch.float32)
+            output = _run_beauty_batched(
                 image,
                 mask,
                 colour_tensor,

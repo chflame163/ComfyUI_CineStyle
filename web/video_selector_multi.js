@@ -37,6 +37,7 @@ function graphNode(graph, id) { if (id == null || !graph) return null; const dir
 function graphLink(graph, candidate) { if (candidate == null) return null; if (typeof candidate === "object") { if (candidate.origin_id != null || candidate.originId != null) return candidate; if (candidate.link && typeof candidate.link === "object") return candidate.link; } return graph?.links?.[candidate] || graph?._links?.[candidate] || null; }
 function originFromConnection(graph, candidate) { if (!candidate) return null; if (typeof candidate === "object" && (candidate.origin_id != null || candidate.originId != null)) return graphNode(graph, candidate.origin_id ?? candidate.originId); if (candidate?.type || candidate?.comfyClass) return candidate; const link = graphLink(graph, candidate); return link ? graphNode(graph, link.origin_id ?? link.originId ?? link.origin) : null; }
 function nodeTypeName(node) { return String(node?.type || node?.comfyClass || node?.constructor?.type || ""); }
+function isAnyRerouter(node) { return /layerutility\s*:\s*any\s+rerouter/i.test(nodeTypeName(node)) || /any\s+rerouter/i.test(String(node?.title || "")); }
 function isCSLoadVideo(node) { const type = nodeTypeName(node); return type === "CS_Load_Video" || type.endsWith(".CS_Load_Video") || type.endsWith("::CS_Load_Video"); }
 function isLoadImage(node) { return /(^|[.:_])load[_-]?image([.:_]|$)/i.test(nodeTypeName(node)) || /image[_-]?loader/i.test(nodeTypeName(node)); }
 function sourceFilename(node) {
@@ -64,6 +65,11 @@ function sourceFromOrigin(origin, visited = new Set()) {
     if (isLoadImage(origin) || isImageFilename(filename)) {
         if (!filename) return null;
         return { filename, kind: "image", startFrame: 0, endFrame: 0, targetFps: 1 };
+    }
+    if (isAnyRerouter(origin)) {
+        const input = origin.inputs?.[0];
+        const upstream = input ? connectedOrigin(origin, input.name) : null;
+        return sourceFromOrigin(upstream, visited);
     }
     for (const upstream of connectedMediaOrigins(origin)) { const source = sourceFromOrigin(upstream, visited); if (source) return source; }
     return null;

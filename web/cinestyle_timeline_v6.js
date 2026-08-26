@@ -1,12 +1,13 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { installTimelineControlStyles, timelineControlsMarkup, createTimelineRangeController } from "./cinestyle_timeline_controls.js";
+import { formatFrameCount } from "./cinestyle_timeline_range.js";
 
 const NODE_ID = "CS_Load_Video";
 const STYLE_ID = "cinestyle-timeline-style";
 const DEFAULT_TIMELINE_VALUES = Object.freeze({
     start_frame: 0,
     end_frame: -1,
-    keep_aspect_ratio: true,
     multiple: 32,
     width: 0,
     height: 0,
@@ -31,21 +32,6 @@ function resetTimelineWidgets(node) {
     node.graph?.setDirtyCanvas(true, true);
 }
 
-function sanitizeProxyWidgets(node) {
-    const threshold = widget(node, "proxy_threshold");
-    const size = widget(node, "proxy_size");
-    const normalize = (target, fallback) => {
-        if (!target) return;
-        const value = Number(target.value);
-        if (!Number.isFinite(value) || value <= 0) {
-            target.value = fallback;
-            target.callback?.(fallback);
-        }
-    };
-    normalize(threshold, 2.1);
-    normalize(size, 0.8);
-}
-
 function syncVideoSelection(node, filename) {
     const nextFilename = String(filename ?? "");
     if (node.__csTimelineVideo !== undefined && node.__csTimelineVideo !== nextFilename) {
@@ -58,14 +44,62 @@ function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-function proxyParameter(value, fallback) {
-    const number = Number(value);
-    return Number.isFinite(number) && number > 0 ? clamp(number, 0.1, 1000) : fallback;
-}
-
 function roundToMultiple(value, multiple) {
     const safeMultiple = Math.max(1, Math.round(Number(multiple) || 1));
     return Math.max(safeMultiple, Math.floor(Number(value) / safeMultiple + 0.5) * safeMultiple);
+}
+
+function effectiveOutputDimensions(values, sourceInfo) {
+    const sourceWidth = Math.max(1, Math.round(Number(sourceInfo?.width) || 1));
+    const sourceHeight = Math.max(1, Math.round(Number(sourceInfo?.height) || 1));
+    const aspect = sourceWidth / sourceHeight;
+    const multiple = Math.max(1, Math.round(Number(values?.multiple) || 1));
+    let width = Number(values?.width) || 0;
+    let height = Number(values?.height) || 0;
+    if (width > 0) {
+        width = roundToMultiple(width, multiple);
+        height = roundToMultiple(width / aspect, multiple);
+    } else if (height > 0) {
+        height = roundToMultiple(height, multiple);
+        width = roundToMultiple(height * aspect, multiple);
+    } else {
+        // The Timeline initializes the empty-width case from the source
+        // height, so use the same branch when comparing against defaults.
+        height = roundToMultiple(sourceHeight, multiple);
+        width = roundToMultiple(height * aspect, multiple);
+    }
+    return { width, height };
+}
+
+function effectiveTimelineValues(values, sourceInfo) {
+    const lastFrame = Math.max(0, Math.round(Number(sourceInfo?.frames) || 1) - 1);
+    const start = clamp(Math.round(Number(values?.start) || 0), 0, lastFrame);
+    const rawEnd = Number(values?.end);
+    const end = !Number.isFinite(rawEnd) || rawEnd < 0
+        ? lastFrame
+        : clamp(Math.round(rawEnd), start, lastFrame);
+    const sourceFps = Math.max(0.001, Number(sourceInfo?.fps) || 24);
+    const fpsValue = Number(values?.fps);
+    const fps = Number.isFinite(fpsValue) && fpsValue > 0 ? fpsValue : sourceFps;
+    return {
+        start,
+        end,
+        fps,
+        dimensions: effectiveOutputDimensions(values, sourceInfo),
+        multiple: Math.max(1, Math.round(Number(values?.multiple) || 1)),
+    };
+}
+
+function timelineParametersChanged(previous, next, sourceInfo) {
+    if (!sourceInfo) return true;
+    const before = effectiveTimelineValues(previous, sourceInfo);
+    const after = effectiveTimelineValues(next, sourceInfo);
+    return before.start !== after.start
+        || before.end !== after.end
+        || before.multiple !== after.multiple
+        || before.dimensions.width !== after.dimensions.width
+        || before.dimensions.height !== after.dimensions.height
+        || Math.abs(before.fps - after.fps) > 1e-6;
 }
 
 function formatTime(seconds) {
@@ -115,33 +149,17 @@ function addStyles() {
       .cs-timeline-close { border: 0; background: transparent; color: #aeb5c2; font-size: 22px; cursor: pointer; padding: 0 5px; }
       .cs-video-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #08090b; border-radius: 6px; overflow: hidden; }
       .cs-timeline-video { width: 100%; height: 100%; display: block; background: #08090b; object-fit: contain; }
-      .cs-proxy-wait { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px; color: #e6e9ef; background: #08090be6; font-size: 15px; text-align: center; pointer-events: none; }
       .cs-file-name { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cs-original-info { max-width: 100%; color: #aeb5c2; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }
-      .cs-timeline-readout { display: flex; justify-content: space-between; color: #aeb5c2; font-variant-numeric: tabular-nums; }
-      .cs-timeline-pointer-row { position: relative; height: 16px; margin-bottom: -4px; user-select: none; touch-action: none; }
-      .cs-timeline-pointer { position: absolute; top: 0; left: 0; width: 18px; height: 16px; transform: translateX(-50%); padding: 0; border: 0; border-radius: 2px; background: #55a9f5; clip-path: polygon(0 0, 100% 0, 50% 100%); cursor: ew-resize; z-index: 3; }
-      .cs-timeline-pointer:hover, .cs-timeline-pointer:focus-visible { background: #78bcff; outline: none; }
-      .cs-timeline-track { position: relative; height: 48px; border-radius: 6px; background: #292d35; cursor: crosshair; user-select: none; touch-action: none; }
-      .cs-timeline-track::before { content: ""; position: absolute; inset: 17px 0 17px; background: repeating-linear-gradient(90deg, #4b5360 0 1px, transparent 1px 10%); opacity: .6; }
-      .cs-timeline-selection { position: absolute; top: 13px; bottom: 13px; background: #55a9f5; opacity: .88; border-radius: 3px; }
-      .cs-timeline-handle { position: absolute; top: 5px; bottom: 5px; width: 12px; transform: translateX(-50%); border: 0; border-radius: 3px; background: #f5f7fb; box-shadow: 0 0 0 1px #16181c, 0 2px 8px #0008; cursor: ew-resize; z-index: 2; }
-      .cs-timeline-handle::after { content: ""; position: absolute; left: 4px; top: 17px; width: 4px; height: 14px; border-left: 1px solid #6b7280; border-right: 1px solid #6b7280; }
-      .cs-timeline-controls { display: flex; gap: 6px; }
-      .cs-timeline-controls button, .cs-timeline-foot button { border: 1px solid #424956; border-radius: 5px; padding: 7px 12px; background: #242832; color: #e6e9ef; cursor: pointer; }
-      .cs-timeline-controls button:hover, .cs-timeline-foot button:hover { background: #303643; }
-      .cs-point-frame { min-width: 52px; padding-left: 7px !important; padding-right: 7px !important; color: #9fc9ec !important; font-variant-numeric: tabular-nums; }
-      .cs-timeline-fields { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+      .cs-timeline-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
       .cs-timeline-field { display: grid; gap: 5px; color: #9da5b4; }
       .cs-timeline-field input { width: 100%; box-sizing: border-box; border: 1px solid #424956; border-radius: 5px; padding: 7px 8px; background: #20232a; color: #f2f4f7; }
-      .cs-timeline-check { align-content: start; }
-      .cs-timeline-check span { display: flex; align-items: center; gap: 6px; min-height: 32px; color: #e6e9ef; }
-      .cs-timeline-check input { width: auto; }
       .cs-timeline-foot { justify-content: flex-end; }
       .cs-timeline-foot .cs-apply { background: #317ec4; border-color: #4b9de8; }
       @media (max-width: 640px) { .cs-timeline-fields { grid-template-columns: 1fr; } .cs-timeline-shell { padding: 12px; } }
     `;
     document.head.append(style);
+    installTimelineControlStyles();
 }
 
 function videoUrl(filename) {
@@ -149,18 +167,31 @@ function videoUrl(filename) {
     return api.apiURL(`/view?${params.toString()}`);
 }
 
-function proxyVideoUrl(filename, proxyThreshold, proxySize) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize), t: String(Date.now()) });
-    return api.apiURL(`/cinestyle/video-proxy?${params.toString()}`);
+function requestLoaderPreviewCache(node, filename, values) {
+    const payload = {
+        loader_id: String(node?.id ?? ""),
+        video: String(filename || ""),
+        start_frame: Number(values?.start ?? 0),
+        end_frame: Number(values?.end ?? -1),
+        width: Number(values?.width ?? 0),
+        height: Number(values?.height ?? 0),
+        fps: Number(values?.fps ?? 0),
+        multiple: Number(values?.multiple ?? 32),
+        start_build: values?.startBuild !== false,
+    };
+    return api.fetchApi("/cinestyle/loader-preview-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    }).then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.status === "failed") throw new Error(result.error || "Unable to prepare loader preview cache");
+        return result;
+    });
 }
 
-function proxyProgressUrl(filename, proxyThreshold, proxySize) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize) });
-    return api.apiURL(`/cinestyle/video-proxy-progress?${params.toString()}`);
-}
-
-async function fetchInfo(filename, proxyThreshold, proxySize) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize) });
+async function fetchInfo(filename) {
+    const params = new URLSearchParams({ filename });
     const response = await api.fetchApi(`/cinestyle/video-info?${params.toString()}`);
     if (!response.ok) throw new Error(await response.text());
     return await response.json();
@@ -178,100 +209,96 @@ function openTimeline(node) {
     dialog.innerHTML = `
       <div class="cs-timeline-shell">
         <div class="cs-timeline-head"><div><h2 class="cs-timeline-title">Edit Timeline</h2><div class="cs-timeline-muted cs-file-name"></div><div class="cs-original-info"></div></div><button class="cs-timeline-close" type="button" aria-label="Close">&times;</button></div>
-        <div class="cs-video-stage"><video class="cs-timeline-video" controls playsinline preload="auto"></video><div class="cs-proxy-wait">Wait for Generate Proxy</div></div>
+        <div class="cs-video-stage"><video class="cs-timeline-video" controls playsinline preload="auto"></video></div>
         <div class="cs-timeline-readout"><span class="cs-current">00:00.00</span><span class="cs-range"></span><span class="cs-duration">00:00.00</span></div>
-        <div class="cs-timeline-pointer-row" aria-label="Current frame"><button class="cs-timeline-pointer" type="button" aria-label="Drag current frame" title="Drag current frame"></button></div>
-        <div class="cs-timeline-track" aria-label="Video timeline"><div class="cs-timeline-selection"></div><button class="cs-timeline-handle cs-in" type="button" aria-label="In point"></button><button class="cs-timeline-handle cs-out" type="button" aria-label="Out point"></button></div>
-        <div class="cs-timeline-controls"><button class="cs-set-in" type="button">Set In</button><button class="cs-point-frame cs-in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="cs-back" type="button">|&lt;</button><button class="cs-play" type="button">Play</button><button class="cs-forward" type="button">&gt;|</button><button class="cs-point-frame cs-out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="cs-set-out" type="button">Set Out</button></div>
-        <div class="cs-timeline-fields"><label class="cs-timeline-field cs-timeline-check"><span><input class="cs-keep-aspect" type="checkbox"> keep aspect ratio</span></label><label class="cs-timeline-field">multiple<input class="cs-multiple" type="number" min="1" step="1"></label><label class="cs-timeline-field">Width<input class="cs-width" type="number" min="1" step="1"></label><label class="cs-timeline-field">Height<input class="cs-height" type="number" min="1" step="1"></label><label class="cs-timeline-field">FPS<input class="cs-fps" type="number" min="0.01" max="240" step="0.01"></label></div>
+        ${timelineControlsMarkup()}
+        <div class="cs-timeline-fields"><label class="cs-timeline-field">multiple<input class="cs-multiple" type="number" min="1" step="1"></label><label class="cs-timeline-field">Width<input class="cs-width" type="number" min="1" step="1"></label><label class="cs-timeline-field">Height<input class="cs-height" type="number" min="1" step="1"></label><label class="cs-timeline-field">FPS<input class="cs-fps" type="number" min="0.01" max="240" step="0.01"></label></div>
         <div class="cs-timeline-foot"><button class="cs-cancel" type="button">Cancel</button><button class="cs-apply" type="button">Apply</button></div>
       </div>`;
     document.body.append(dialog);
 
     const video = dialog.querySelector(".cs-timeline-video");
-    const proxyWait = dialog.querySelector(".cs-proxy-wait");
-    const track = dialog.querySelector(".cs-timeline-track");
-    const selection = dialog.querySelector(".cs-timeline-selection");
-    const inHandle = dialog.querySelector(".cs-in");
-    const outHandle = dialog.querySelector(".cs-out");
     const current = dialog.querySelector(".cs-current");
     const range = dialog.querySelector(".cs-range");
     const durationLabel = dialog.querySelector(".cs-duration");
     const fileLabel = dialog.querySelector(".cs-file-name");
     const originalInfo = dialog.querySelector(".cs-original-info");
-    const pointerRow = dialog.querySelector(".cs-timeline-pointer-row");
-    const pointer = dialog.querySelector(".cs-timeline-pointer");
     const playButton = dialog.querySelector(".cs-play");
+    const axis = dialog.querySelector(".cs-timeline-axis");
+    const track = dialog.querySelector(".cs-timeline-track");
+    const rangeBand = dialog.querySelector(".cs-timeline-range-band");
+    const inHandle = dialog.querySelector(".cs-range-marker.in");
+    const outHandle = dialog.querySelector(".cs-range-marker.out");
+    const pointer = dialog.querySelector(".cs-timeline-pointer");
     const inFrameButton = dialog.querySelector(".cs-in-frame");
     const outFrameButton = dialog.querySelector(".cs-out-frame");
-    const keepAspectInput = dialog.querySelector(".cs-keep-aspect");
     const multipleInput = dialog.querySelector(".cs-multiple");
     const widthInput = dialog.querySelector(".cs-width");
     const heightInput = dialog.querySelector(".cs-height");
     const fpsInput = dialog.querySelector(".cs-fps");
-    const proxyThreshold = proxyParameter(widget(node, "proxy_threshold")?.value, 2.1);
-    const proxySize = proxyParameter(widget(node, "proxy_size")?.value, 0.8);
     const currentValues = {
         start: Number(widget(node, "start_frame")?.value ?? 0),
         end: Number(widget(node, "end_frame")?.value ?? -1),
         width: Number(widget(node, "width")?.value ?? 0),
         height: Number(widget(node, "height")?.value ?? 0),
         fps: Number(widget(node, "fps")?.value ?? 0),
-        keepAspect: Boolean(widget(node, "keep_aspect_ratio")?.value ?? true),
         multiple: Number(widget(node, "multiple")?.value ?? 32),
     };
     let info = null;
     let start = Math.max(0, currentValues.start);
     let end = currentValues.end;
-    let dragging = null;
     let selectionPlayback = false;
     let customPlayRequest = false;
+    let timelineControls = null;
+
+    function renderTimeline(frameOverride = null) {
+        if (!info) return;
+        axis.innerHTML = "";
+        const tickCount = Math.max(2, Math.min(12, Math.round(track.clientWidth / 100)));
+        const totalSeconds = Math.max(0, Number(info.duration) || (info.frames / Math.max(0.01, info.fps)));
+        for (let i = 0; i <= tickCount; i++) {
+            const tick = document.createElement("span");
+            tick.style.left = `${(i / tickCount) * 100}%`;
+            tick.textContent = formatTime(totalSeconds * i / tickCount);
+            axis.append(tick);
+        }
+        const maxFrame = Math.max(0, info.frames - 1);
+        const frame = frameOverride === null
+            ? clamp(Math.round(video.currentTime * info.fps), 0, maxFrame)
+            : clamp(Math.round(frameOverride), 0, maxFrame);
+        const startRatio = maxFrame ? start / maxFrame : 0;
+        const endRatio = maxFrame ? end / maxFrame : 1;
+        const frameRatio = maxFrame ? frame / maxFrame : 0;
+        rangeBand.style.display = endRatio > startRatio ? "block" : "none";
+        rangeBand.style.left = `${startRatio * 100}%`;
+        rangeBand.style.width = `${Math.max(0, (endRatio - startRatio) * 100)}%`;
+        pointer.style.left = `${frameRatio * 100}%`;
+        inFrameButton.textContent = String(start);
+        outFrameButton.textContent = String(end);
+        current.textContent = formatTime(frame / info.fps);
+        const selectedFrames = end - start + 1;
+        range.textContent = `In ${formatTime(start / info.fps)}  -  Out ${formatTime(end / info.fps)}  ·  Duration ${formatFrameCount(selectedFrames)}`;
+        durationLabel.textContent = formatFrameCount(selectedFrames);
+    }
 
     fileLabel.textContent = filename;
     video.muted = false;
     video.volume = 1;
-    let proxyProgressTimer = null;
-    const setProxyWait = (visible, progress = 0) => {
-        proxyWait.style.display = visible ? "flex" : "none";
-        if (visible) proxyWait.textContent = `Wait for Generate Proxy ${Math.max(0, Math.min(100, Math.round(progress)))}%`;
-    };
-    const stopProxyProgress = () => {
-        if (proxyProgressTimer !== null) window.clearTimeout(proxyProgressTimer);
-        proxyProgressTimer = null;
-    };
-    video.addEventListener("loadeddata", () => { stopProxyProgress(); setProxyWait(false); });
-    video.addEventListener("canplay", () => { stopProxyProgress(); setProxyWait(false); });
-    video.addEventListener("error", () => { stopProxyProgress(); setProxyWait(false); });
-    const watchProxyProgress = async () => {
-        try {
-            const response = await api.fetchApi(proxyProgressUrl(filename, proxyThreshold, proxySize));
-            const state = await response.json();
-            if (state.error) {
-                setProxyWait(true, 0);
-                proxyWait.textContent = `Proxy generation failed: ${state.error}`;
-                stopProxyProgress();
-                return;
-            }
-            setProxyWait(true, state.progress);
-            if (state.done) {
-                setProxyWait(true, 100);
-                stopProxyProgress();
-                return;
-            }
-        } catch (error) {
-            proxyWait.textContent = `Proxy progress unavailable: ${error.message}`;
-            stopProxyProgress();
-            return;
-        }
-        proxyProgressTimer = window.setTimeout(watchProxyProgress, 250);
-    };
+    timelineControls = createTimelineRangeController({
+        root: dialog,
+        video,
+        getInfo: () => info,
+        getRange: () => ({ start, end }),
+        setRange: (range) => { start = range.start; end = range.end; },
+        render: renderTimeline,
+    });
 
     function activeMultiple() {
         return Math.max(1, Math.round(Number(multipleInput.value) || 1));
     }
 
     function syncAspect(changedField, finalize = false) {
-        if (!info || !keepAspectInput.checked || !info.width || !info.height) return;
+        if (!info || !info.width || !info.height) return;
         const multiple = activeMultiple();
         const aspect = info.width / info.height;
         if (changedField === "height") {
@@ -301,82 +328,10 @@ function openTimeline(node) {
         }
     }
 
-    function normalizeRange(changedField = null) {
-        if (!info) return;
-        const maxFrame = Math.max(0, info.frames - 1);
-        start = clamp(Math.round(start), 0, maxFrame);
-        end = clamp(Math.round(end < 0 ? maxFrame : end), 0, maxFrame);
-        if (start < end || maxFrame === 0) return;
-
-        if (changedField === "in") {
-            if (start >= maxFrame) {
-                start = Math.max(0, maxFrame - 1);
-                end = maxFrame;
-            } else {
-                end = start + 1;
-            }
-        } else {
-            if (end <= 0) {
-                start = 0;
-                end = Math.min(1, maxFrame);
-            } else {
-                start = end - 1;
-            }
-        }
-    }
-
     function currentFrame() {
         if (!info) return 0;
         return clamp(Math.round(video.currentTime * info.fps), 0, Math.max(0, info.frames - 1));
     }
-
-    function frameAtPointerEvent(event) {
-        const rect = pointerRow.getBoundingClientRect();
-        const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-        return Math.round(ratio * Math.max(0, info.frames - 1));
-    }
-
-    function beginPointerDrag(event) {
-        event.preventDefault();
-        video.pause();
-        const move = (moveEvent) => {
-            if (!info) return;
-            const frame = frameAtPointerEvent(moveEvent);
-            seek(frame);
-            updateTimeline(frame);
-        };
-        const up = () => {
-            window.removeEventListener("pointermove", move);
-            window.removeEventListener("pointerup", up);
-        };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
-        move(event);
-    }
-
-    function setInPoint() {
-        start = currentFrame();
-        normalizeRange("in");
-        seek(start);
-        updateTimeline(start);
-    }
-
-    function setOutPoint() {
-        end = currentFrame();
-        normalizeRange("out");
-        seek(end);
-        updateTimeline(end);
-    }
-
-    function jumpToMarkedFrame(frame) {
-        video.pause();
-        seek(frame);
-        updateTimeline(frame);
-    }
-
-    inFrameButton.addEventListener("click", () => jumpToMarkedFrame(start));
-    outFrameButton.addEventListener("click", () => jumpToMarkedFrame(end));
-
     widthInput.addEventListener("input", () => syncAspect("width"));
     widthInput.addEventListener("change", () => syncAspect("width", true));
     widthInput.addEventListener("blur", () => syncAspect("width", true));
@@ -388,89 +343,10 @@ function openTimeline(node) {
     });
     multipleInput.addEventListener("change", () => syncAspect("width", true));
     multipleInput.addEventListener("blur", () => syncAspect("width", true));
-    keepAspectInput.addEventListener("change", () => { if (keepAspectInput.checked) syncAspect("width", true); });
-
-    function updateTimeline(frameOverride = null) {
-        if (!info) return;
-        const maxFrame = Math.max(0, info.frames - 1);
-        normalizeRange();
-        const frame = frameOverride === null ? currentFrame() : clamp(Math.round(frameOverride), 0, maxFrame);
-        const frameRatio = maxFrame ? frame / maxFrame : 0;
-        pointer.style.left = `${frameRatio * 100}%`;
-        const startRatio = maxFrame ? start / maxFrame : 0;
-        const endRatio = maxFrame ? end / maxFrame : 1;
-        selection.style.left = `${startRatio * 100}%`;
-        selection.style.width = `${Math.max(0, (endRatio - startRatio) * 100)}%`;
-        inHandle.style.left = `${startRatio * 100}%`;
-        outHandle.style.left = `${endRatio * 100}%`;
-        inFrameButton.textContent = String(start);
-        outFrameButton.textContent = String(end);
-        range.textContent = `In ${formatTime(start / info.fps)}  -  Out ${formatTime(end / info.fps)}`;
-        durationLabel.textContent = formatTime((end - start + 1) / info.fps);
-        current.textContent = formatTime(frame / info.fps);
-    }
-
-    function frameAtEvent(event) {
-        const rect = track.getBoundingClientRect();
-        const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-        return Math.round(ratio * Math.max(0, info.frames - 1));
-    }
-
     function seek(frame) {
         if (info?.fps) video.currentTime = frame / info.fps;
     }
 
-    function stepFrame(delta) {
-        if (!info) return;
-        video.pause();
-        const maxFrame = Math.max(0, info.frames - 1);
-        const frame = clamp(currentFrame() + delta, 0, maxFrame);
-        seek(frame);
-        updateTimeline(frame);
-    }
-
-    function beginDrag(which, event) {
-        event.preventDefault();
-        dragging = which;
-        const move = (moveEvent) => {
-            if (!dragging || !info) return;
-            const frame = frameAtEvent(moveEvent);
-            if (dragging === "in") {
-                start = frame;
-                normalizeRange("in");
-            } else {
-                end = frame;
-                normalizeRange("out");
-            }
-            seek(dragging === "in" ? start : end);
-            updateTimeline(dragging === "in" ? start : end);
-        };
-        const up = () => { dragging = null; window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
-    }
-
-    inHandle.addEventListener("pointerdown", (event) => beginDrag("in", event));
-    outHandle.addEventListener("pointerdown", (event) => beginDrag("out", event));
-    track.addEventListener("pointerdown", (event) => {
-        if (event.target === inHandle || event.target === outHandle) return;
-        const frame = frameAtEvent(event);
-        video.pause();
-        seek(frame);
-        if (Math.abs(frame - start) <= Math.abs(frame - end)) {
-            start = frame;
-            normalizeRange("in");
-        } else {
-            end = frame;
-            normalizeRange("out");
-        }
-        updateTimeline(frame);
-    });
-    pointer.addEventListener("pointerdown", beginPointerDrag);
-    pointerRow.addEventListener("pointerdown", (event) => {
-        if (event.target === pointer) return;
-        beginPointerDrag(event);
-    });
     video.addEventListener("timeupdate", () => {
         if (info && selectionPlayback && !video.paused) {
             const selectionStart = start / info.fps;
@@ -480,11 +356,11 @@ function openTimeline(node) {
             } else if (video.currentTime >= selectionEnd) {
                 video.pause();
                 seek(end);
-                updateTimeline(end);
+                timelineControls?.render(end);
                 return;
             }
         }
-        updateTimeline();
+        timelineControls?.render();
     });
     video.addEventListener("play", () => {
         if (!customPlayRequest) selectionPlayback = false;
@@ -496,8 +372,6 @@ function openTimeline(node) {
         customPlayRequest = false;
         playButton.textContent = "Play";
     });
-    dialog.querySelector(".cs-set-in").addEventListener("click", setInPoint);
-    dialog.querySelector(".cs-set-out").addEventListener("click", setOutPoint);
     playButton.addEventListener("click", () => {
         if (!info) return;
         video.muted = false;
@@ -516,48 +390,58 @@ function openTimeline(node) {
             customPlayRequest = false;
         });
     });
-    dialog.querySelector(".cs-back").addEventListener("click", () => stepFrame(-1));
-    dialog.querySelector(".cs-forward").addEventListener("click", () => stepFrame(1));
 
-    const close = () => { stopProxyProgress(); video.pause(); dialog.close(); dialog.remove(); };
+    const close = () => { video.pause(); dialog.close(); dialog.remove(); };
     dialog.querySelector(".cs-close")?.addEventListener("click", close);
     dialog.querySelector(".cs-timeline-close").addEventListener("click", close);
     dialog.querySelector(".cs-cancel").addEventListener("click", close);
     dialog.querySelector(".cs-apply").addEventListener("click", () => {
-        setWidgetValue(node, "start_frame", start);
-        setWidgetValue(node, "end_frame", end);
-        setWidgetValue(node, "keep_aspect_ratio", keepAspectInput.checked);
-        setWidgetValue(node, "multiple", activeMultiple());
-        setWidgetValue(node, "width", Math.max(1, Number(widthInput.value)));
-        setWidgetValue(node, "height", Math.max(1, Number(heightInput.value)));
-        setWidgetValue(node, "fps", Math.max(0.01, Number(fpsInput.value)));
-        node.graph?.setDirtyCanvas(true, true);
+        const nextValues = {
+            start: Math.max(0, Math.round(Number(start) || 0)),
+            end: Number.isFinite(Number(end)) ? Math.round(Number(end)) : -1,
+            multiple: activeMultiple(),
+            width: Math.max(1, Math.round(Number(widthInput.value) || 1)),
+            height: Math.max(1, Math.round(Number(heightInput.value) || 1)),
+            fps: Math.max(0.01, Number(fpsInput.value) || 0.01),
+        };
+        const cacheInputChanged = timelineParametersChanged(currentValues, nextValues, info);
+        // Preserve default sentinels on a true no-op. This avoids turning
+        // end=-1/width=0/fps=0 into explicit values and dirtying the node.
+        const valuesToApply = cacheInputChanged ? nextValues : currentValues;
+        if (cacheInputChanged) {
+            setWidgetValue(node, "start_frame", valuesToApply.start);
+            setWidgetValue(node, "end_frame", valuesToApply.end);
+            setWidgetValue(node, "multiple", valuesToApply.multiple);
+            setWidgetValue(node, "width", valuesToApply.width);
+            setWidgetValue(node, "height", valuesToApply.height);
+            setWidgetValue(node, "fps", valuesToApply.fps);
+            node.graph?.setDirtyCanvas(true, true);
+        }
+        if (cacheInputChanged) {
+            void requestLoaderPreviewCache(node, filename, nextValues).catch(() => {});
+        }
         close();
     });
     dialog.addEventListener("cancel", close);
 
-    fetchInfo(filename, proxyThreshold, proxySize).then((result) => {
+    fetchInfo(filename).then((result) => {
+        // This editor must always use the complete source timeline. A shared
+        // loader cache represents the currently selected trim and would make
+        // frames outside that trim impossible to select on a later edit.
         info = result;
         originalInfo.textContent = formatOriginalInfo(result);
+        video.src = videoUrl(filename);
         originalInfo.title = originalInfo.textContent;
-        if (result.proxy_required) {
-            originalInfo.textContent += ` · 正在生成 ${result.proxy_width}×${result.proxy_height} 预览代理`;
-            setProxyWait(true);
-            video.src = proxyVideoUrl(filename, proxyThreshold, proxySize);
-            watchProxyProgress();
-        } else {
-            setProxyWait(false);
-            video.src = videoUrl(filename);
-        }
         video.load();
-        end = end < 0 ? result.frames - 1 : end;
-        keepAspectInput.checked = currentValues.keepAspect;
+        const sourceLastFrame = Math.max(0, Number(info.frames || 1) - 1);
+        start = clamp(start, 0, sourceLastFrame);
+        end = end < 0 ? sourceLastFrame : clamp(end, start, sourceLastFrame);
         multipleInput.value = currentValues.multiple > 0 ? currentValues.multiple : 32;
-        widthInput.value = currentValues.width > 0 ? currentValues.width : roundToMultiple(result.width, activeMultiple());
-        heightInput.value = currentValues.height > 0 ? currentValues.height : roundToMultiple(result.height, activeMultiple());
-        fpsInput.value = currentValues.fps || result.fps;
-        if (keepAspectInput.checked) syncAspect(currentValues.width > 0 ? "width" : "height");
-        updateTimeline();
+        widthInput.value = currentValues.width > 0 ? currentValues.width : roundToMultiple(info.width, activeMultiple());
+        heightInput.value = currentValues.height > 0 ? currentValues.height : roundToMultiple(info.height, activeMultiple());
+        fpsInput.value = currentValues.fps || info.fps;
+        syncAspect(currentValues.width > 0 ? "width" : "height");
+        timelineControls?.render();
     }).catch((error) => {
         fileLabel.textContent = `${filename} - ${error.message}`;
     });
@@ -571,7 +455,6 @@ app.registerExtension({
         const original = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             original?.apply(this, arguments);
-            sanitizeProxyWidgets(this);
             const videoWidget = widget(this, "video");
             if (videoWidget && !this.__csVideoResetInstalled) {
                 this.__csTimelineVideo = String(videoWidget.value ?? "");
@@ -592,7 +475,6 @@ app.registerExtension({
         const originalConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             originalConfigure?.apply(this, arguments);
-            sanitizeProxyWidgets(this);
         };
     },
 });

@@ -1,11 +1,12 @@
 # ComfyUI CineStyle
 
 ComfyUI_CineStyle 是一组为ComfyUI 视频工作流开发的，更易于使用的自定义节点。
-本项目不能替代专业视频编辑软件。
+本项目是为轻量级视频处理而设定，不能替代专业视频编辑软件。
 
 
 ### 安装插件
-* 在CompyUI插件目录(例如“CompyUI\custom_nodes\”)中打开cmd窗口，键入    
+* 使用ComfyUI Manager，搜索"ComfyUI_CineStyle"，安装插件。
+* 或者在CompyUI插件目录(例如“CompyUI\custom_nodes\”)中打开cmd窗口，键入
 ```
 git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 ```
@@ -18,98 +19,104 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 * 或者在ComfyUI画布双击, 在搜索框输入"cinestyle"。
 <img src="images/node-search.jpg" alt="CineStyle 节点搜索" width="360">
 
+#### 示例工作流
+
+workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档图片仅为示意。
+
+
 
 ## 更新说明
 
-* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理，支持独立的预览代理输入。
-* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask；Selector 支持预览代理。
-* 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask；Selector 支持预览代理。
+* 添加 [CS Video Subtitle](#cs-video-subtitle) 节点，将 SRT 字幕渲染到标准 ComfyUI VIDEO，并提供字幕时间线编辑器。
+* 添加 [CS MOSS Audio Transcribe](#cs-moss-audio-transcribe) 节点，将标准 ComfyUI AUDIO 转写为带时间戳的 SRT。
+* 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理。
+* 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
+* 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
-* 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改尺寸、帧率和大视频预览代理。
-* 添加 `CS Video Subtitle Track` 节点，将 SRT 作为可编辑字幕轨叠加到标准 `VIDEO`，支持字体、渐变填充、描边、阴影和位置预览。
-* 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入和 H.264 目标码率控制。
+* 添加 [CS Load Video](#cs-load-video) 节点，用于加载视频，支持出入点设置、更改画面尺寸和帧率。
+* 添加 [CS Save Video](#cs-save-video) 节点，支持可选 metadata 写入、符合行业惯例的 H.264 目标码率控制。
 
-
-示例工作流及素材位于插件的 `workflows` 子目录。
 
 ## 节点说明
 
-### CS Load Video
-把视频文件加载到 ComfyUI，并提供一个可交互的时间线编辑窗口。节点执行时会读取视频帧、音频和帧率，根据工作流中保存的设置截取和调整内容，然后输出给下游节点。
+### CS MOSS Audio Transcribe
 
-- 从节点直接选择和上传视频。
-- 点击节点上的`Edit Timeline`按钮进入时间线界面。
-- 通过时间线拖动入点和出点，支持逐帧定位。
-- 通过 `Set In` 和 `Set Out` 按钮，把视频预览窗口的当前帧快速设为入点或出点。
-- 使用蓝色当前帧指针，在时间线上拖动即可同步预览对应视频帧。
-- 出入点设置按钮组的 `Play` 只播放已设置的入点到出点范围。
-- 视频预览窗口的白色播放键仍然播放完整视频，不受入出点限制。
-- 开启保持宽高比后，修改宽度或高度会自动联动另一项。
-- 输出尺寸可以自动四舍五入到指定倍数，适合视频模型常见的尺寸要求。
-- 打开 Edit Timeline 时，如果当前预览分辨率超过 `proxy_threshold`，界面会自动生成保持宽高比、目标像素为 `proxy_size` 的预览代理，降低大视频预览的内存和解码压力；节点最终输出仍使用原视频。
+使用 [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。模型首次使用时自动下载到 `ComfyUI/models/audio_models/moss`。
 
-#### 节点选项说明：
-![CS Load Video 节点](images/CS_Load_Video_node.jpg)
-- video： 选择 ComfyUI 输入目录中的视频，或使用上传控件上传视频文件。
-- keep_aspect_ratio：布尔值，默认`true`。开启后，宽度和高度按照源视频的原始宽高比联动计算。
-- multiple：整数，默认 `32`。 输出尺寸的取整倍数。宽度和高度会按最近的倍数四舍五入。
-- start_frame： 整数，默认 `0`。 起始帧，使用从 `0` 开始的帧编号。
-- end_frame：整数，默认`-1` |。 结束帧，`-1` 表示使用视频最后一帧。
-- width： 整数，默认`0`。 输出宽度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。
-- height： 整数，默认`0`。 输出高度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。
-- fps： 浮点数，默认 `0`。 输出帧率。`0` 表示保留源视频帧率；输入其他数值时会按目标帧率重新采样帧。
-- proxy_threshold：浮点数，单位 MPixels，默认 `2.1`，范围 `0.1–1000.0`。当前预览或输出分辨率的总像素超过该阈值时才生成代理。
-- proxy_size：浮点数，单位 MPixels，默认 `0.8`，范围 `0.1–1000.0`。生成代理时的目标总像素。
-- choose file to upload：点击按钮从本地加载视频。
-- Edit Timeline：进入时间线界面。
-其中 `start_frame`、`end_frame`、`width`、`height` 和 `fps` 可通过 `Edit Timeline` 窗口设置或在节点控件中直接编辑。
+![CS Transcribe-Subtitle 工作流](images/CS_Transcribe_Subtitle_workflow.jpg)
 
-#### Edit Timeline 时间线界面
+#### 使用流程
 
-![Edit Timeline 时间线界面](images/CS_Load_Video_UI.jpg)
+1. 将标准 ComfyUI `AUDIO` 输出连接到 `audio`。
+2. 选择语言模式和字幕分行长度。
+3. 执行节点，获得 SRT 文本，可直接连接到 `CS Video Subtitle` 的 `srt` 输入。
 
-时间线界面从上到下依次包含视频预览、原视频信息、时间读数、当前帧指针、入出点标记栏、时间线操作按钮和输出参数。
 
-##### 入点和出点标记
-
-标记栏中的两个白色手柄分别表示入点和出点：
-
-- 左侧手柄是入点。
-- 右侧手柄是出点。
-- 可以直接拖动手柄调整范围。
-- 点击标记栏空白区域时，程序会根据点击位置距离哪个手柄更近来调整对应边界。
-
-##### 时间线按钮
-- `Set In`：将视频预览当前帧设为入点。如果当前帧晚于出点，会自动修正出点。
-- 入点指示：显示当前入点帧号，点击可跳转到入点。
-- `|<`： 跳转到上一帧。只受视频首帧限制，不受入点限制。
-- `Play`: 只播放从入点到出点的内容，播放到出点后自动暂停。再次播放时，如果当前帧不在范围内，会从入点重新开始。
-- `>|`: 跳转到下一帧。只受视频尾帧限制，不受出点限制。
-- 出点指示：显示当前出点帧号，点击可跳转到出点。
-- `Set Out`： 将视频预览当前帧设为出点。如果当前帧早于入点，会自动修正入点。
+#### 节点选项说明
+![CS MOSS Audio Transcribe 节点](images/CS_MOSS_Audio_Transcribe_node.jpg)
+- `audio`：标准 ComfyUI `AUDIO` 输入，支持单声道或多声道音频。
+- `language`：语言模式，可选 `auto`、`中文` 或 `English`。
+- `max_chars_per_line`：每行最大字符数，`0` 表示不主动分行。
+- `auto_unload_model`：默认开启。执行完成后释放 MOSS 推理运行时和 CUDA 显存。
 
 #### 输出说明
-- video：标准 ComfyUI `VIDEO` 类型，包含时间线选段、尺寸、帧率和音频，可直接连接官方视频节点。
-- proxy_video：预览代理对象输出，与 `video` 保持相同的入出点、帧数、帧顺序、FPS 和音频。
-- IMAGE: 输出的video图像帧批次。
-- frame_count: 实际输出帧数。修改 FPS 后，该数值可能与源视频选段帧数不同。
-- audio: 选定时间范围内的音频。没有音频轨道时输出为空。
-- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息，以及 `proxy_threshold`、`proxy_size` 和 `proxy_video` 标志。
+
+- `srt`：标准 SRT 格式的 `STRING` 文本，包含序号、起止时间和字幕正文。
 
 
-### CS Save Video
-基于 ComfyUI 官方 `Save Video` 节点，增加save metadata和H264 bitrate选项。
+### CS Video Subtitle
 
-- `video`：标准 ComfyUI `VIDEO` 输入。
-- `filename_prefix`：输出文件名前缀，支持官方的日期和节点控件格式化语法。
-- `format`：输出容器格式，默认 `auto`。
-- `codec`：视频编码方式，默认 `h264`。选择 H.264 时显示码率控件。
-- `H.264 bitrate (Mbps)`：H.264 目标码率，浮点数保留 1 位小数，范围 `1.0–160.0 Mbps`，默认 `8.0 Mbps`。范围覆盖官方建议的低分辨率到 8K 高帧率视频；常见 1080p 视频可从 `8.0 Mbps` 开始，高帧率 1080p 可提高到约 `12.0 Mbps`。
-- `save_metadata`：默认关闭。开启后保存的文件将写入工作流和源视频 metadata。
+将 SRT 字幕渲染到标准 ComfyUI `VIDEO`，并提供可交互的 Subtitle Timeline。字幕样式包括字体、字号、颜色、渐变、对齐、斜体、字距、位置、描边和阴影。
+节点从ComfyUI/models/fonts 目录扫描并加载字体。请提前将字体放置到此目录。
+
+#### 使用流程
+
+1. 将 CS Load Video 或其他兼容节点的 `VIDEO` 输出连接到 `video`。
+2. 将 SRT 文本连接到 `srt`，或直接填写/保留 `edited_srt`。
+3. 点击 `Edit Timeline` 编辑字幕时间、样式和位置。
+4. 点击 `Apply` 保存字幕设置，再执行节点得到最终视频。
+
+#### 节点选项说明
+![CS Video Subtitle 节点](images/CS_Video_Subtitle_node.jpg)
+- `video`：兼容 ComfyUI `VIDEO` 类型的输入。
+- `srt`：可选 `STRING`，用于提供原始 SRT。
+- `edited_srt`：Timeline 保存的 SRT 文本；格式有效时优先使用，格式无效时使用srt输入。
+- `preview_in` / `preview_out`：字幕 Timeline 的预览范围，分别表示起始帧和结束帧。
+- `font`：字幕字体。
+- `font_size`：字体大小，范围 `8–200`。
+- `primary_color` / `secondary_color`：字幕主色和渐变辅助色。
+- `gradient`：是否启用垂直渐变填充。
+- `text_align`：文本对齐方式，可选 `left`、`center`、`right`。
+- `italic`：是否使用斜体。
+- `letter_spacing`：字距，范围 `-10–50`。
+- `position_x` / `position_y`：字幕位置的规范化坐标，范围 `0–1`。
+- `outline_size` / `outline_color`：描边大小和颜色。
+- `shadow_size` / `shadow_color`：阴影大小和颜色。
+
+#### 输出说明
+
+- `video`：渲染字幕后的标准 ComfyUI `VIDEO`，保留输入视频帧率、音频和时间范围。
+- `srt`：当前节点最终采用的 SRT 文本，可连接到其他字幕或文本节点。
+
+#### Edit Timeline 界面
+
+![Edit Timeline 界面](images/CS_Video_Subtitle_Timeline.jpg)
+
+Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑和位置调整区域组成。
+
+- 预览区域显示当前视频帧和字幕效果。可播放、暂停和拖动查看画面，预览中的字幕会随当前帧更新。
+- 时间线包含 `Subtitles` 和 `Audio` 两条轨道。字幕轨道显示每条字幕的时间范围，音频轨道显示声音波形；拖动当前帧指针或使用播放、前进、后退按钮可以定位画面。
+- 使用 `Set In` 和 `Set Out` 设置字幕 Timeline 的预览起止帧。
+- 在字幕轨道中双击字幕片段，或使用右键菜单，可以编辑、复制、粘贴或删除字幕内容；字幕片段可在时间线上拖动调整时间范围。
+- `Text Style` 区域用于设置字体、字号、斜体、字距、主色、渐变色、描边和阴影。
+- `Position` 区域用于设置文字对齐方式以及规范化的 X/Y 位置。也可以直接在预览画面中拖动字幕，使用边角控制点调整文字区域大小。
+- 点击 `Apply` 将当前时间范围、字幕文本、样式和位置写回节点；点击 `Cancel` 放弃本次编辑。
+
+对于运行后才生成的视频输入，先运行一次工作流建立缓存，再打开节点前端窗口。
 
 
 ### CS VFX Beauty
-为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动加载 BiSeNet 生成内部皮肤区域，仅用于估算目标肤色，不作为输出。
+为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动使用 BiSeNet 估算目标肤色。
 
 #### 部署 BiSeNet 权重
 
@@ -126,19 +133,16 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 使用流程
 
 - 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点。
-- 如果上游节点提供低分辨率预览代理，可将其连接到 `proxy_video`；该输入只供 `VFX Preview` 显示，不参与 Beauty 实际渲染。
 - 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
 - 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
-- 直接执行工作流得到处理结果。对于上游由其他节点运行时生成的图片或视频，先执行一次工作流，再打开 `VFX Preview` 建立可预览缓存。
-- 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 将预览参数写回节点，再重新执行工作流。
+- 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 保存预览参数。
 
 #### 节点选项说明
 ![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
 - image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
-- mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域；不需要额外的 External Matte 开关。
-- proxy_video：可选标准 ComfyUI `VIDEO`，只用于 `VFX Preview` 的前端显示和逐帧预览。
+- mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域。
 - colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
-- weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时重新写回该字符串。
+- weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时保存参数。
 - blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
 - sigma / Amount：边缘保持模糊强度，默认 `10.0`。
 - threshold / Preserve Edges：边缘保护阈值，默认 `15.0`。
@@ -161,7 +165,8 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 - **Colour**：输入 `auto` 使用自动肤色；预览首次计算出的颜色会显示在右侧色块和 Hex 数值中。点击色块可以打开标准 RGB 取色器，选择颜色后会切换为固定 `#RRGGBB`。
 - **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
 - **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
-- **Apply to Node**：将当前颜色（如果修改过）、Weights 和所有参数写回节点。未修改 `colour` 时会保留节点原有的 `auto` 或 Hex 值。
+
+对于运行后才生成的视频输入，先运行一次工作流建立缓存，再打开节点前端窗口。
 
 #### 自动肤色估计
 
@@ -170,8 +175,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 输出说明
 
 - `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
-- `MASK`：本节点最终使用的皮肤处理 Matte，范围为 `0–1`，可连接到其他 ComfyUI Mask 节点。
-
+- `MASK`：皮肤处理遮罩输出。
 
 
 ### CS SeC-4B Model Loader
@@ -202,26 +206,23 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 配置和 tokenizer 已随插件放在 `py/sec_model_config`，依赖声明位于项目根目录 `requirements.txt`，推理代码和 SAM2 配置位于 `py/sec_inference` 与 `py/sec_configs`。
 
 
-
 ### CS Video Segment (SeC-4B)
-使用 OpenIXCLab SeC-4B 模型和内置 LongSAM2.1 视频记忆编码器，在锚点帧用多个 BBox、多个正负 Point 和粗略 Mask 定义对象，并传播到整段视频。
+使用 OpenIXCLab SeC-4B 模型，在锚点帧用多个 BBox、多个正负 Point 和粗略 Mask 定义对象，并传播到整段视频。
+![SeC-4B 示例工作流](images/CS_Video_Segment(Sec-4B)_workflow.jpg)
 
 #### 使用流程
 
 1. 先执行 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader)，再把输出的 `SEC_MODEL` 连接到节点的 `model`。
-2. 将同一视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；可选的 `proxy_video` 只用于 Selector 前端预览。
+2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；Selector 统一使用 CS Load Video 共享 preview cache。
 3. 点击 `Open Selector`，在锚点帧中定义一个或多个对象的提示。
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
-
-对于运行后才生成的输入，先运行一次工作流建立缓存，再打开 Selector。
 
 #### 节点选项说明
 ![CS Video Segment (SeC-4B) 节点](images/CS_Video_Segment(Sec-4B)_node.jpg)
 - `model`：`CS SeC-4B Model Loader` 输出的 `SEC_MODEL`，必需输入。
 - `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
-- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的多对象 Mask、BBox 和 Point 提示数据，不建议手动编辑。
 - `tracking_direction`：传播方向，`bidirectional` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -239,13 +240,13 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 
 ### CS Video Segment (SAM3.1)
 使用 ComfyUI 官方 SAM3/SAM3.1 模型和推理内核，把 Selector 中定义在锚点帧的多个对象提示传播到整段视频。
-
 SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1)。下载后放入 ComfyUI 的 `models/checkpoints`
+![SAM3.1 示例工作流](images/CS_Video_Segment(SAM3.1)_workflow.jpg)
 
 #### 使用流程
 
 1. 使用官方 `CheckpointLoaderSimple`加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
-2. 将视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；可选的 `proxy_video` 只用于 Selector 前端预览。
+2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；Selector 统一使用 CS Load Video 共享 preview cache。
 3. 点击节点上的 `Open Selector`，在实际输入视频的帧上定义提示。
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
@@ -255,7 +256,6 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 - `model`：官方 SAM3/SAM3.1 模型，必需输入。
 - `images`：可选 `IMAGE` 帧批次。连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入。仅在 `images` 未连接时使用。
-- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始。通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的 Mask、BBox、Point 和对象列表，不建议手动编辑。
 - `propagation_direction`：传播方向，`both` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -270,6 +270,8 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 ## Selector 使用说明
 
 SAM3.1 和 SeC-4B 共用同一个 Selector 框架。两者都支持多对象；SAM3.1 由官方模型批量处理对象，SeC-4B 会逐对象建立跟踪条件后合并结果。Semantic 选项卡仅对 SAM3.1 显示，SeC-4B 使用 Draw Mask、Edit BBox 和 Edit Point。
+
+对于运行后才生成的视频输入，先运行一次工作流建立缓存，再打开节点前端窗口。
 
 ![Selector 界面](images/CS_Video_Segment_seletor.jpg)
 
@@ -317,16 +319,6 @@ SAM3.1 和 SeC-4B 共用同一个 Selector 框架。两者都支持多对象；S
 - `Cancel` 关闭窗口并放弃本次未应用的修改。
 - `Apply to Node` 将提示数据和锚点帧写入节点。
 
-#### 示例工作流
-
-workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图片仅为示意。
-
-![SAM3.1 示例工作流](images/CS_Video_Segment(SAM3.1)_workflow.jpg)
-
-![SeC-4B 示例工作流](images/CS_Video_Segment(Sec-4B)_workflow.jpg)
-
-
-
 ### CS Load Video
 把视频文件加载到 ComfyUI，并提供一个可交互的时间线编辑窗口。节点执行时会读取视频帧、音频和帧率，根据工作流中保存的设置截取和调整内容，然后输出给下游节点。
 
@@ -337,15 +329,15 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图�
 - 使用蓝色当前帧指针，在时间线上拖动即可同步预览对应视频帧。
 - 出入点设置按钮组的 `Play` 只播放已设置的入点到出点范围。
 - 视频预览窗口的白色播放键仍然播放完整视频，不受入出点限制。
-- 开启保持宽高比后，修改宽度或高度会自动联动另一项。
 - 输出尺寸可以自动四舍五入到指定倍数，适合视频模型常见的尺寸要求。
-- 入点、出点、宽度、高度和 FPS 会保存到 ComfyUI 工作流中，重新打开工作流后仍可复现相同设置。
-- 输出同时包含图像帧批次、音频和结构化视频信息。
+
+#### 预览 Cache
+每个 CS Load Video 节点都自动为下游预览提供 Preview Cache 并缓存在 ComfyUI 临时目录中，随ComfyUI启动自动清除上次残余缓存。
+Preview Cache 只用于前端窗口播放、预览和波形显示。
 
 #### 节点选项说明：
 ![CS Load Video 节点](images/CS_Load_Video_node.jpg)
 - video： 选择 ComfyUI 输入目录中的视频，或使用上传控件上传视频文件。
-- keep_aspect_ratio：布尔值，默认`true`。开启后，宽度和高度按照源视频的原始宽高比联动计算。 
 - multiple：整数，默认 `32`。 输出尺寸的取整倍数。宽度和高度会按最近的倍数四舍五入。 
 - start_frame： 整数，默认 `0`。 起始帧，使用从 `0` 开始的帧编号。
 - end_frame：整数，默认`-1` |。 结束帧，`-1` 表示使用视频最后一帧。 
@@ -358,10 +350,9 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图�
 
 #### Edit Timeline 时间线界面
 
-![Edit Timeline 时间线界面](images/CS_Load_Video_UI.jpg)
+![Edit Timeline 时间线界面](images/CS_Load_Video_Timeline.jpg)
 
-时间线界面从上到下依次包含视频预览、时间读数、当前帧指针、入出点标记栏、时间线操作按钮和输出参数。
-
+时间线界面从上到下依次包含视频预览、原视频信息、时间读数、当前帧指针、入出点标记栏、时间线操作按钮和输出参数。
 
 ##### 入点和出点标记
 
@@ -370,13 +361,14 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图�
 - 左侧手柄是入点。
 - 右侧手柄是出点。
 - 可以直接拖动手柄调整范围。
-- 点击标记栏空白区域时，程序会根据点击位置距离哪个手柄更近来调整对应边界。
 
 ##### 时间线按钮
 - `Set In`：将视频预览当前帧设为入点。如果当前帧晚于出点，会自动修正出点。
+- `入点指示`：显示当前入点帧号，点击可跳转到入点。
 - `|<`： 跳转到上一帧。只受视频首帧限制，不受入点限制。 
 - `Play`: 只播放从入点到出点的内容，播放到出点后自动暂停。再次播放时，如果当前帧不在范围内，会从入点重新开始。 
 - `>|`: 跳转到下一帧。只受视频尾帧限制，不受出点限制。 
+- `出点指示`：显示当前出点帧号，点击可跳转到出点。
 - `Set Out`： 将视频预览当前帧设为出点。如果当前帧早于入点，会自动修正入点。 
 
 #### 输出说明
@@ -384,11 +376,12 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图�
 - IMAGE: 输出的video图像帧批次。
 - frame_count: 实际输出帧数。修改 FPS 后，该数值可能与源视频选段帧数不同。 
 - audio: 选定时间范围内的音频。没有音频轨道时输出为空。 
-- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息。
+- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息，以及 loader 标识。
 
 
 ### CS Save Video
-基于 ComfyUI 官方 `Save Video` 节点，增加save metadata和H264 bitrate选项。
+基于 ComfyUI 官方 `Save Video` 节点，增加 save metadata 和符合行业惯例的 H.264 目标码率控制选项。
+![CS Save Video 节点](images/CS_Save_Video_node.jpg)
 
 - `video`：标准 ComfyUI `VIDEO` 输入。
 - `filename_prefix`：输出文件名前缀，支持官方的日期和节点控件格式化语法。
@@ -396,7 +389,6 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。以下图�
 - `codec`：视频编码方式，默认 `h264`。选择 H.264 时显示码率控件。
 - `H.264 bitrate (Mbps)`：H.264 目标码率，浮点数保留 1 位小数，范围 `1.0–160.0 Mbps`，默认 `8.0 Mbps`。范围覆盖官方建议的低分辨率到 8K 高帧率视频；常见 1080p 视频可从 `8.0 Mbps` 开始，高帧率 1080p 可提高到约 `12.0 Mbps`。
 - `save_metadata`：默认关闭。开启后保存的文件将写入工作流和源视频 metadata。
-
 
 
 ##  声明

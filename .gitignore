@@ -1,6 +1,7 @@
 # Python caches and local tooling
 __pycache__/
 *.py[cod]
+AGENTS.md
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

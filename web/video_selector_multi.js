@@ -25,9 +25,9 @@ async function fetchInfo(filename) {
     if (isImageFilename(filename)) return fetchImageInfo(filename);
     const response = await api.fetchApi(`/cinestyle/video-info?${new URLSearchParams({ filename })}`); if (!response.ok) throw new Error(await response.text()); return response.json();
 }
-async function fetchCachedSource(node, suffix = "") {
+async function fetchCachedSource(node) {
     const nodeId = String(node?.id ?? "").trim(); if (!nodeId) return null;
-    const response = await api.fetchApi(`/cinestyle/video-selector-cache?${new URLSearchParams({ node_id: `${nodeId}${suffix}`, t: String(Date.now()) })}`);
+    const response = await api.fetchApi(`/cinestyle/video-selector-cache?${new URLSearchParams({ node_id: nodeId, t: String(Date.now()) })}`);
     if (response.status === 404) return null;
     const result = await response.json(); if (!response.ok) throw new Error(result.error || "Unable to read cached Selector input");
     const info = result.info || {};
@@ -37,6 +37,7 @@ function graphNode(graph, id) { if (id == null || !graph) return null; const dir
 function graphLink(graph, candidate) { if (candidate == null) return null; if (typeof candidate === "object") { if (candidate.origin_id != null || candidate.originId != null) return candidate; if (candidate.link && typeof candidate.link === "object") return candidate.link; } return graph?.links?.[candidate] || graph?._links?.[candidate] || null; }
 function originFromConnection(graph, candidate) { if (!candidate) return null; if (typeof candidate === "object" && (candidate.origin_id != null || candidate.originId != null)) return graphNode(graph, candidate.origin_id ?? candidate.originId); if (candidate?.type || candidate?.comfyClass) return candidate; const link = graphLink(graph, candidate); return link ? graphNode(graph, link.origin_id ?? link.originId ?? link.origin) : null; }
 function nodeTypeName(node) { return String(node?.type || node?.comfyClass || node?.constructor?.type || ""); }
+function isAnyRerouter(node) { return /layerutility\s*:\s*any\s+rerouter/i.test(nodeTypeName(node)) || /any\s+rerouter/i.test(String(node?.title || "")); }
 function isCSLoadVideo(node) { const type = nodeTypeName(node); return type === "CS_Load_Video" || type.endsWith(".CS_Load_Video") || type.endsWith("::CS_Load_Video"); }
 function isLoadImage(node) { return /(^|[.:_])load[_-]?image([.:_]|$)/i.test(nodeTypeName(node)) || /image[_-]?loader/i.test(nodeTypeName(node)); }
 function sourceFilename(node) {
@@ -59,11 +60,27 @@ function sourceFromOrigin(origin, visited = new Set()) {
     const filename = sourceFilename(origin);
     if (isCSLoadVideo(origin) || /\.(mp4|mov|mkv|avi|webm|m4v|mpg|mpeg|wmv|flv)(?:\s*\[[^\]]*\])?$/i.test(filename)) {
         if (!filename) return null;
-        return { filename, kind: "video", startFrame: Math.max(0, Number(widget(origin, "start_frame")?.value ?? 0)), endFrame: Number(widget(origin, "end_frame")?.value ?? -1), targetFps: Number(widget(origin, "fps")?.value ?? 0) };
+        return {
+            filename,
+            kind: "video",
+            isCSLoad: isCSLoadVideo(origin),
+            loaderId: isCSLoadVideo(origin) ? String(origin.id ?? "") : "",
+            startFrame: Math.max(0, Number(widget(origin, "start_frame")?.value ?? 0)),
+            endFrame: Number(widget(origin, "end_frame")?.value ?? -1),
+            targetFps: Number(widget(origin, "fps")?.value ?? 0),
+            outputWidth: Number(widget(origin, "width")?.value ?? 0),
+            outputHeight: Number(widget(origin, "height")?.value ?? 0),
+            multiple: Number(widget(origin, "multiple")?.value ?? 1),
+        };
     }
     if (isLoadImage(origin) || isImageFilename(filename)) {
         if (!filename) return null;
         return { filename, kind: "image", startFrame: 0, endFrame: 0, targetFps: 1 };
+    }
+    if (isAnyRerouter(origin)) {
+        const input = origin.inputs?.[0];
+        const upstream = input ? connectedOrigin(origin, input.name) : null;
+        return sourceFromOrigin(upstream, visited);
     }
     for (const upstream of connectedMediaOrigins(origin)) { const source = sourceFromOrigin(upstream, visited); if (source) return source; }
     return null;
@@ -72,6 +89,69 @@ function connectedVideoSource(node, inputNames = ["images", "video_input"]) {
     const origins = inputNames.map((name) => connectedOrigin(node, name)).filter(Boolean);
     for (const origin of origins) { const source = sourceFromOrigin(origin); if (source) return source; }
     return null;
+}
+
+function loaderPreviewPayload(source) {
+    return {
+        loader_id: String(source?.loaderId || ""),
+        video: String(source?.filename || ""),
+        start_frame: Number(source?.startFrame ?? 0),
+        end_frame: Number(source?.endFrame ?? -1),
+        width: Number(source?.outputWidth ?? 0),
+        height: Number(source?.outputHeight ?? 0),
+        fps: Number(source?.targetFps ?? 0),
+        multiple: Number(source?.multiple ?? 32),
+    };
+}
+
+function loaderPreviewSource(result, source) {
+    const info = result?.info || {};
+    return {
+        ...source,
+        filename: "",
+        kind: "video",
+        token: String(result?.token || ""),
+        url: api.apiURL(String(result?.video_url || "")),
+        info,
+        label: "Shared preview from CS Load Video",
+        sharedLoaderCache: true,
+        loaderSignature: String(result?.signature || ""),
+        startFrame: 0,
+        endFrame: Math.max(0, Number(info.frames || info.loaded_frame_count || 1) - 1),
+        targetFps: Number(info.fps || info.loaded_fps || 24),
+    };
+}
+
+async function ensureLoaderPreviewSource(source, { wait = true, timeoutMs = 300000, onProgress = null } = {}) {
+    if (!source?.isCSLoad || !source.loaderId || !source.filename) return source;
+    const reportProgress = (result, fallback = 0) => {
+        const progress = clamp(Math.round(Number(result?.progress ?? fallback) || 0), 0, 100);
+        onProgress?.(progress, result || {});
+    };
+    reportProgress(null, 0);
+    const payload = loaderPreviewPayload(source);
+    const response = await api.fetchApi("/cinestyle/loader-preview-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+    let result = await response.json().catch(() => ({}));
+    if (!response.ok || result.status === "failed") throw new Error(result.error || "Unable to prepare CS Load Video preview cache");
+    reportProgress(result, result.status === "ready" ? 100 : 0);
+    if (result.status === "ready") return loaderPreviewSource(result, source);
+    if (!wait) return source;
+    const started = Date.now();
+    const signature = String(result.signature || "");
+    while (Date.now() - started < timeoutMs) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        const params = new URLSearchParams({ loader_id: String(source.loaderId), signature });
+        const progressResponse = await api.fetchApi(`/cinestyle/loader-preview-cache-progress?${params}`);
+        result = await progressResponse.json().catch(() => ({}));
+        reportProgress(result);
+        if (result.status === "ready") return loaderPreviewSource(result, source);
+        if (result.status === "failed") throw new Error(result.error || "CS Load Video preview cache failed");
+    }
+    throw new Error("Timed out while preparing CS Load Video preview cache.");
 }
 function prepareInputTimeline(source, sourceInfo) {
     const sourceFrames = Math.max(1, Number(sourceInfo.frames || 1)); const sourceFps = Math.max(0.001, Number(sourceInfo.fps || 24));
@@ -95,21 +175,47 @@ function promptDataFromObjects(objects, width, height) { return JSON.stringify({
 
 function addStyles() {
     if (document.getElementById(STYLE_ID)) return; const style = document.createElement("style"); style.id = STYLE_ID;
-    style.textContent = `.cs-vseg-dialog{width:min(980px,94vw);max-width:none;max-height:92vh;overflow:auto;padding:0;border:1px solid #343943;border-radius:10px;background:#17191e;color:#e6e9ef;box-shadow:0 22px 80px #000b}.cs-vseg-dialog::backdrop{background:#050609b8}.cs-vseg-shell{display:grid;gap:12px;padding:16px;font:13px/1.35 system-ui,sans-serif}.cs-vseg-head,.cs-vseg-row,.cs-vseg-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.cs-vseg-head{justify-content:space-between}.cs-vseg-title{margin:0;font-size:17px}.cs-vseg-muted{color:#9da5b4}.cs-vseg-stage{position:relative;width:100%;min-height:180px;background:#08090b;border:1px solid #343943;border-radius:6px;overflow:hidden}.cs-vseg-stage video,.cs-vseg-stage .cs-vseg-image-source{display:block;width:100%;height:auto;max-height:58vh;background:#08090b}.cs-vseg-stage .cs-vseg-image-source{display:none;object-fit:contain}.cs-vseg-stage .cs-vseg-mask-preview{display:none;position:absolute;z-index:1;inset:0;width:100%;height:100%;object-fit:contain;background:#08090b}.cs-vseg-stage canvas{position:absolute;z-index:2;inset:0;width:100%;height:100%;touch-action:none}.cs-vseg-controls{display:grid;grid-template-columns:auto minmax(100px,1fr) 90px auto;align-items:center;gap:8px}.cs-vseg-step-buttons{display:flex;gap:5px}.cs-vseg-step-buttons .cs-vseg-button{width:38px;padding-inline:0}.cs-vseg-controls input[type=range]{width:100%}.cs-vseg-button{min-height:31px;border:1px solid #424956;border-radius:5px;padding:6px 10px;background:#20232a;color:#f2f4f7;cursor:pointer}.cs-vseg-button:hover{border-color:#6aa9df}.cs-vseg-button.active{background:#317ec4;border-color:#6db6ee}.cs-vseg-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;border-bottom:1px solid #343943}.cs-vseg-tab{border-radius:5px 5px 0 0;border-bottom:2px solid transparent}.cs-vseg-tab.active{background:#263d51;border-bottom-color:#55b7dc}.cs-vseg-card{display:none;min-height:54px;padding:10px;border:1px solid #343943;border-radius:0 0 6px 6px;background:#1c1f25}.cs-vseg-card.active{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.cs-vseg-card label{display:flex;align-items:center;gap:6px;color:#9da5b4}.cs-vseg-brush-size{width:330px!important}.cs-vseg-semantic-input{flex:1 1 360px;min-height:31px;border:1px solid #424956;border-radius:5px;padding:6px 9px;background:#111419;color:#f2f4f7}.cs-vseg-brush-mode[data-brush=paint].active{background:#1b6d4b;border-color:#35c98e}.cs-vseg-brush-mode[data-brush=erase].active{background:#7b2934;border-color:#ff5b68}.cs-vseg-point-menu{position:fixed;z-index:20;display:grid;min-width:190px;padding:5px;gap:3px;border:1px solid #424956;border-radius:6px;background:#20232a;box-shadow:0 10px 32px #000b}.cs-vseg-point-menu button{border:0;border-radius:4px;padding:7px 9px;text-align:left;background:transparent;color:#f2f4f7;cursor:pointer}.cs-vseg-point-menu button:hover{background:#317ec4}.cs-vseg-actions{justify-content:flex-end}.cs-vseg-preview-status{flex:1;min-width:0;color:#9da5b4}.cs-vseg-preview-button{border-color:#348f85}.cs-vseg-apply{background:#317ec4;border-color:#4b9de8}.cs-vseg-prompt-note{min-height:18px;color:#9da5b4}.cs-vseg-tool-group label{display:flex;align-items:center;gap:5px;color:#9da5b4}.cs-vseg-object-select{min-height:31px;border:1px solid #424956;border-radius:5px;padding:5px 8px;background:#20232a;color:#f2f4f7}.cs-vseg-bbox-add.active{background:#8a5f1b;border-color:#f7b955}@media(max-width:640px){.cs-vseg-controls{grid-template-columns:auto 1fr auto}.cs-vseg-controls .cs-vseg-frame-count{grid-column:1/-1}.cs-vseg-brush-size{width:100%!important}}`;
+    style.textContent = `.cs-vseg-dialog{width:min(980px,94vw);max-width:none;max-height:92vh;overflow:auto;padding:0;border:1px solid #343943;border-radius:10px;background:#17191e;color:#e6e9ef;box-shadow:0 22px 80px #000b}.cs-vseg-dialog::backdrop{background:#050609b8}.cs-vseg-shell{display:grid;gap:12px;padding:16px;font:13px/1.35 system-ui,sans-serif}.cs-vseg-head,.cs-vseg-row,.cs-vseg-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.cs-vseg-head{justify-content:space-between}.cs-vseg-title{margin:0;font-size:17px}.cs-vseg-muted{color:#9da5b4}.cs-vseg-stage{position:relative;width:100%;min-height:180px;background:#08090b;border:1px solid #343943;border-radius:6px;overflow:hidden}.cs-vseg-stage video,.cs-vseg-stage .cs-vseg-image-source{display:block;width:100%;height:auto;max-height:58vh;background:#08090b}.cs-vseg-stage .cs-vseg-image-source{display:none;object-fit:contain}.cs-vseg-stage .cs-vseg-mask-preview{display:none;position:absolute;z-index:1;inset:0;width:100%;height:100%;object-fit:contain;background:#08090b}.cs-vseg-stage canvas{position:absolute;z-index:2;inset:0;width:100%;height:100%;touch-action:none}.cs-vseg-cache-loading{position:absolute;z-index:10;inset:0;display:flex;align-items:center;justify-content:center;padding:18px;background:#08090be8;color:#dce7f3;text-align:center}.cs-vseg-cache-loading[hidden]{display:none}.cs-vseg-controls{display:grid;grid-template-columns:auto minmax(100px,1fr) 90px auto;align-items:center;gap:8px}.cs-vseg-step-buttons{display:flex;gap:5px}.cs-vseg-step-buttons .cs-vseg-button{width:38px;padding-inline:0}.cs-vseg-controls input[type=range]{width:100%}.cs-vseg-button{min-height:31px;border:1px solid #424956;border-radius:5px;padding:6px 10px;background:#20232a;color:#f2f4f7;cursor:pointer}.cs-vseg-button:hover{border-color:#6aa9df}.cs-vseg-button.active{background:#317ec4;border-color:#6db6ee}.cs-vseg-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;border-bottom:1px solid #343943}.cs-vseg-tab{border-radius:5px 5px 0 0;border-bottom:2px solid transparent}.cs-vseg-tab.active{background:#263d51;border-bottom-color:#55b7dc}.cs-vseg-card{display:none;min-height:54px;padding:10px;border:1px solid #343943;border-radius:0 0 6px 6px;background:#1c1f25}.cs-vseg-card.active{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.cs-vseg-card label{display:flex;align-items:center;gap:6px;color:#9da5b4}.cs-vseg-brush-size{width:330px!important}.cs-vseg-semantic-input{flex:1 1 360px;min-height:31px;border:1px solid #424956;border-radius:5px;padding:6px 9px;background:#111419;color:#f2f4f7}.cs-vseg-brush-mode[data-brush=paint].active{background:#1b6d4b;border-color:#35c98e}.cs-vseg-brush-mode[data-brush=erase].active{background:#7b2934;border-color:#ff5b68}.cs-vseg-point-menu{position:fixed;z-index:20;display:grid;min-width:190px;padding:5px;gap:3px;border:1px solid #424956;border-radius:6px;background:#20232a;box-shadow:0 10px 32px #000b}.cs-vseg-point-menu button{border:0;border-radius:4px;padding:7px 9px;text-align:left;background:transparent;color:#f2f4f7;cursor:pointer}.cs-vseg-point-menu button:hover{background:#317ec4}.cs-vseg-actions{justify-content:flex-end}.cs-vseg-preview-status{flex:1;min-width:0;color:#9da5b4}.cs-vseg-preview-button{border-color:#348f85}.cs-vseg-apply{background:#317ec4;border-color:#4b9de8}.cs-vseg-prompt-note{min-height:18px;color:#9da5b4}.cs-vseg-tool-group label{display:flex;align-items:center;gap:5px;color:#9da5b4}.cs-vseg-object-select{min-height:31px;border:1px solid #424956;border-radius:5px;padding:5px 8px;background:#20232a;color:#f2f4f7}.cs-vseg-bbox-add.active{background:#8a5f1b;border-color:#f7b955}@media(max-width:640px){.cs-vseg-controls{grid-template-columns:auto 1fr auto}.cs-vseg-controls .cs-vseg-frame-count{grid-column:1/-1}.cs-vseg-brush-size{width:100%!important}}`;
     style.textContent += ".cs-vseg-brush-toggle.brush-active{background:#1b6d4b;border-color:#35c98e}.cs-vseg-brush-toggle.eraser-active{background:#7b2934;border-color:#ff5b68}.cs-vseg-clear-all-prompt{margin-left:auto;border-color:#a65a62;background:#382329;color:#ffd9dc}.cs-vseg-timeline{position:relative;min-width:0;padding-top:16px}.cs-vseg-timeline .cs-vseg-slider{display:block;width:100%;margin:0}.cs-vseg-anchor-pointer{display:none;position:absolute;top:0;left:0;width:18px;height:16px;transform:translateX(-50%);border-radius:2px;background:#55a9f5;clip-path:polygon(0 0,100% 0,50% 100%);pointer-events:none;z-index:3}.cs-vseg-anchor-pointer.visible{display:block}";
     document.head.append(style);
 }
 
 async function openSelector(node, config) {
     const names = { frame: "anchor_frame", prompt: "prompt_data", ...(config.widgets || {}) };
-    let source = connectedVideoSource(node, ["proxy_video"]);
-    if (!source) { try { source = await fetchCachedSource(node, ":proxy"); } catch { source = null; } }
-    if (!source) source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
-    if (!source) { try { source = await fetchCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; } if (!source) { app.canvas?.prompt?.("Run the workflow once to cache the connected video input before opening the selector", ""); return; } }
-    const filename = source.filename; const sourceLabel = source.label || filename; addStyles();
+    let source = null;
+    let closed = false;
+    addStyles();
     const dialog = document.createElement("dialog"); dialog.className = "cs-vseg-dialog";
-    dialog.innerHTML = `<div class="cs-vseg-shell"><div class="cs-vseg-head"><div><h2 class="cs-vseg-title">${config.title || "Video Selector"}</h2><div class="cs-vseg-muted cs-vseg-file"></div></div><button class="cs-vseg-button cs-vseg-close" type="button">&times;</button></div><div class="cs-vseg-stage"><video controls muted playsinline preload="metadata"></video><img class="cs-vseg-image-source" alt="Input image"><img class="cs-vseg-mask-preview" alt="Current frame segmentation preview"><canvas></canvas></div><div class="cs-vseg-controls"><div class="cs-vseg-step-buttons"><button class="cs-vseg-button cs-vseg-prev" type="button">|&lt;</button><button class="cs-vseg-button cs-vseg-next" type="button">&gt;|</button></div><div class="cs-vseg-timeline"><span class="cs-vseg-anchor-pointer" title="Anchor frame"></span><input class="cs-vseg-slider" type="range" min="0" max="0" step="1" value="0"></div><input class="cs-vseg-frame-input" type="number" min="0" step="1" value="0"><span class="cs-vseg-frame-count cs-vseg-muted">0 / 0</span></div><div class="cs-vseg-tabs"><button class="cs-vseg-button cs-vseg-tab active" data-tab="mask" type="button">Paint Mask</button><button class="cs-vseg-button cs-vseg-tab" data-tab="bbox" type="button">Edit BBox</button><button class="cs-vseg-button cs-vseg-tab" data-tab="points" type="button">Edit Point</button><button class="cs-vseg-button cs-vseg-tab" data-tab="semantic" type="button">Semantic</button></div><div class="cs-vseg-card cs-vseg-card-mask active"><button class="cs-vseg-button cs-vseg-brush-toggle brush-active" type="button">Brush</button><label>Brush Size <input class="cs-vseg-brush-size" type="range" min="2" max="100" value="32"><span class="cs-vseg-brush-size-value">32</span></label><button class="cs-vseg-button cs-vseg-clear-mask" type="button">Clear Mask</button></div><div class="cs-vseg-card cs-vseg-card-bbox"><button class="cs-vseg-button cs-vseg-bbox-add" type="button">Add BBox</button><button class="cs-vseg-button cs-vseg-clear-all-bbox" type="button">Clear All BBox</button></div><div class="cs-vseg-card cs-vseg-card-points"><button class="cs-vseg-button cs-vseg-clear-all-points" type="button">Clear All Point</button></div><div class="cs-vseg-card cs-vseg-card-semantic"><label for="cs-vseg-semantic-text">Text prompt</label><input id="cs-vseg-semantic-text" class="cs-vseg-semantic-input" type="text" maxlength="240" placeholder="e.g. a yellow car"><button class="cs-vseg-button cs-vseg-clear-semantic" type="button">Clear Semantic</button></div><div class="cs-vseg-row cs-vseg-tool-group"><label>Object <select class="cs-vseg-object-select"></select></label><button class="cs-vseg-button cs-vseg-add-object" type="button">Add Object</button><button class="cs-vseg-button cs-vseg-delete-object" type="button">Delete Object</button><button class="cs-vseg-button cs-vseg-undo" type="button">Undo</button><button class="cs-vseg-button cs-vseg-redo" type="button">Redo</button><button class="cs-vseg-button cs-vseg-clear cs-vseg-clear-all-prompt" type="button">Clear All Prompt</button></div><div class="cs-vseg-fields"><div class="cs-vseg-prompt-note"></div></div><div class="cs-vseg-actions"><span class="cs-vseg-preview-status"></span><button class="cs-vseg-button cs-vseg-preview-button" type="button">Preview Current Frame</button><button class="cs-vseg-button cs-vseg-cancel" type="button">Cancel</button><button class="cs-vseg-button cs-vseg-apply" type="button">Apply to Node</button></div></div>`;
+    dialog.innerHTML = `<div class="cs-vseg-shell"><div class="cs-vseg-head"><div><h2 class="cs-vseg-title">${config.title || "Video Selector"}</h2><div class="cs-vseg-muted cs-vseg-file"></div></div><button class="cs-vseg-button cs-vseg-close" type="button">&times;</button></div><div class="cs-vseg-stage"><video controls muted playsinline preload="metadata"></video><img class="cs-vseg-image-source" alt="Input image"><img class="cs-vseg-mask-preview" alt="Current frame segmentation preview"><canvas></canvas><div class="cs-vseg-cache-loading" role="status" aria-live="polite">Preparing cache, please wait 0%</div></div><div class="cs-vseg-controls"><div class="cs-vseg-step-buttons"><button class="cs-vseg-button cs-vseg-prev" type="button">|&lt;</button><button class="cs-vseg-button cs-vseg-next" type="button">&gt;|</button></div><div class="cs-vseg-timeline"><span class="cs-vseg-anchor-pointer" title="Anchor frame"></span><input class="cs-vseg-slider" type="range" min="0" max="0" step="1" value="0"></div><input class="cs-vseg-frame-input" type="number" min="0" step="1" value="0"><span class="cs-vseg-frame-count cs-vseg-muted">0 / 0</span></div><div class="cs-vseg-tabs"><button class="cs-vseg-button cs-vseg-tab active" data-tab="mask" type="button">Paint Mask</button><button class="cs-vseg-button cs-vseg-tab" data-tab="bbox" type="button">Edit BBox</button><button class="cs-vseg-button cs-vseg-tab" data-tab="points" type="button">Edit Point</button><button class="cs-vseg-button cs-vseg-tab" data-tab="semantic" type="button">Semantic</button></div><div class="cs-vseg-card cs-vseg-card-mask active"><button class="cs-vseg-button cs-vseg-brush-toggle brush-active" type="button">Brush</button><label>Brush Size <input class="cs-vseg-brush-size" type="range" min="2" max="100" value="32"><span class="cs-vseg-brush-size-value">32</span></label><button class="cs-vseg-button cs-vseg-clear-mask" type="button">Clear Mask</button></div><div class="cs-vseg-card cs-vseg-card-bbox"><button class="cs-vseg-button cs-vseg-bbox-add" type="button">Add BBox</button><button class="cs-vseg-button cs-vseg-clear-all-bbox" type="button">Clear All BBox</button></div><div class="cs-vseg-card cs-vseg-card-points"><button class="cs-vseg-button cs-vseg-clear-all-points" type="button">Clear All Point</button></div><div class="cs-vseg-card cs-vseg-card-semantic"><label for="cs-vseg-semantic-text">Text prompt</label><input id="cs-vseg-semantic-text" class="cs-vseg-semantic-input" type="text" maxlength="240" placeholder="e.g. a yellow car"><button class="cs-vseg-button cs-vseg-clear-semantic" type="button">Clear Semantic</button></div><div class="cs-vseg-row cs-vseg-tool-group"><label>Object <select class="cs-vseg-object-select"></select></label><button class="cs-vseg-button cs-vseg-add-object" type="button">Add Object</button><button class="cs-vseg-button cs-vseg-delete-object" type="button">Delete Object</button><button class="cs-vseg-button cs-vseg-undo" type="button">Undo</button><button class="cs-vseg-button cs-vseg-redo" type="button">Redo</button><button class="cs-vseg-button cs-vseg-clear cs-vseg-clear-all-prompt" type="button">Clear All Prompt</button></div><div class="cs-vseg-fields"><div class="cs-vseg-prompt-note"></div></div><div class="cs-vseg-actions"><span class="cs-vseg-preview-status"></span><button class="cs-vseg-button cs-vseg-preview-button" type="button">Preview Current Frame</button><button class="cs-vseg-button cs-vseg-cancel" type="button">Cancel</button><button class="cs-vseg-button cs-vseg-apply" type="button">Apply to Node</button></div></div>`;
     document.body.append(dialog);
+    const loading = dialog.querySelector(".cs-vseg-cache-loading");
+    const setLoading = (message, visible = true) => { if (!loading) return; loading.textContent = message; loading.hidden = !visible; };
+    const earlyClose = () => { closed = true; dialog.close(); dialog.remove(); };
+    dialog.querySelector(".cs-vseg-close").addEventListener("click", earlyClose);
+    dialog.querySelector(".cs-vseg-cancel").addEventListener("click", earlyClose);
+    dialog.addEventListener("cancel", earlyClose);
+    dialog.showModal();
+    try {
+        try { source = await fetchCachedSource(node); } catch { source = null; }
+        if (!source) source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
+        if (!source) throw new Error("Run the workflow once to cache the connected video input before opening the selector");
+        const upstreamSource = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
+        const reportCacheProgress = (progress) => setLoading(`Preparing cache, please wait ${progress}%`);
+        if (upstreamSource?.loaderId) {
+            source = await ensureLoaderPreviewSource(upstreamSource, { onProgress: reportCacheProgress });
+        } else if (source.loaderId && !source.token) {
+            source = await ensureLoaderPreviewSource(source, { onProgress: reportCacheProgress });
+        }
+        if (closed) return;
+    } catch (error) {
+        if (!closed) setLoading(error?.message || "Unable to prepare cache");
+        return;
+    }
+    dialog.querySelector(".cs-vseg-close").removeEventListener("click", earlyClose);
+    dialog.querySelector(".cs-vseg-cancel").removeEventListener("click", earlyClose);
+    dialog.removeEventListener("cancel", earlyClose);
+    const filename = source.filename; const sourceLabel = source.label || filename;
+    setLoading("Preparing cache, please wait 100%", false);
     // Keep the shared selector layout consistent across model variants.
     const shell = dialog.querySelector(".cs-vseg-shell");
     const tabHost = dialog.querySelector(".cs-vseg-tabs");
@@ -217,10 +323,9 @@ async function openSelector(node, config) {
     previewButton.addEventListener("click", async () => { semanticInput?.blur(); previewButton.disabled = true; previewStatus.textContent = config.previewLabel || "Running segmentation on this frame..."; video.pause(); try { const result = await config.preview({ node, filename, frame, previewFrame: sourceFrameForLocal(info, frame), info, promptData: promptSnapshot(), fetchPreview: (payload) => fetchPreview({ ...payload, source_kind: source.kind || "video", source_token: source.token || "" }, config.previewRoute) }); previewImage.src = result.image; previewImage.style.display = "block"; canvas.style.visibility = "hidden"; previewStatus.textContent = `Frame ${result.frame} · mask ${(Number(result.mask_area || 0) * 100).toFixed(1)}%`; } catch (error) { canvas.style.visibility = "visible"; previewStatus.textContent = error.message; } finally { previewButton.disabled = false; } });
     function syncFrameFromVideo() { if (source.kind === "image" || !info?.source_fps) return; const sourceFrame = Math.round(video.currentTime * info.source_fps); if (sourceFrame === displayedSourceFrame) return; const first = Number(info.source_start_frame || 0); const last = Number(info.source_end_frame ?? first); const accepted = sourceFrame < first || sourceFrame > last ? requestFrameChange(sourceFrame < first ? 0 : Math.max(0, Number(info.frames || 1) - 1), false, true) : requestFrameChange(localFrameForSource(info, sourceFrame), false, true); if (accepted) displayedSourceFrame = sourceFrame; }
     video.addEventListener("timeupdate", () => { if (!video.seeking) syncFrameFromVideo(); }); video.addEventListener("seeked", syncFrameFromVideo); media.addEventListener(source.kind === "image" ? "load" : "loadedmetadata", () => { resizeCanvas(); if (info) setFrameDirect(frame); }); new ResizeObserver(resizeCanvas).observe(stage);
-    const close = () => { video.pause(); closePointMenu(); closeBoxMenu(); dialog.close(); dialog.remove(); }; dialog.querySelector(".cs-vseg-close").addEventListener("click", close); dialog.querySelector(".cs-vseg-cancel").addEventListener("click", close);
+    const close = () => { closed = true; video.pause(); closePointMenu(); closeBoxMenu(); dialog.close(); dialog.remove(); }; dialog.querySelector(".cs-vseg-close").addEventListener("click", close); dialog.querySelector(".cs-vseg-cancel").addEventListener("click", close);
     dialog.querySelector(".cs-vseg-apply").addEventListener("click", () => { semanticInput?.blur(); const promptData = promptSnapshot(); if (config.apply) config.apply({ node, frame, promptData, info, setWidgetValue }); else { setWidgetValue(node, names.frame, frame); setWidgetValue(node, names.prompt, promptData); } node.graph?.setDirtyCanvas(true, true); close(); }); dialog.addEventListener("cancel", close);
     (source.info ? Promise.resolve(source.info) : fetchInfo(filename)).then(async (result) => { info = prepareInputTimeline(source, result); dialog.querySelector(".cs-vseg-file").textContent = `${sourceLabel} · ${info.frames} input frames`; const maxFrame = Math.max(0, Number(info.frames || 1) - 1); slider.max = String(maxFrame); frameInput.max = String(maxFrame); await Promise.all(objects.map(ensureMaskCanvas)); updateObjectSelect(); setTool(tool); setFrameDirect(frame); syncAnchorFromPrompts(); resizeCanvas(); note.textContent = "Use Semantic, draw a coarse mask, or add points and boxes to the active object. Add objects for additional prompt groups."; }).catch((error) => { note.textContent = error.message; });
-    dialog.showModal();
 }
 
 export function registerVideoSelector(config) {
@@ -239,6 +344,7 @@ export function registerVideoSelector(config) {
 // discovery and Selector cache as the full Video Segment UI.
 export {
     connectedVideoSource,
+    ensureLoaderPreviewSource,
     fetchCachedSource,
     fetchInfo,
     prepareInputTimeline,

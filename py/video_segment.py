@@ -89,6 +89,24 @@ def _preview_cache_store():
     return _PREVIEW_CACHE_STORE
 
 
+def _loader_preview_cache():
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_loader_preview_cache")
+    return module.get_loader_preview_cache() if module is not None else None
+
+
+def _loader_id_from_video(video: Any) -> str:
+    if video is None or not hasattr(video, "get_components"):
+        return ""
+    try:
+        components = video.get_components()
+        metadata = dict(getattr(video, "_cinestyle_runtime_metadata", None) or {})
+        metadata.update(dict(getattr(components, "metadata", None) or {}))
+        return str(metadata.get("loader_id") or "").strip()
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
 def _no_nested_tqdm(iterable: Any, *args: Any, **kwargs: Any) -> Any:
     return iterable
 
@@ -300,6 +318,33 @@ def _prompt_has_file_video_source(prompt: Any, node_id: Any) -> bool:
     return False
 
 
+def _prompt_loader_id(prompt: Any, node_id: Any) -> str:
+    """Find a CS Load Video upstream when only its IMAGE output is connected."""
+    node = _prompt_node(prompt, node_id)
+    if not isinstance(node, dict):
+        return ""
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    pending: list[Any] = [value for name, value in inputs.items() if "video" in str(name).lower() or "image" in str(name).lower()]
+    visited: set[str] = set()
+    while pending:
+        link = pending.pop(0)
+        if not isinstance(link, (list, tuple)) or len(link) < 2:
+            continue
+        upstream_id = str(link[0])
+        if upstream_id in visited:
+            continue
+        visited.add(upstream_id)
+        upstream = _prompt_node(prompt, upstream_id)
+        if not isinstance(upstream, dict):
+            continue
+        class_type = str(upstream.get("class_type") or "")
+        if class_type == "CS_Load_Video" or class_type.endswith(".CS_Load_Video") or class_type.endswith("::CS_Load_Video"):
+            return upstream_id
+        upstream_inputs = upstream.get("inputs") if isinstance(upstream.get("inputs"), dict) else {}
+        pending.extend(value for value in upstream_inputs.values() if isinstance(value, (list, tuple)) and len(value) >= 2)
+    return ""
+
+
 def _prompt_selector_fps(prompt: Any, node_id: Any) -> float | None:
     node = _prompt_node(prompt, node_id)
     if not node:
@@ -383,6 +428,11 @@ def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.T
         if str(payload.get("source_kind") or "").lower() == "image" or _looks_like_image_file(source):
             return _decode_image_frame(source, frame_index)
         return _decode_video_frame(source, frame_index)
+    if token.startswith("loader_preview:"):
+        cache = _loader_preview_cache()
+        if cache is None:
+            raise ValueError("The shared loader preview cache is unavailable.")
+        return cache.decode_frame(token, frame_index)
     entry = _selector_cache_for_token(token)
     if entry is None:
         raise ValueError("The cached Selector input is no longer available. Run the workflow once again.")
@@ -1501,22 +1551,33 @@ class CSVideoSegmentSeC(io.ComfyNode):
             raise ValueError("images must have shape [frames, height, width, 3 or 4].")
         images = images[..., :3].to("cpu", dtype=torch.float32).clamp_(0, 1)
         _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
-        _cache_selector_input(
-            cls.hidden.unique_id,
-            images,
-            _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
+        loader_origin = (
+            _loader_id_from_video(video_input)
+            or _loader_id_from_video(proxy_video)
+            or _prompt_loader_id(cls.hidden.prompt, cls.hidden.unique_id)
         )
+        if loader_origin:
+            _segment_info(node_name, f"using shared CS Load Video preview cache: loader={loader_origin}")
+        else:
+            _cache_selector_input(
+                cls.hidden.unique_id,
+                images,
+                _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
+            )
         if proxy_video is not None:
             try:
                 proxy_images = proxy_video.get_components().images
                 if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
-                    _cache_selector_input(
-                        cls.hidden.unique_id,
-                        proxy_images,
-                        _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
-                        proxy=True,
-                    )
-                    _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
+                    if loader_origin:
+                        _segment_info(node_name, "proxy preview uses the shared loader cache")
+                    else:
+                        _cache_selector_input(
+                            cls.hidden.unique_id,
+                            proxy_images,
+                            _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
+                            proxy=True,
+                        )
+                        _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
                 else:
                     _segment_info(node_name, "proxy_video ignored: no valid IMAGE frames")
             except Exception as exc:
@@ -1812,22 +1873,33 @@ class CSVideoSegmentSAM3(io.ComfyNode):
 
         images = images[..., :3].to(device="cpu", dtype=torch.float32).clamp_(0.0, 1.0)
         _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
-        _cache_selector_input(
-            cls.hidden.unique_id,
-            images,
-            _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
+        loader_origin = (
+            _loader_id_from_video(video_input)
+            or _loader_id_from_video(proxy_video)
+            or _prompt_loader_id(cls.hidden.prompt, cls.hidden.unique_id)
         )
+        if loader_origin:
+            _segment_info(node_name, f"using shared CS Load Video preview cache: loader={loader_origin}")
+        else:
+            _cache_selector_input(
+                cls.hidden.unique_id,
+                images,
+                _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
+            )
         if proxy_video is not None:
             try:
                 proxy_images = proxy_video.get_components().images
                 if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
-                    _cache_selector_input(
-                        cls.hidden.unique_id,
-                        proxy_images,
-                        _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
-                        proxy=True,
-                    )
-                    _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
+                    if loader_origin:
+                        _segment_info(node_name, "proxy preview uses the shared loader cache")
+                    else:
+                        _cache_selector_input(
+                            cls.hidden.unique_id,
+                            proxy_images,
+                            _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
+                            proxy=True,
+                        )
+                        _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
                 else:
                     _segment_info(node_name, "proxy_video ignored: no valid IMAGE frames")
             except Exception as exc:

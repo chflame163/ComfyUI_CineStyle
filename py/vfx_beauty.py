@@ -62,6 +62,53 @@ def _preview_cache_store():
     return _PREVIEW_CACHE_STORE
 
 
+def _loader_preview_cache():
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_loader_preview_cache")
+    return module.get_loader_preview_cache() if module is not None else None
+
+
+def _loader_id_from_video(video: Any) -> str:
+    if video is None or not hasattr(video, "get_components"):
+        return ""
+    try:
+        components = video.get_components()
+        metadata = dict(getattr(video, "_cinestyle_runtime_metadata", None) or {})
+        metadata.update(dict(getattr(components, "metadata", None) or {}))
+        return str(metadata.get("loader_id") or "").strip()
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def _loader_id_from_prompt(prompt: Any, node_id: Any) -> str:
+    """Find CS Load Video when VFX receives only the loader's IMAGE output."""
+    if not isinstance(prompt, dict):
+        return ""
+    node = prompt.get(str(node_id)) or prompt.get(node_id)
+    if not isinstance(node, dict):
+        return ""
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    pending: list[Any] = [value for name, value in inputs.items() if "video" in str(name).lower() or "image" in str(name).lower()]
+    visited: set[str] = set()
+    while pending:
+        link = pending.pop(0)
+        if not isinstance(link, (list, tuple)) or len(link) < 2:
+            continue
+        upstream_id = str(link[0])
+        if upstream_id in visited:
+            continue
+        visited.add(upstream_id)
+        upstream = prompt.get(upstream_id) or prompt.get(link[0])
+        if not isinstance(upstream, dict):
+            continue
+        class_type = str(upstream.get("class_type") or "")
+        if class_type == "CS_Load_Video" or class_type.endswith(".CS_Load_Video") or class_type.endswith("::CS_Load_Video"):
+            return upstream_id
+        upstream_inputs = upstream.get("inputs") if isinstance(upstream.get("inputs"), dict) else {}
+        pending.extend(value for value in upstream_inputs.values() if isinstance(value, (list, tuple)) and len(value) >= 2)
+    return ""
+
+
 def _console_info(node_id: Any, stage: str, detail: str = "") -> None:
     suffix = f" | {detail}" if detail else ""
     node_detail = f"node={node_id} | " if str(node_id or "").strip() else ""
@@ -989,6 +1036,7 @@ def _cache_vfx_input(
     key = str(node_id or "").strip()
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
+    loader_origin = _loader_id_from_video(proxy_video) or _loader_id_from_prompt(prompt, node_id)
     proxy_present = False
     try:
         fps = 24.0
@@ -1012,7 +1060,11 @@ def _cache_vfx_input(
                     if isinstance(value, (list, tuple)) and len(value) >= 2 and str(value[0]) not in visited:
                         visited.add(str(value[0]))
                         pending.append(prompt.get(str(value[0])) or prompt.get(value[0]))
-        _preview_cache_store().put_preview(key, image, fps, encode_video=True)
+        # CS Load Video owns the shared preview MP4. Keep a frame-only local
+        # entry for optional colour estimation, but avoid encoding it again.
+        _preview_cache_store().put_preview(key, image, fps, encode_video=not loader_origin)
+        if loader_origin:
+            _console_info(key, "shared loader preview", f"loader={loader_origin}")
     except Exception as exc:
         print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
     try:
@@ -1022,7 +1074,10 @@ def _cache_vfx_input(
                 proxy_fps = float(proxy_video.get_components().frame_rate)
             except Exception:
                 proxy_fps = 24.0
-            proxy_present = _preview_cache_store().put_preview(key, proxy_images, proxy_fps, proxy=True, encode_video=True) is not None
+            if loader_origin:
+                _console_info(key, "proxy preview uses shared loader cache", f"loader={loader_origin}")
+            else:
+                proxy_present = _preview_cache_store().put_preview(key, proxy_images, proxy_fps, proxy=True, encode_video=True) is not None
     except Exception as exc:
         print(f"[CineStyle] VFX Beauty proxy cache failed for node {key}: {exc}")
     cached_mask = None
@@ -1056,7 +1111,11 @@ def _preview_proxy_cache_entry(node_id: str) -> dict[str, Any] | None:
 def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str) -> int:
     """Map a proxy frame to the corresponding original mask frame."""
     try:
-        source_entry = _preview_cache_store().get_token(source_token)
+        source_entry = (
+            _loader_preview_cache().entry_for_token(source_token)
+            if source_token.startswith("loader_preview:") and _loader_preview_cache() is not None
+            else _preview_cache_store().get_token(source_token)
+        )
         original_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
         source_count = int((source_entry or {}).get("info", {}).get("frames") or 0)
         original_count = int((original_entry or {}).get("info", {}).get("frames") or 0)
@@ -1184,7 +1243,14 @@ async def _vfx_beauty_preview_route(request: web.Request) -> web.Response:
         if not node_id:
             raise ValueError("node_id is required.")
         frame_index = max(0, int(payload.get("frame", 0)))
-        frame = _preview_cache_store().decode_frame(payload, frame_index)
+        source_token = str(payload.get("source_token") or "")
+        if source_token.startswith("loader_preview:"):
+            cache = _loader_preview_cache()
+            if cache is None:
+                raise ValueError("The shared loader preview cache is unavailable.")
+            frame = cache.decode_frame(source_token, frame_index)
+        else:
+            frame = _preview_cache_store().decode_frame(payload, frame_index)
         height, width = int(frame.shape[1]), int(frame.shape[2])
         mask_index = _preview_mask_frame_index(node_id, frame_index, str(payload.get("source_token") or ""))
         mask = _preview_mask_for_node(node_id, mask_index, height, width)

@@ -1,7 +1,7 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { createCineStyleTextEditor } from "./cinestyle_text_editor.js";
-import { connectedVideoSource } from "./video_selector_multi.js";
+import { connectedVideoSource, ensureLoaderPreviewSource } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
@@ -116,11 +116,20 @@ function appendVideoTrimParams(params, trim) {
     if (Number.isFinite(Number(trim.outputHeight)) && Number(trim.outputHeight) > 0) params.set("height", String(Math.round(Number(trim.outputHeight))));
     if (Number.isFinite(Number(trim.multiple)) && Number(trim.multiple) > 0) params.set("multiple", String(Math.round(Number(trim.multiple))));
     if (trim.keepAspectRatio != null) params.set("keep_aspect_ratio", trim.keepAspectRatio ? "1" : "0");
+    if (trim.loaderId) params.set("loader_id", String(trim.loaderId));
+    if (trim.loaderSignature) params.set("loader_signature", String(trim.loaderSignature));
     return params;
 }
 async function fetchCachedProxy(node, filename = "", trim = null) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId) return null;
+    if (trim?.loaderId && filename) {
+        const shared = await ensureLoaderPreviewSource(trim);
+        if (shared?.token && shared?.url) {
+            trim.loaderSignature = shared.loaderSignature;
+            return { url: shared.url, info: shared.info || {}, label: shared.label || "CS Load Video preview cache", shared: true };
+        }
+    }
     const params = appendVideoTrimParams(new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) }), trim);
     const response = await api.fetchApi(`/cinestyle/video-subtitle-preview-info?${params}`);
     const result = await response.json();
@@ -586,6 +595,8 @@ async function openTimeline(node) {
                 start_frame: sourceTrim?.startFrame,
                 end_frame: sourceTrim?.endFrame,
                 loaded_fps: sourceTrim?.targetFps,
+                loader_id: sourceTrim?.loaderId,
+                loader_signature: sourceTrim?.loaderSignature,
                 cues,
                 style,
             }),

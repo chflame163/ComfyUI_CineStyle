@@ -70,6 +70,59 @@ function roundToMultiple(value, multiple) {
     return Math.max(safeMultiple, Math.floor(Number(value) / safeMultiple + 0.5) * safeMultiple);
 }
 
+function effectiveOutputDimensions(values, sourceInfo) {
+    const sourceWidth = Math.max(1, Math.round(Number(sourceInfo?.width) || 1));
+    const sourceHeight = Math.max(1, Math.round(Number(sourceInfo?.height) || 1));
+    const aspect = sourceWidth / sourceHeight;
+    const multiple = Math.max(1, Math.round(Number(values?.multiple) || 1));
+    let width = Number(values?.width) || 0;
+    let height = Number(values?.height) || 0;
+    if (width > 0) {
+        width = roundToMultiple(width, multiple);
+        height = roundToMultiple(width / aspect, multiple);
+    } else if (height > 0) {
+        height = roundToMultiple(height, multiple);
+        width = roundToMultiple(height * aspect, multiple);
+    } else {
+        // The Timeline initializes the empty-width case from the source
+        // height, so use the same branch when comparing against defaults.
+        height = roundToMultiple(sourceHeight, multiple);
+        width = roundToMultiple(height * aspect, multiple);
+    }
+    return { width, height };
+}
+
+function effectiveTimelineValues(values, sourceInfo) {
+    const lastFrame = Math.max(0, Math.round(Number(sourceInfo?.frames) || 1) - 1);
+    const start = clamp(Math.round(Number(values?.start) || 0), 0, lastFrame);
+    const rawEnd = Number(values?.end);
+    const end = !Number.isFinite(rawEnd) || rawEnd < 0
+        ? lastFrame
+        : clamp(Math.round(rawEnd), start, lastFrame);
+    const sourceFps = Math.max(0.001, Number(sourceInfo?.fps) || 24);
+    const fpsValue = Number(values?.fps);
+    const fps = Number.isFinite(fpsValue) && fpsValue > 0 ? fpsValue : sourceFps;
+    return {
+        start,
+        end,
+        fps,
+        dimensions: effectiveOutputDimensions(values, sourceInfo),
+        multiple: Math.max(1, Math.round(Number(values?.multiple) || 1)),
+    };
+}
+
+function timelineParametersChanged(previous, next, sourceInfo) {
+    if (!sourceInfo) return true;
+    const before = effectiveTimelineValues(previous, sourceInfo);
+    const after = effectiveTimelineValues(next, sourceInfo);
+    return before.start !== after.start
+        || before.end !== after.end
+        || before.multiple !== after.multiple
+        || before.dimensions.width !== after.dimensions.width
+        || before.dimensions.height !== after.dimensions.height
+        || Math.abs(before.fps - after.fps) > 1e-6;
+}
+
 function formatTime(seconds) {
     const safe = Math.max(0, Number(seconds) || 0);
     const minutes = Math.floor(safe / 60);
@@ -142,6 +195,29 @@ function videoUrl(filename) {
 function proxyVideoUrl(filename, proxyThreshold, proxySize) {
     const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize), t: String(Date.now()) });
     return api.apiURL(`/cinestyle/video-proxy?${params.toString()}`);
+}
+
+function requestLoaderPreviewCache(node, filename, values) {
+    const payload = {
+        loader_id: String(node?.id ?? ""),
+        video: String(filename || ""),
+        start_frame: Number(values?.start ?? 0),
+        end_frame: Number(values?.end ?? -1),
+        width: Number(values?.width ?? 0),
+        height: Number(values?.height ?? 0),
+        fps: Number(values?.fps ?? 0),
+        multiple: Number(values?.multiple ?? 32),
+        start_build: values?.startBuild !== false,
+    };
+    return api.fetchApi("/cinestyle/loader-preview-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    }).then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.status === "failed") throw new Error(result.error || "Unable to prepare loader preview cache");
+        return result;
+    });
 }
 
 function proxyProgressUrl(filename, proxyThreshold, proxySize) {
@@ -248,6 +324,8 @@ function openTimeline(node) {
     fileLabel.textContent = filename;
     video.muted = false;
     video.volume = 1;
+    keepAspectInput.checked = true;
+    keepAspectInput.disabled = true;
     let proxyProgressTimer = null;
     const setProxyWait = (visible, progress = 0) => {
         proxyWait.style.display = visible ? "flex" : "none";
@@ -398,22 +476,42 @@ function openTimeline(node) {
     dialog.querySelector(".cs-timeline-close").addEventListener("click", close);
     dialog.querySelector(".cs-cancel").addEventListener("click", close);
     dialog.querySelector(".cs-apply").addEventListener("click", () => {
-        setWidgetValue(node, "start_frame", start);
-        setWidgetValue(node, "end_frame", end);
-        setWidgetValue(node, "keep_aspect_ratio", keepAspectInput.checked);
-        setWidgetValue(node, "multiple", activeMultiple());
-        setWidgetValue(node, "width", Math.max(1, Number(widthInput.value)));
-        setWidgetValue(node, "height", Math.max(1, Number(heightInput.value)));
-        setWidgetValue(node, "fps", Math.max(0.01, Number(fpsInput.value)));
-        node.graph?.setDirtyCanvas(true, true);
+        const nextValues = {
+            start: Math.max(0, Math.round(Number(start) || 0)),
+            end: Number.isFinite(Number(end)) ? Math.round(Number(end)) : -1,
+            multiple: activeMultiple(),
+            width: Math.max(1, Math.round(Number(widthInput.value) || 1)),
+            height: Math.max(1, Math.round(Number(heightInput.value) || 1)),
+            fps: Math.max(0.01, Number(fpsInput.value) || 0.01),
+        };
+        const cacheInputChanged = timelineParametersChanged(currentValues, nextValues, info);
+        const aspectSettingChanged = currentValues.keepAspect !== true;
+        // Preserve default sentinels on a true no-op. This avoids turning
+        // end=-1/width=0/fps=0 into explicit values and dirtying the node.
+        const valuesToApply = cacheInputChanged ? nextValues : currentValues;
+        if (cacheInputChanged || aspectSettingChanged) {
+            setWidgetValue(node, "start_frame", valuesToApply.start);
+            setWidgetValue(node, "end_frame", valuesToApply.end);
+            setWidgetValue(node, "keep_aspect_ratio", true);
+            setWidgetValue(node, "multiple", valuesToApply.multiple);
+            setWidgetValue(node, "width", valuesToApply.width);
+            setWidgetValue(node, "height", valuesToApply.height);
+            setWidgetValue(node, "fps", valuesToApply.fps);
+            node.graph?.setDirtyCanvas(true, true);
+        }
+        if (cacheInputChanged) {
+            void requestLoaderPreviewCache(node, filename, nextValues).catch(() => {});
+        }
         close();
     });
     dialog.addEventListener("cancel", close);
 
     fetchInfo(filename, proxyThreshold, proxySize).then((result) => {
+        // This editor must always use the complete source timeline. A shared
+        // loader cache represents the currently selected trim and would make
+        // frames outside that trim impossible to select on a later edit.
         info = result;
         originalInfo.textContent = formatOriginalInfo(result);
-        originalInfo.title = originalInfo.textContent;
         if (result.proxy_required) {
             originalInfo.textContent += ` · 正在生成 ${result.proxy_width}×${result.proxy_height} 预览代理`;
             setProxyWait(true);
@@ -423,13 +521,16 @@ function openTimeline(node) {
             setProxyWait(false);
             video.src = videoUrl(filename);
         }
+        originalInfo.title = originalInfo.textContent;
         video.load();
-        end = end < 0 ? result.frames - 1 : end;
-        keepAspectInput.checked = currentValues.keepAspect;
+        const sourceLastFrame = Math.max(0, Number(info.frames || 1) - 1);
+        start = clamp(start, 0, sourceLastFrame);
+        end = end < 0 ? sourceLastFrame : clamp(end, start, sourceLastFrame);
+        keepAspectInput.checked = true;
         multipleInput.value = currentValues.multiple > 0 ? currentValues.multiple : 32;
-        widthInput.value = currentValues.width > 0 ? currentValues.width : roundToMultiple(result.width, activeMultiple());
-        heightInput.value = currentValues.height > 0 ? currentValues.height : roundToMultiple(result.height, activeMultiple());
-        fpsInput.value = currentValues.fps || result.fps;
+        widthInput.value = currentValues.width > 0 ? currentValues.width : roundToMultiple(info.width, activeMultiple());
+        heightInput.value = currentValues.height > 0 ? currentValues.height : roundToMultiple(info.height, activeMultiple());
+        fpsInput.value = currentValues.fps || info.fps;
         if (keepAspectInput.checked) syncAspect(currentValues.width > 0 ? "width" : "height");
         timelineControls?.render();
     }).catch((error) => {

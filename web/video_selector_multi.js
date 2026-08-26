@@ -64,6 +64,7 @@ function sourceFromOrigin(origin, visited = new Set()) {
             filename,
             kind: "video",
             isCSLoad: isCSLoadVideo(origin),
+            loaderId: isCSLoadVideo(origin) ? String(origin.id ?? "") : "",
             startFrame: Math.max(0, Number(widget(origin, "start_frame")?.value ?? 0)),
             endFrame: Number(widget(origin, "end_frame")?.value ?? -1),
             targetFps: Number(widget(origin, "fps")?.value ?? 0),
@@ -89,6 +90,62 @@ function connectedVideoSource(node, inputNames = ["images", "video_input"]) {
     const origins = inputNames.map((name) => connectedOrigin(node, name)).filter(Boolean);
     for (const origin of origins) { const source = sourceFromOrigin(origin); if (source) return source; }
     return null;
+}
+
+function loaderPreviewPayload(source) {
+    return {
+        loader_id: String(source?.loaderId || ""),
+        video: String(source?.filename || ""),
+        start_frame: Number(source?.startFrame ?? 0),
+        end_frame: Number(source?.endFrame ?? -1),
+        width: Number(source?.outputWidth ?? 0),
+        height: Number(source?.outputHeight ?? 0),
+        fps: Number(source?.targetFps ?? 0),
+        multiple: Number(source?.multiple ?? 32),
+    };
+}
+
+function loaderPreviewSource(result, source) {
+    const info = result?.info || {};
+    return {
+        ...source,
+        filename: "",
+        kind: "video",
+        token: String(result?.token || ""),
+        url: api.apiURL(String(result?.video_url || "")),
+        info,
+        label: "Shared preview from CS Load Video",
+        sharedLoaderCache: true,
+        loaderSignature: String(result?.signature || ""),
+        startFrame: 0,
+        endFrame: Math.max(0, Number(info.frames || info.loaded_frame_count || 1) - 1),
+        targetFps: Number(info.fps || info.loaded_fps || 24),
+    };
+}
+
+async function ensureLoaderPreviewSource(source, { wait = true, timeoutMs = 300000 } = {}) {
+    if (!source?.isCSLoad || !source.loaderId || !source.filename) return source;
+    const payload = loaderPreviewPayload(source);
+    const response = await api.fetchApi("/cinestyle/loader-preview-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+    let result = await response.json().catch(() => ({}));
+    if (!response.ok || result.status === "failed") throw new Error(result.error || "Unable to prepare CS Load Video preview cache");
+    if (result.status === "ready") return loaderPreviewSource(result, source);
+    if (!wait) return source;
+    const started = Date.now();
+    const signature = String(result.signature || "");
+    while (Date.now() - started < timeoutMs) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        const params = new URLSearchParams({ loader_id: String(source.loaderId), signature });
+        const progressResponse = await api.fetchApi(`/cinestyle/loader-preview-cache-progress?${params}`);
+        result = await progressResponse.json().catch(() => ({}));
+        if (result.status === "ready") return loaderPreviewSource(result, source);
+        if (result.status === "failed") throw new Error(result.error || "CS Load Video preview cache failed");
+    }
+    throw new Error("Timed out while preparing CS Load Video preview cache.");
 }
 function prepareInputTimeline(source, sourceInfo) {
     const sourceFrames = Math.max(1, Number(sourceInfo.frames || 1)); const sourceFps = Math.max(0.001, Number(sourceInfo.fps || 24));
@@ -125,6 +182,12 @@ async function openSelector(node, config) {
     if (!source) source = connectedVideoSource(node, ["proxy_video"]);
     if (!source) source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
     if (!source) { app.canvas?.prompt?.("Run the workflow once to cache the connected video input before opening the selector", ""); return; }
+    const upstreamSource = connectedVideoSource(node, ["proxy_video", ...(config.videoInputs || ["images", "video_input"])]);
+    if (upstreamSource?.loaderId) {
+        try { source = await ensureLoaderPreviewSource(upstreamSource); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
+    } else if (source.loaderId && !source.token) {
+        try { source = await ensureLoaderPreviewSource(source); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
+    }
     const filename = source.filename; const sourceLabel = source.label || filename; addStyles();
     const dialog = document.createElement("dialog"); dialog.className = "cs-vseg-dialog";
     dialog.innerHTML = `<div class="cs-vseg-shell"><div class="cs-vseg-head"><div><h2 class="cs-vseg-title">${config.title || "Video Selector"}</h2><div class="cs-vseg-muted cs-vseg-file"></div></div><button class="cs-vseg-button cs-vseg-close" type="button">&times;</button></div><div class="cs-vseg-stage"><video controls muted playsinline preload="metadata"></video><img class="cs-vseg-image-source" alt="Input image"><img class="cs-vseg-mask-preview" alt="Current frame segmentation preview"><canvas></canvas></div><div class="cs-vseg-controls"><div class="cs-vseg-step-buttons"><button class="cs-vseg-button cs-vseg-prev" type="button">|&lt;</button><button class="cs-vseg-button cs-vseg-next" type="button">&gt;|</button></div><div class="cs-vseg-timeline"><span class="cs-vseg-anchor-pointer" title="Anchor frame"></span><input class="cs-vseg-slider" type="range" min="0" max="0" step="1" value="0"></div><input class="cs-vseg-frame-input" type="number" min="0" step="1" value="0"><span class="cs-vseg-frame-count cs-vseg-muted">0 / 0</span></div><div class="cs-vseg-tabs"><button class="cs-vseg-button cs-vseg-tab active" data-tab="mask" type="button">Paint Mask</button><button class="cs-vseg-button cs-vseg-tab" data-tab="bbox" type="button">Edit BBox</button><button class="cs-vseg-button cs-vseg-tab" data-tab="points" type="button">Edit Point</button><button class="cs-vseg-button cs-vseg-tab" data-tab="semantic" type="button">Semantic</button></div><div class="cs-vseg-card cs-vseg-card-mask active"><button class="cs-vseg-button cs-vseg-brush-toggle brush-active" type="button">Brush</button><label>Brush Size <input class="cs-vseg-brush-size" type="range" min="2" max="100" value="32"><span class="cs-vseg-brush-size-value">32</span></label><button class="cs-vseg-button cs-vseg-clear-mask" type="button">Clear Mask</button></div><div class="cs-vseg-card cs-vseg-card-bbox"><button class="cs-vseg-button cs-vseg-bbox-add" type="button">Add BBox</button><button class="cs-vseg-button cs-vseg-clear-all-bbox" type="button">Clear All BBox</button></div><div class="cs-vseg-card cs-vseg-card-points"><button class="cs-vseg-button cs-vseg-clear-all-points" type="button">Clear All Point</button></div><div class="cs-vseg-card cs-vseg-card-semantic"><label for="cs-vseg-semantic-text">Text prompt</label><input id="cs-vseg-semantic-text" class="cs-vseg-semantic-input" type="text" maxlength="240" placeholder="e.g. a yellow car"><button class="cs-vseg-button cs-vseg-clear-semantic" type="button">Clear Semantic</button></div><div class="cs-vseg-row cs-vseg-tool-group"><label>Object <select class="cs-vseg-object-select"></select></label><button class="cs-vseg-button cs-vseg-add-object" type="button">Add Object</button><button class="cs-vseg-button cs-vseg-delete-object" type="button">Delete Object</button><button class="cs-vseg-button cs-vseg-undo" type="button">Undo</button><button class="cs-vseg-button cs-vseg-redo" type="button">Redo</button><button class="cs-vseg-button cs-vseg-clear cs-vseg-clear-all-prompt" type="button">Clear All Prompt</button></div><div class="cs-vseg-fields"><div class="cs-vseg-prompt-note"></div></div><div class="cs-vseg-actions"><span class="cs-vseg-preview-status"></span><button class="cs-vseg-button cs-vseg-preview-button" type="button">Preview Current Frame</button><button class="cs-vseg-button cs-vseg-cancel" type="button">Cancel</button><button class="cs-vseg-button cs-vseg-apply" type="button">Apply to Node</button></div></div>`;
@@ -258,6 +321,7 @@ export function registerVideoSelector(config) {
 // discovery and Selector cache as the full Video Segment UI.
 export {
     connectedVideoSource,
+    ensureLoaderPreviewSource,
     fetchCachedSource,
     fetchInfo,
     prepareInputTimeline,

@@ -502,6 +502,10 @@ class CSLoadVideo(io.ComfyNode):
         proxy_size: float = 0.8,
     ) -> io.NodeOutput:
         _LOGGER.info("[CS Load Video] start: %s", video)
+        # Loader output is always constrained to the source aspect ratio.  Keep
+        # the legacy widget for workflow compatibility, but never allow a
+        # stretched canvas to reach downstream nodes.
+        keep_aspect_ratio = True
         if not folder_paths.exists_annotated_filepath(video):
             raise ValueError(f"Invalid video file: {video}")
 
@@ -560,7 +564,16 @@ class CSLoadVideo(io.ComfyNode):
         source_height = int(selected.shape[1])
         aspect_ratio = source_width / source_height
         if keep_aspect_ratio:
-            if int(width) > 0:
+            loader_cache = sys.modules.get(f"{__package__}._py_loader_preview_cache")
+            if loader_cache is not None and hasattr(loader_cache, "aspect_locked_dimensions"):
+                output_width, output_height = loader_cache.aspect_locked_dimensions(
+                    source_width,
+                    source_height,
+                    width,
+                    height,
+                    multiple,
+                )
+            elif int(width) > 0:
                 output_width = _round_to_multiple(width, multiple)
                 output_height = _round_to_multiple(output_width / aspect_ratio, multiple)
             elif int(height) > 0:
@@ -585,6 +598,7 @@ class CSLoadVideo(io.ComfyNode):
         normalized_proxy_size = _normalize_proxy_size(proxy_size)
         proxy_threshold_pixels = normalized_proxy_threshold * 1_000_000
         proxy_required = output_width * output_height > proxy_threshold_pixels
+        loader_id = str(getattr(getattr(cls, "hidden", None), "unique_id", "") or "").strip()
         _LOGGER.info(
             "[CS Load Video] stage 6/7: proxy decision output=%dx%d, threshold=%.1f MPixels -> %s",
             output_width,
@@ -611,6 +625,7 @@ class CSLoadVideo(io.ComfyNode):
             "proxy_threshold": normalized_proxy_threshold,
             "proxy_size": normalized_proxy_size,
             "proxy_video": proxy_required,
+            "loader_id": loader_id,
         }
         video_images = selected[..., :3] if selected.shape[-1] == 4 else selected
         output_frame_rate = Fraction(target_fps).limit_denominator(1000)
@@ -856,6 +871,11 @@ class CineStyleVideoExtension(ComfyExtension):
             server_instance.routes.get("/cinestyle/video-source")(_video_source_route)
             server_instance.routes.get("/cinestyle/video-proxy")(_video_proxy_route)
             server_instance.routes.get("/cinestyle/video-proxy-progress")(_video_proxy_progress_route)
+            loader_cache = sys.modules.get(f"{__package__}._py_loader_preview_cache")
+            if loader_cache is not None:
+                server_instance.routes.post("/cinestyle/loader-preview-cache")(loader_cache.loader_preview_ensure_route)
+                server_instance.routes.get("/cinestyle/loader-preview-cache-progress")(loader_cache.loader_preview_progress_route)
+                server_instance.routes.get("/cinestyle/loader-preview-cache-video")(loader_cache.loader_preview_video_route)
             _ROUTE_REGISTERED = True
 
     @override

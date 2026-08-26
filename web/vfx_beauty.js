@@ -2,6 +2,7 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import {
     connectedVideoSource,
+    ensureLoaderPreviewSource,
     fetchInfo,
     prepareInputTimeline,
     sourceFrameForLocal,
@@ -129,10 +130,13 @@ async function openPreview(node) {
     let source = null;
     let cachedSource = null;
     try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
-    source = cachedSource;
-    if (!source) source = connectedVideoSource(node, ["proxy_video"]);
-    if (!source) source = connectedVideoSource(node, ["image", "images", "video_input"]);
+    const upstreamSource = connectedVideoSource(node, ["proxy_video"]) || connectedVideoSource(node, ["image", "images", "video_input"]);
+    source = upstreamSource?.loaderId ? upstreamSource : cachedSource;
+    if (!source) source = upstreamSource;
     if (!source) { app.canvas?.prompt?.("Run this VFX node once to cache its own connected image/video input.", ""); return; }
+    if (source.loaderId && !source.token) {
+        try { source = await ensureLoaderPreviewSource(source); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
+    }
     if (!source.token && !source.filename) { app.canvas?.prompt?.("No previewable input source was found.", ""); return; }
     let info = source.info;
     if (!info) {

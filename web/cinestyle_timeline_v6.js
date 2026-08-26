@@ -8,7 +8,6 @@ const STYLE_ID = "cinestyle-timeline-style";
 const DEFAULT_TIMELINE_VALUES = Object.freeze({
     start_frame: 0,
     end_frame: -1,
-    keep_aspect_ratio: true,
     multiple: 32,
     width: 0,
     height: 0,
@@ -152,12 +151,9 @@ function addStyles() {
       .cs-timeline-video { width: 100%; height: 100%; display: block; background: #08090b; object-fit: contain; }
       .cs-file-name { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cs-original-info { max-width: 100%; color: #aeb5c2; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }
-      .cs-timeline-fields { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+      .cs-timeline-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
       .cs-timeline-field { display: grid; gap: 5px; color: #9da5b4; }
       .cs-timeline-field input { width: 100%; box-sizing: border-box; border: 1px solid #424956; border-radius: 5px; padding: 7px 8px; background: #20232a; color: #f2f4f7; }
-      .cs-timeline-check { align-content: start; }
-      .cs-timeline-check span { display: flex; align-items: center; gap: 6px; min-height: 32px; color: #e6e9ef; }
-      .cs-timeline-check input { width: auto; }
       .cs-timeline-foot { justify-content: flex-end; }
       .cs-timeline-foot .cs-apply { background: #317ec4; border-color: #4b9de8; }
       @media (max-width: 640px) { .cs-timeline-fields { grid-template-columns: 1fr; } .cs-timeline-shell { padding: 12px; } }
@@ -216,7 +212,7 @@ function openTimeline(node) {
         <div class="cs-video-stage"><video class="cs-timeline-video" controls playsinline preload="auto"></video></div>
         <div class="cs-timeline-readout"><span class="cs-current">00:00.00</span><span class="cs-range"></span><span class="cs-duration">00:00.00</span></div>
         ${timelineControlsMarkup()}
-        <div class="cs-timeline-fields"><label class="cs-timeline-field cs-timeline-check"><span><input class="cs-keep-aspect" type="checkbox"> keep aspect ratio</span></label><label class="cs-timeline-field">multiple<input class="cs-multiple" type="number" min="1" step="1"></label><label class="cs-timeline-field">Width<input class="cs-width" type="number" min="1" step="1"></label><label class="cs-timeline-field">Height<input class="cs-height" type="number" min="1" step="1"></label><label class="cs-timeline-field">FPS<input class="cs-fps" type="number" min="0.01" max="240" step="0.01"></label></div>
+        <div class="cs-timeline-fields"><label class="cs-timeline-field">multiple<input class="cs-multiple" type="number" min="1" step="1"></label><label class="cs-timeline-field">Width<input class="cs-width" type="number" min="1" step="1"></label><label class="cs-timeline-field">Height<input class="cs-height" type="number" min="1" step="1"></label><label class="cs-timeline-field">FPS<input class="cs-fps" type="number" min="0.01" max="240" step="0.01"></label></div>
         <div class="cs-timeline-foot"><button class="cs-cancel" type="button">Cancel</button><button class="cs-apply" type="button">Apply</button></div>
       </div>`;
     document.body.append(dialog);
@@ -236,7 +232,6 @@ function openTimeline(node) {
     const pointer = dialog.querySelector(".cs-timeline-pointer");
     const inFrameButton = dialog.querySelector(".cs-in-frame");
     const outFrameButton = dialog.querySelector(".cs-out-frame");
-    const keepAspectInput = dialog.querySelector(".cs-keep-aspect");
     const multipleInput = dialog.querySelector(".cs-multiple");
     const widthInput = dialog.querySelector(".cs-width");
     const heightInput = dialog.querySelector(".cs-height");
@@ -247,7 +242,6 @@ function openTimeline(node) {
         width: Number(widget(node, "width")?.value ?? 0),
         height: Number(widget(node, "height")?.value ?? 0),
         fps: Number(widget(node, "fps")?.value ?? 0),
-        keepAspect: Boolean(widget(node, "keep_aspect_ratio")?.value ?? true),
         multiple: Number(widget(node, "multiple")?.value ?? 32),
     };
     let info = null;
@@ -290,8 +284,6 @@ function openTimeline(node) {
     fileLabel.textContent = filename;
     video.muted = false;
     video.volume = 1;
-    keepAspectInput.checked = true;
-    keepAspectInput.disabled = true;
     timelineControls = createTimelineRangeController({
         root: dialog,
         video,
@@ -306,7 +298,7 @@ function openTimeline(node) {
     }
 
     function syncAspect(changedField, finalize = false) {
-        if (!info || !keepAspectInput.checked || !info.width || !info.height) return;
+        if (!info || !info.width || !info.height) return;
         const multiple = activeMultiple();
         const aspect = info.width / info.height;
         if (changedField === "height") {
@@ -351,8 +343,6 @@ function openTimeline(node) {
     });
     multipleInput.addEventListener("change", () => syncAspect("width", true));
     multipleInput.addEventListener("blur", () => syncAspect("width", true));
-    keepAspectInput.addEventListener("change", () => { if (keepAspectInput.checked) syncAspect("width", true); });
-
     function seek(frame) {
         if (info?.fps) video.currentTime = frame / info.fps;
     }
@@ -415,14 +405,12 @@ function openTimeline(node) {
             fps: Math.max(0.01, Number(fpsInput.value) || 0.01),
         };
         const cacheInputChanged = timelineParametersChanged(currentValues, nextValues, info);
-        const aspectSettingChanged = currentValues.keepAspect !== true;
         // Preserve default sentinels on a true no-op. This avoids turning
         // end=-1/width=0/fps=0 into explicit values and dirtying the node.
         const valuesToApply = cacheInputChanged ? nextValues : currentValues;
-        if (cacheInputChanged || aspectSettingChanged) {
+        if (cacheInputChanged) {
             setWidgetValue(node, "start_frame", valuesToApply.start);
             setWidgetValue(node, "end_frame", valuesToApply.end);
-            setWidgetValue(node, "keep_aspect_ratio", true);
             setWidgetValue(node, "multiple", valuesToApply.multiple);
             setWidgetValue(node, "width", valuesToApply.width);
             setWidgetValue(node, "height", valuesToApply.height);
@@ -448,12 +436,11 @@ function openTimeline(node) {
         const sourceLastFrame = Math.max(0, Number(info.frames || 1) - 1);
         start = clamp(start, 0, sourceLastFrame);
         end = end < 0 ? sourceLastFrame : clamp(end, start, sourceLastFrame);
-        keepAspectInput.checked = true;
         multipleInput.value = currentValues.multiple > 0 ? currentValues.multiple : 32;
         widthInput.value = currentValues.width > 0 ? currentValues.width : roundToMultiple(info.width, activeMultiple());
         heightInput.value = currentValues.height > 0 ? currentValues.height : roundToMultiple(info.height, activeMultiple());
         fpsInput.value = currentValues.fps || info.fps;
-        if (keepAspectInput.checked) syncAspect(currentValues.width > 0 ? "width" : "height");
+        syncAspect(currentValues.width > 0 ? "width" : "height");
         timelineControls?.render();
     }).catch((error) => {
         fileLabel.textContent = `${filename} - ${error.message}`;

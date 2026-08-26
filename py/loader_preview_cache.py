@@ -27,7 +27,10 @@ import torch
 import folder_paths
 
 
-_CACHE_VERSION = 1
+# Bumped when the encoded media contract changes. Version 2 invalidates
+# preview MP4s produced before audio extraction was compatible with all
+# supported PyAV releases.
+_CACHE_VERSION = 2
 _MAX_CACHE_PIXELS = 1_000_000
 _MIN_BITRATE = 3_000_000
 _AUDIO_RATE = 16_000
@@ -268,22 +271,33 @@ def _audio_preview(path: str, start_seconds: float, duration: float) -> np.ndarr
             stream = container.streams.audio[0]
             resampler = av.audio.resampler.AudioResampler(format="fltp", layout="mono", rate=_AUDIO_RATE)
             chunks: list[np.ndarray] = []
+
+            def audio_array(frame: Any) -> np.ndarray:
+                # PyAV versions bundled with ComfyUI differ on whether
+                # AudioFrame.to_ndarray accepts a format keyword. The
+                # resampler already guarantees mono float-planar output, so
+                # the no-argument form is the portable fallback.
+                try:
+                    value = frame.to_ndarray(format="fltp")
+                except TypeError:
+                    value = frame.to_ndarray()
+                value = np.asarray(value, dtype=np.float32)
+                if value.ndim == 1:
+                    value = value[None, :]
+                if value.ndim != 2 or value.shape[1] <= 0:
+                    return np.empty((1, 0), dtype=np.float32)
+                return np.ascontiguousarray(value[:1])
+
             for frame in container.decode(stream):
                 for converted in resampler.resample(frame):
-                    array = converted.to_ndarray(format="fltp")
-                    array = np.asarray(array, dtype=np.float32)
-                    if array.ndim == 1:
-                        array = array[None, :]
-                    if array.ndim != 2 or array.shape[1] <= 0:
-                        continue
-                    chunks.append(array[:1])
+                    array = audio_array(converted)
+                    if array.shape[1] > 0:
+                        chunks.append(array)
             tail = resampler.resample(None)
             for converted in tail:
-                array = np.asarray(converted.to_ndarray(format="fltp"), dtype=np.float32)
-                if array.ndim == 1:
-                    array = array[None, :]
-                if array.ndim == 2 and array.shape[1] > 0:
-                    chunks.append(array[:1])
+                array = audio_array(converted)
+                if array.shape[1] > 0:
+                    chunks.append(array)
             if not chunks:
                 return None
             values = np.concatenate(chunks, axis=1)

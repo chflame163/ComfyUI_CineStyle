@@ -1048,25 +1048,12 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _stale_preview_entry(node_id: str) -> dict[str, Any] | None:
-    """Keep the previous frame cache visible while a replacement is pending."""
-    store = _preview_cache_store()
-    for entry in (store.get_preview_variant(node_id, proxy=False),):
-        if _preview_entry_frames_readable(entry, allow_stale=True):
-            info = entry.setdefault("info", {})
-            info["stale"] = True
-            return entry
-    return None
-
-
 def _preview_entry_for_request(
     node_id: str,
     video_filename: str = "",
     trim_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     entry = _preview_cache_entry(node_id)
-    if entry is None:
-        entry = _stale_preview_entry(node_id)
     if entry is None:
         return entry
     info = dict(entry.get("info") or {})
@@ -1104,8 +1091,6 @@ def _preview_entry_for_request(
                     return None
             except (TypeError, ValueError):
                 return None
-    if bool(info.get("stale")):
-        return entry
     descriptor = _load_runtime_descriptor(node_id)
     if descriptor and not _preview_entry_matches_runtime(entry, descriptor, video_filename):
         return None
@@ -1171,28 +1156,22 @@ def _round_dimension(value: float, multiple: int) -> int:
 
 def _infer_loaded_dimensions(source_width: int, source_height: int, metadata: dict[str, Any]) -> tuple[int, int] | None:
     """Reproduce CS Load Video's dimension rounding for a lazy cache request."""
-    if not any(name in metadata for name in ("output_width", "output_height", "multiple", "keep_aspect_ratio")):
+    if not any(name in metadata for name in ("output_width", "output_height", "multiple")):
         return None
     try:
         width = int(float(metadata.get("output_width") or metadata.get("width") or 0))
         height = int(float(metadata.get("output_height") or metadata.get("height") or 0))
         multiple = max(1, int(float(metadata.get("multiple") or 1)))
-        keep_aspect = bool(metadata.get("keep_aspect_ratio", True))
     except (TypeError, ValueError, OverflowError):
         return None
     if source_width <= 0 or source_height <= 0:
         return None
     aspect = float(source_width) / float(source_height)
-    if keep_aspect:
-        if width > 0:
-            return _round_dimension(width, multiple), _round_dimension(width / aspect, multiple)
-        if height > 0:
-            return _round_dimension(height * aspect, multiple), _round_dimension(height, multiple)
-        return _round_dimension(source_width, multiple), _round_dimension(source_width / aspect, multiple)
-    return (
-        _round_dimension(source_width, multiple) if width <= 0 else width,
-        _round_dimension(source_height, multiple) if height <= 0 else height,
-    )
+    if width > 0:
+        return _round_dimension(width, multiple), _round_dimension(width / aspect, multiple)
+    if height > 0:
+        return _round_dimension(height * aspect, multiple), _round_dimension(height, multiple)
+    return _round_dimension(source_width, multiple), _round_dimension(source_width / aspect, multiple)
 
 
 def _lazy_cache_trimmed_preview(
@@ -1536,9 +1515,11 @@ class CSVideoSubtitle(io.ComfyNode):
                 "stage 2/6: %s",
                 f"using shared CS Load Video preview cache (loader={loader_origin})"
                 if loader_origin
-                else f"preparing main preview cache{'' if timeline_open else ' frames; MP4 encoding deferred'}",
+                else "preparing main preview cache"
+                if timeline_open
+                else "preview cache deferred (Timeline is closed)",
             )
-            if not loader_origin:
+            if not loader_origin and timeline_open:
                 _cache_main_video(
                     video,
                     node_id,
@@ -1746,9 +1727,6 @@ def _trim_metadata_from_values(values) -> dict[str, Any]:
                 metadata[target_name] = numeric
         except (TypeError, ValueError, OverflowError):
             continue
-    keep_aspect = values.get("keep_aspect_ratio")
-    if keep_aspect is not None and str(keep_aspect).strip() != "":
-        metadata["keep_aspect_ratio"] = str(keep_aspect).strip().lower() in {"1", "true", "yes", "on"}
     return metadata
 
 

@@ -115,7 +115,6 @@ function appendVideoTrimParams(params, trim) {
     if (Number.isFinite(Number(trim.outputWidth)) && Number(trim.outputWidth) > 0) params.set("width", String(Math.round(Number(trim.outputWidth))));
     if (Number.isFinite(Number(trim.outputHeight)) && Number(trim.outputHeight) > 0) params.set("height", String(Math.round(Number(trim.outputHeight))));
     if (Number.isFinite(Number(trim.multiple)) && Number(trim.multiple) > 0) params.set("multiple", String(Math.round(Number(trim.multiple))));
-    if (trim.keepAspectRatio != null) params.set("keep_aspect_ratio", trim.keepAspectRatio ? "1" : "0");
     if (trim.loaderId) params.set("loader_id", String(trim.loaderId));
     if (trim.loaderSignature) params.set("loader_signature", String(trim.loaderSignature));
     return params;

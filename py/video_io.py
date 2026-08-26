@@ -148,7 +148,8 @@ class CSLoadVideo(io.ComfyNode):
             essentials_category="Video Tools",
             description=(
                 "Loads an uploaded video as a ComfyUI IMAGE batch. "
-                "Use Edit Timeline to choose the frame range, output size, and FPS."
+                "Use Edit Timeline to choose the frame range, output size, and FPS; "
+                "the source aspect ratio is preserved."
             ),
             inputs=[
                 io.Combo.Input(
@@ -156,12 +157,6 @@ class CSLoadVideo(io.ComfyNode):
                     options=_video_files(),
                     upload=io.UploadType.video,
                     tooltip="Video file in the ComfyUI input directory.",
-                ),
-                io.Boolean.Input(
-                    "keep_aspect_ratio",
-                    default=True,
-                    advanced=True,
-                    tooltip="Keep the source aspect ratio when output dimensions are edited.",
                 ),
                 io.Int.Input(
                     "multiple",
@@ -231,7 +226,6 @@ class CSLoadVideo(io.ComfyNode):
     def execute(
         cls,
         video: str,
-        keep_aspect_ratio: bool,
         multiple: int,
         start_frame: int,
         end_frame: int,
@@ -240,10 +234,6 @@ class CSLoadVideo(io.ComfyNode):
         fps: float,
     ) -> io.NodeOutput:
         _LOGGER.info("[CS Load Video] start: %s", video)
-        # Loader output is always constrained to the source aspect ratio.  Keep
-        # the legacy widget for workflow compatibility, but never allow a
-        # stretched canvas to reach downstream nodes.
-        keep_aspect_ratio = True
         if not folder_paths.exists_annotated_filepath(video):
             raise ValueError(f"Invalid video file: {video}")
 
@@ -301,28 +291,24 @@ class CSLoadVideo(io.ComfyNode):
         source_width = int(selected.shape[2])
         source_height = int(selected.shape[1])
         aspect_ratio = source_width / source_height
-        if keep_aspect_ratio:
-            loader_cache = sys.modules.get(f"{__package__}._py_loader_preview_cache")
-            if loader_cache is not None and hasattr(loader_cache, "aspect_locked_dimensions"):
-                output_width, output_height = loader_cache.aspect_locked_dimensions(
-                    source_width,
-                    source_height,
-                    width,
-                    height,
-                    multiple,
-                )
-            elif int(width) > 0:
-                output_width = _round_to_multiple(width, multiple)
-                output_height = _round_to_multiple(output_width / aspect_ratio, multiple)
-            elif int(height) > 0:
-                output_height = _round_to_multiple(height, multiple)
-                output_width = _round_to_multiple(output_height * aspect_ratio, multiple)
-            else:
-                output_width = _round_to_multiple(source_width, multiple)
-                output_height = _round_to_multiple(output_width / aspect_ratio, multiple)
+        loader_cache = sys.modules.get(f"{__package__}._py_loader_preview_cache")
+        if loader_cache is not None and hasattr(loader_cache, "aspect_locked_dimensions"):
+            output_width, output_height = loader_cache.aspect_locked_dimensions(
+                source_width,
+                source_height,
+                width,
+                height,
+                multiple,
+            )
+        elif int(width) > 0:
+            output_width = _round_to_multiple(width, multiple)
+            output_height = _round_to_multiple(output_width / aspect_ratio, multiple)
+        elif int(height) > 0:
+            output_height = _round_to_multiple(height, multiple)
+            output_width = _round_to_multiple(output_height * aspect_ratio, multiple)
         else:
-            output_width = _round_to_multiple(source_width, multiple) if int(width) <= 0 else int(width)
-            output_height = _round_to_multiple(source_height, multiple) if int(height) <= 0 else int(height)
+            output_width = _round_to_multiple(source_width, multiple)
+            output_height = _round_to_multiple(output_width / aspect_ratio, multiple)
         if output_width < 1 or output_height < 1:
             raise ValueError("Output width and height must be positive")
         _LOGGER.info("[CS Load Video] stage 4/7: resizing frames to %dx%d", output_width, output_height)
@@ -348,7 +334,6 @@ class CSLoadVideo(io.ComfyNode):
             "loaded_duration": float(selected.shape[0] / target_fps),
             "loaded_width": output_width,
             "loaded_height": output_height,
-            "keep_aspect_ratio": bool(keep_aspect_ratio),
             "multiple": multiple,
             "loader_id": loader_id,
         }

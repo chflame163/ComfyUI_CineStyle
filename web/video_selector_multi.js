@@ -71,7 +71,6 @@ function sourceFromOrigin(origin, visited = new Set()) {
             outputWidth: Number(widget(origin, "width")?.value ?? 0),
             outputHeight: Number(widget(origin, "height")?.value ?? 0),
             multiple: Number(widget(origin, "multiple")?.value ?? 1),
-            keepAspectRatio: !["0", "false", "no", "off"].includes(String(widget(origin, "keep_aspect_ratio")?.value ?? true).toLowerCase()),
         };
     }
     if (isLoadImage(origin) || isImageFilename(filename)) {

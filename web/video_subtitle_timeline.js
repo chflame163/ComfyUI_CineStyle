@@ -120,7 +120,7 @@ function appendVideoTrimParams(params, trim) {
     if (trim.loaderSignature) params.set("loader_signature", String(trim.loaderSignature));
     return params;
 }
-async function fetchCachedProxy(node, filename = "", trim = null) {
+async function fetchCachedPreview(node, filename = "", trim = null) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId) return null;
     if (trim?.loaderId && filename) {
@@ -236,12 +236,8 @@ function videoUrl(filename) {
     const params = new URLSearchParams({ filename, type: "input", subfolder: "", t: String(Date.now()) });
     return api.apiURL(`/view?${params.toString()}`);
 }
-function proxyVideoUrl(filename, threshold = 1, size = 0.8) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(threshold), proxy_size: String(size), t: String(Date.now()) });
-    return api.apiURL(`/cinestyle/video-proxy?${params.toString()}`);
-}
 async function fetchInfo(filename) {
-    const response = await api.fetchApi(`/cinestyle/video-info?filename=${encodeURIComponent(filename)}&proxy_threshold=1&proxy_size=0.8`);
+    const response = await api.fetchApi(`/cinestyle/video-info?filename=${encodeURIComponent(filename)}`);
     if (!response.ok) throw new Error(await response.text());
     return response.json();
 }
@@ -368,7 +364,7 @@ function addStyles() {
 }
 
 async function openTimeline(node) {
-    const connectedSource = connectedVideoSource(node, ["proxy_video", "video"]);
+    const connectedSource = connectedVideoSource(node, ["video"]);
     const filename = String(connectedSource?.filename || "");
     const sourceTrim = connectedSource?.isCSLoad ? connectedSource : null;
     const externalSrtCandidate = graphSrtText(node) || String(widget(node, "srt")?.value || "");
@@ -376,7 +372,7 @@ async function openTimeline(node) {
     const editedSrtCandidate = String(widget(node, "edited_srt")?.value || "").trim();
     const persistedSrt = parseSrt(editedSrtCandidate).length ? editedSrtCandidate : "";
     let cachedSrt = null;
-    let cachedProxy = null;
+    let cachedPreview = null;
     let sourceSrt = persistedSrt || externalSrt;
     addStyles();
     const dialog = document.createElement("dialog");
@@ -542,8 +538,8 @@ async function openTimeline(node) {
         const frame = currentFrame();
         const currentTime = frame / Math.max(0.001, Number(fps) || 30);
         const active = cues.filter((cue) => Number(cue.start) <= currentTime && currentTime < Number(cue.end) && String(cue.text || "").trim());
-        const width = Number(info?.proxy_required && info?.proxy_width ? info.proxy_width : info?.width) || 0;
-        const height = Number(info?.proxy_required && info?.proxy_height ? info.proxy_height : info?.height) || 0;
+        const width = Number(info?.width) || 0;
+        const height = Number(info?.height) || 0;
         const previewFps = Number(info?.fps) || Number(fps) || 30;
         const key = JSON.stringify({
             active: active.map((cue) => ({ id: cue.id, start: cue.start, end: cue.end, text: cue.text })),
@@ -1133,20 +1129,20 @@ async function openTimeline(node) {
             replaceCues(sourceSrt);
         }
         setLoading("Preparing video preview cache...");
-        cachedProxy = await fetchCachedProxy(node, filename, sourceTrim).catch(() => null);
-        if (cachedProxy?.warning) {
-            status.textContent = cachedProxy.warning;
-            cachedProxy = null;
+        cachedPreview = await fetchCachedPreview(node, filename, sourceTrim).catch(() => null);
+        if (cachedPreview?.warning) {
+            status.textContent = cachedPreview.warning;
+            cachedPreview = null;
         }
-        dialog.querySelector(".cs-subtitle-file").textContent = cachedProxy?.label || filename || "Subtitle preview cache";
-        if (cachedProxy) {
+        dialog.querySelector(".cs-subtitle-file").textContent = cachedPreview?.label || filename || "Subtitle preview cache";
+        if (cachedPreview) {
             setLoading("Loading preview video...");
-            info = cachedProxy.info || {};
+            info = cachedPreview.info || {};
             fps = Number(info.fps) || 30;
             duration = Number(info.duration) || duration;
             outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
             viewDuration = duration;
-            const useCachedPlayback = () => { video.src = cachedProxy.url; video.load(); normalizeRange(); renderTimeline(); };
+            const useCachedPlayback = () => { video.src = cachedPreview.url; video.load(); normalizeRange(); renderTimeline(); };
             useCachedPlayback();
         } else if (filename) {
             setLoading("Reading video information...");
@@ -1156,7 +1152,7 @@ async function openTimeline(node) {
             duration = Number(result.duration) || duration;
             outFrame = outFrame < 0 ? Math.max(0, Math.round(duration * fps) - 1) : outFrame;
             viewDuration = duration;
-            video.src = result.proxy_required ? proxyVideoUrl(filename, result.proxy_threshold, result.proxy_size) : videoUrl(filename);
+            video.src = videoUrl(filename);
             video.load();
             normalizeRange();
             renderTimeline();

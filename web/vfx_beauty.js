@@ -28,7 +28,6 @@ async function fetchBeautyCachedSource(node) {
         startFrame: 0,
         endFrame: Math.max(0, Number(info.frames || 1) - 1),
         targetFps: Number(info.fps || 24),
-        usesProxy: Boolean(result.uses_proxy),
     };
 }
 
@@ -130,7 +129,7 @@ async function openPreview(node) {
     let source = null;
     let cachedSource = null;
     try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
-    const upstreamSource = connectedVideoSource(node, ["proxy_video"]) || connectedVideoSource(node, ["image", "images", "video_input"]);
+    const upstreamSource = connectedVideoSource(node, ["image", "images", "video_input"]);
     source = upstreamSource?.loaderId ? upstreamSource : cachedSource;
     if (!source) source = upstreamSource;
     if (!source) { app.canvas?.prompt?.("Run this VFX node once to cache its own connected image/video input.", ""); return; }

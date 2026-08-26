@@ -47,7 +47,7 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - 视频预览窗口的白色播放键仍然播放完整视频，不受入出点限制。
 - 开启保持宽高比后，修改宽度或高度会自动联动另一项。
 - 输出尺寸可以自动四舍五入到指定倍数，适合视频模型常见的尺寸要求。
-- 打开 Edit Timeline 时，如果当前预览分辨率超过 `proxy_threshold`，界面会自动生成保持宽高比、目标像素为 `proxy_size` 的预览代理，降低大视频预览的内存和解码压力；节点最终输出仍使用原视频。
+- 打开 Edit Timeline 时使用源视频；点击 Apply 后由 CS Load Video 在后台生成共享 preview cache，供下游预览复用，节点最终输出仍使用真实视频帧。
 
 #### 节点选项说明：
 ![CS Load Video 节点](images/CS_Load_Video_node.jpg)
@@ -59,8 +59,6 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 - width： 整数，默认`0`。 输出宽度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。 
 - height： 整数，默认`0`。 输出高度。`0` 表示根据源视频尺寸和 `multiple` 自动计算。 
 - fps： 浮点数，默认 `0`。 输出帧率。`0` 表示保留源视频帧率；输入其他数值时会按目标帧率重新采样帧。 
-- proxy_threshold：浮点数，单位 MPixels，默认 `2.1`，范围 `0.1–1000.0`。当前预览或输出分辨率的总像素超过该阈值时才生成代理。
-- proxy_size：浮点数，单位 MPixels，默认 `0.8`，范围 `0.1–1000.0`。生成代理时的目标总像素。
 - choose file to upload：点击按钮从本地加载视频。
 - Edit Timeline：进入时间线界面。
 其中 `start_frame`、`end_frame`、`width`、`height` 和 `fps` 可通过 `Edit Timeline` 窗口设置或在节点控件中直接编辑。
@@ -91,11 +89,10 @@ git clone https://github.com/chflame163/ComfyUI_CineStyle.git
 
 #### 输出说明
 - video：标准 ComfyUI `VIDEO` 类型，包含时间线选段、尺寸、帧率和音频，可直接连接官方视频节点。
-- proxy_video：预览代理对象输出，与 `video` 保持相同的入出点、帧数、帧顺序、FPS 和音频。
 - IMAGE: 输出的video图像帧批次。
 - frame_count: 实际输出帧数。修改 FPS 后，该数值可能与源视频选段帧数不同。 
 - audio: 选定时间范围内的音频。没有音频轨道时输出为空。 
-- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息，以及 `proxy_threshold`、`proxy_size` 和 `proxy_video` 标志。
+- video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息，以及 loader 标识。
 
 
 ### CS Save Video
@@ -127,7 +124,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 使用流程
 
 - 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点。
-- 如果上游节点提供低分辨率预览代理，可将其连接到 `proxy_video`；该输入只供 `VFX Preview` 显示，不参与 Beauty 实际渲染。
+- VFX Preview 统一使用 CS Load Video 的源输出和共享 preview cache；Beauty 实际渲染仍使用 `image`。
 - 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
 - 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
 - 对长视频或高分辨率视频，节点会根据当前 GPU 可用显存自动选择帧批大小；每批完成后释放临时 GPU 张量，再继续下一批。自动估色只抽取最多 16 帧采样，因此不会把整段视频复制到 GPU。显存不足时会自动减半批大小重试，输出帧数、顺序和尺寸保持不变。
@@ -138,7 +135,6 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 ![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
 - image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
 - mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域；不需要额外的 External Matte 开关。
-- proxy_video：可选标准 ComfyUI `VIDEO`，只用于 `VFX Preview` 的前端显示和逐帧预览。
 - colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
 - weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时重新写回该字符串。
 - blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
@@ -211,7 +207,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 使用流程
 
 1. 先执行 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader)，再把输出的 `SEC_MODEL` 连接到节点的 `model`。
-2. 将同一视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；可选的 `proxy_video` 只用于 Selector 前端预览。
+2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；Selector 统一使用 CS Load Video 共享 preview cache。
 3. 点击 `Open Selector`，在锚点帧中定义一个或多个对象的提示。
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
@@ -223,7 +219,6 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 - `model`：`CS SeC-4B Model Loader` 输出的 `SEC_MODEL`，必需输入。
 - `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
-- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的多对象 Mask、BBox 和 Point 提示数据，不建议手动编辑。
 - `tracking_direction`：传播方向，`bidirectional` 双向传播，`forward` 向后传播，`backward` 向前传播。
@@ -247,7 +242,7 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 #### 使用流程
 
 1. 使用官方 `CheckpointLoaderSimple`加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
-2. 将视频的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；可选的 `proxy_video` 只用于 Selector 前端预览。
+2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；Selector 统一使用 CS Load Video 共享 preview cache。
 3. 点击节点上的 `Open Selector`，在实际输入视频的帧上定义提示。
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
@@ -257,7 +252,6 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 - `model`：官方 SAM3/SAM3.1 模型，必需输入。
 - `images`：可选 `IMAGE` 帧批次。连接后作为执行和 Selector 的首选视频来源。
 - `video_input`：可选 `VIDEO` 输入。仅在 `images` 未连接时使用。
-- `proxy_video`：可选 `VIDEO` 输入，仅用于 Selector 预览显示。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始。通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的 Mask、BBox、Point 和对象列表，不建议手动编辑。
 - `propagation_direction`：传播方向，`both` 双向传播，`forward` 向后传播，`backward` 向前传播。

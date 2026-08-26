@@ -95,18 +95,6 @@ def _loader_preview_cache():
     return module.get_loader_preview_cache() if module is not None else None
 
 
-def _loader_id_from_video(video: Any) -> str:
-    if video is None or not hasattr(video, "get_components"):
-        return ""
-    try:
-        components = video.get_components()
-        metadata = dict(getattr(video, "_cinestyle_runtime_metadata", None) or {})
-        metadata.update(dict(getattr(components, "metadata", None) or {}))
-        return str(metadata.get("loader_id") or "").strip()
-    except (AttributeError, TypeError, ValueError):
-        return ""
-
-
 def _no_nested_tqdm(iterable: Any, *args: Any, **kwargs: Any) -> Any:
     return iterable
 
@@ -391,13 +379,13 @@ def _video_input_fps(video_input: Any, prompt: Any = None, node_id: Any = None) 
     return _prompt_selector_fps(prompt, node_id) or 24.0
 
 
-def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float, *, proxy: bool = False) -> str | None:
+def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float) -> str | None:
     key = str(node_id or "").strip()
     if not key or not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[0] == 0:
         return None
     safe_fps = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else 24.0
     try:
-        entry = _preview_cache_store().put_preview(key, images, safe_fps, proxy=proxy, encode_video=True)
+        entry = _preview_cache_store().put_preview(key, images, safe_fps, encode_video=True)
     except Exception as exc:
         print(f"[CineStyle] Selector input cache failed for node {key}: {exc}")
         return None
@@ -408,13 +396,8 @@ def _cache_selector_input(node_id: Any, images: torch.Tensor, fps: float, *, pro
     return str(entry["token"])
 
 
-def _selector_cache_for_node(node_id: Any, variant: str = "") -> dict[str, Any] | None:
-    store = _preview_cache_store()
-    if variant == "proxy":
-        return store.get_preview_variant(node_id, proxy=True)
-    if variant == "main":
-        return store.get_preview_variant(node_id, proxy=False)
-    return store.get_preview(node_id)
+def _selector_cache_for_node(node_id: Any) -> dict[str, Any] | None:
+    return _preview_cache_store().get_preview_variant(node_id, proxy=False)
 
 
 def _selector_cache_for_token(token: Any) -> dict[str, Any] | None:
@@ -449,15 +432,14 @@ def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.T
 
 async def _selector_cache_info_route(request: web.Request) -> web.Response:
     requested_node_id = str(request.query.get("node_id", ""))
-    variant = str(request.query.get("variant", "")).strip().lower()
-    entry = _selector_cache_for_node(requested_node_id, variant)
+    entry = _selector_cache_for_node(requested_node_id)
     if entry is None:
         return web.json_response({"error": "No cached Selector input."}, status=404)
     token = str(entry["token"])
     return web.json_response(
         {
             "token": token,
-            "label": "Proxy input from the last workflow run" if entry.get("variant") == "proxy" else "Cached input from the last workflow run",
+            "label": "Cached input from the last workflow run",
             "video_url": f"/cinestyle/video-selector-cache-video?token={token}",
             "info": entry["info"],
         }
@@ -1508,7 +1490,6 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 SEC_MODEL.Input("model", tooltip="Loaded SeC-4B model."),
                 io.Image.Input("images", optional=True, tooltip="Video frames as an IMAGE batch."),
                 io.Video.Input("video_input", optional=True, tooltip="Optional VIDEO input."),
-                io.Video.Input("proxy_video", optional=True, tooltip="Optional VIDEO used only by Selector preview."),
                 io.Int.Input("anchor_frame", default=0, min=0, max=10000000, step=1),
                 io.String.Input("prompt_data", default='{"version":2,"objects":[]}', multiline=True, optional=True, tooltip="Selector multi-object mask, bbox, and point prompts."),
                 io.Combo.Input("tracking_direction", options=["forward", "backward", "bidirectional"], default="bidirectional", advanced=True),
@@ -1530,7 +1511,6 @@ class CSVideoSegmentSeC(io.ComfyNode):
         model: Any,
         images: torch.Tensor | None = None,
         video_input: Any = None,
-        proxy_video: Any = None,
         anchor_frame: int = 0,
         prompt_data: str = '{"version":2,"objects":[]}',
         tracking_direction: str = "bidirectional",
@@ -1551,11 +1531,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
             raise ValueError("images must have shape [frames, height, width, 3 or 4].")
         images = images[..., :3].to("cpu", dtype=torch.float32).clamp_(0, 1)
         _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
-        loader_origin = (
-            _loader_id_from_video(video_input)
-            or _loader_id_from_video(proxy_video)
-            or _prompt_loader_id(cls.hidden.prompt, cls.hidden.unique_id)
-        )
+        loader_origin = _prompt_loader_id(cls.hidden.prompt, cls.hidden.unique_id)
         if loader_origin:
             _segment_info(node_name, f"using shared CS Load Video preview cache: loader={loader_origin}")
         else:
@@ -1564,24 +1540,6 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 images,
                 _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
             )
-        if proxy_video is not None:
-            try:
-                proxy_images = proxy_video.get_components().images
-                if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
-                    if loader_origin:
-                        _segment_info(node_name, "proxy preview uses the shared loader cache")
-                    else:
-                        _cache_selector_input(
-                            cls.hidden.unique_id,
-                            proxy_images,
-                            _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
-                            proxy=True,
-                        )
-                        _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
-                else:
-                    _segment_info(node_name, "proxy_video ignored: no valid IMAGE frames")
-            except Exception as exc:
-                _segment_info(node_name, f"proxy preview cache unavailable: {exc}")
         frame_count, height, width = map(int, images.shape[:3])
         anchor = int(anchor_frame)
         if not 0 <= anchor < frame_count:
@@ -1801,11 +1759,6 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                     optional=True,
                     tooltip="Optional VIDEO input from CS Load Video.",
                 ),
-                io.Video.Input(
-                    "proxy_video",
-                    optional=True,
-                    tooltip="Optional VIDEO used only by Selector preview.",
-                ),
                 io.Int.Input(
                     "anchor_frame",
                     default=0,
@@ -1851,7 +1804,6 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         model: Any,
         images: torch.Tensor | None = None,
         video_input: Any = None,
-        proxy_video: Any = None,
         anchor_frame: int = 0,
         prompt_data: str = '{"version":2,"objects":[]}',
         propagation_direction: str = "both",
@@ -1873,11 +1825,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
 
         images = images[..., :3].to(device="cpu", dtype=torch.float32).clamp_(0.0, 1.0)
         _segment_info(node_name, f"input ready: frames={images.shape[0]}, size={images.shape[2]}x{images.shape[1]}")
-        loader_origin = (
-            _loader_id_from_video(video_input)
-            or _loader_id_from_video(proxy_video)
-            or _prompt_loader_id(cls.hidden.prompt, cls.hidden.unique_id)
-        )
+        loader_origin = _prompt_loader_id(cls.hidden.prompt, cls.hidden.unique_id)
         if loader_origin:
             _segment_info(node_name, f"using shared CS Load Video preview cache: loader={loader_origin}")
         else:
@@ -1886,24 +1834,6 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                 images,
                 _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
             )
-        if proxy_video is not None:
-            try:
-                proxy_images = proxy_video.get_components().images
-                if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
-                    if loader_origin:
-                        _segment_info(node_name, "proxy preview uses the shared loader cache")
-                    else:
-                        _cache_selector_input(
-                            cls.hidden.unique_id,
-                            proxy_images,
-                            _video_input_fps(proxy_video, cls.hidden.prompt, cls.hidden.unique_id),
-                            proxy=True,
-                        )
-                        _segment_info(node_name, f"proxy preview cached: frames={proxy_images.shape[0]}, size={proxy_images.shape[2]}x{proxy_images.shape[1]}")
-                else:
-                    _segment_info(node_name, "proxy_video ignored: no valid IMAGE frames")
-            except Exception as exc:
-                _segment_info(node_name, f"proxy preview cache unavailable: {exc}")
         frame_count, height, width = map(int, images.shape[:3])
         anchor = int(anchor_frame)
         if anchor < 0 or anchor >= frame_count:

@@ -37,7 +37,6 @@ _AUTO_COLOUR_FALLBACK = (0.5294118, 0.3803922, 0.3294118)
 _EPS = 1.0e-6
 _VFX_MASK_CACHE: dict[str, torch.Tensor | None] = {}
 _VFX_COLOUR_CACHE: dict[str, torch.Tensor] = {}
-_VFX_PROXY_PRESENT: dict[str, bool] = {}
 _VFX_CACHE_LOCK = threading.RLock()
 _VFX_ROUTE_REGISTERED = False
 _BISE_NET_DOWNLOAD_LOCK = threading.Lock()
@@ -66,18 +65,6 @@ def _loader_preview_cache():
     package = __name__.rsplit(".", 1)[0]
     module = sys.modules.get(f"{package}._py_loader_preview_cache")
     return module.get_loader_preview_cache() if module is not None else None
-
-
-def _loader_id_from_video(video: Any) -> str:
-    if video is None or not hasattr(video, "get_components"):
-        return ""
-    try:
-        components = video.get_components()
-        metadata = dict(getattr(video, "_cinestyle_runtime_metadata", None) or {})
-        metadata.update(dict(getattr(components, "metadata", None) or {}))
-        return str(metadata.get("loader_id") or "").strip()
-    except (AttributeError, TypeError, ValueError):
-        return ""
 
 
 def _loader_id_from_prompt(prompt: Any, node_id: Any) -> str:
@@ -1030,14 +1017,12 @@ def _cache_vfx_input(
     prompt: Any,
     image: torch.Tensor,
     mask: torch.Tensor | None,
-    proxy_video: Any = None,
 ) -> None:
     """Make the last node input available to the browser preview dialog."""
     key = str(node_id or "").strip()
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
-    loader_origin = _loader_id_from_video(proxy_video) or _loader_id_from_prompt(prompt, node_id)
-    proxy_present = False
+    loader_origin = _loader_id_from_prompt(prompt, node_id)
     try:
         fps = 24.0
         if isinstance(prompt, dict):
@@ -1067,19 +1052,6 @@ def _cache_vfx_input(
             _console_info(key, "shared loader preview", f"loader={loader_origin}")
     except Exception as exc:
         print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
-    try:
-        proxy_images = proxy_video.get_components().images if proxy_video is not None else None
-        if isinstance(proxy_images, torch.Tensor) and proxy_images.ndim == 4 and proxy_images.shape[0] > 0:
-            try:
-                proxy_fps = float(proxy_video.get_components().frame_rate)
-            except Exception:
-                proxy_fps = 24.0
-            if loader_origin:
-                _console_info(key, "proxy preview uses shared loader cache", f"loader={loader_origin}")
-            else:
-                proxy_present = _preview_cache_store().put_preview(key, proxy_images, proxy_fps, proxy=True, encode_video=True) is not None
-    except Exception as exc:
-        print(f"[CineStyle] VFX Beauty proxy cache failed for node {key}: {exc}")
     cached_mask = None
     if isinstance(mask, torch.Tensor) and mask.ndim >= 3:
         cached_mask = mask.detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -1088,22 +1060,11 @@ def _cache_vfx_input(
     with _VFX_CACHE_LOCK:
         _VFX_MASK_CACHE[key] = cached_mask
         _VFX_COLOUR_CACHE.pop(key, None)
-        _VFX_PROXY_PRESENT[key] = proxy_present
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     try:
         return _preview_cache_store().get_preview_variant(node_id, proxy=False)
-    except Exception:
-        return None
-
-
-def _preview_proxy_cache_entry(node_id: str) -> dict[str, Any] | None:
-    with _VFX_CACHE_LOCK:
-        if not _VFX_PROXY_PRESENT.get(node_id, False):
-            return None
-    try:
-        return _preview_cache_store().get_preview_variant(node_id, proxy=True)
     except Exception:
         return None
 
@@ -1211,15 +1172,13 @@ async def _vfx_beauty_cache_info_route(request: web.Request) -> web.Response:
     info = dict(entry.get("info") or {})
     with _VFX_CACHE_LOCK:
         has_mask = node_id in _VFX_MASK_CACHE and _VFX_MASK_CACHE[node_id] is not None
-        uses_proxy = bool(entry and entry.get("variant") == "proxy")
     return web.json_response(
         {
             "token": str(entry.get("token") or ""),
-            "label": "Proxy input from the last workflow run" if uses_proxy else "Cached input from the last workflow run",
+            "label": "Cached input from the last workflow run",
             "video_url": f"/cinestyle/vfx-beauty-cache-video?token={entry.get('token')}",
             "info": info,
             "has_mask": has_mask,
-            "uses_proxy": uses_proxy,
         }
     )
 
@@ -1299,7 +1258,6 @@ class CSVFXBeauty(io.ComfyNode):
             inputs=[
                 io.Image.Input("image", tooltip="Original foreground image."),
                 io.Mask.Input("mask", optional=True, tooltip="Optional skin mask. When connected, it is used automatically for the beauty region and colour estimation."),
-                io.Video.Input("proxy_video", optional=True, tooltip="Optional proxy VIDEO used only by VFX Preview. Rendering still uses image."),
                 io.String.Input("colour", default="auto", tooltip="Use auto for clip skin-colour estimation, or enter a #RRGGBB value to bypass automatic estimation."),
                 io.String.Input("weights", default="6.0, 0.0, 3.0", tooltip="HSV keying weights vec3."),
                 io.Float.Input("blur_m", default=10.0, min=0.0, max=100.0, step=0.01, display_name="Soften"),
@@ -1327,7 +1285,6 @@ class CSVFXBeauty(io.ComfyNode):
         cls,
         image: torch.Tensor,
         mask: torch.Tensor | None = None,
-        proxy_video: Any = None,
         colour: Any = "auto",
         weights: Any = "6.0, 0.0, 3.0",
         blur_m: float = 10.0,
@@ -1349,7 +1306,7 @@ class CSVFXBeauty(io.ComfyNode):
         progress.info("start", f"frames={frame_total}")
         try:
             progress.info("cache input", "storing frames and optional mask for VFX Preview")
-            _cache_vfx_input(node_id, prompt, image, mask, proxy_video)
+            _cache_vfx_input(node_id, prompt, image, mask)
             progress.info("cache input complete")
 
             colour_tensor = _parse_hex_colour(colour)

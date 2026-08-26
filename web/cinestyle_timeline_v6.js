@@ -33,21 +33,6 @@ function resetTimelineWidgets(node) {
     node.graph?.setDirtyCanvas(true, true);
 }
 
-function sanitizeProxyWidgets(node) {
-    const threshold = widget(node, "proxy_threshold");
-    const size = widget(node, "proxy_size");
-    const normalize = (target, fallback) => {
-        if (!target) return;
-        const value = Number(target.value);
-        if (!Number.isFinite(value) || value <= 0) {
-            target.value = fallback;
-            target.callback?.(fallback);
-        }
-    };
-    normalize(threshold, 2.1);
-    normalize(size, 0.8);
-}
-
 function syncVideoSelection(node, filename) {
     const nextFilename = String(filename ?? "");
     if (node.__csTimelineVideo !== undefined && node.__csTimelineVideo !== nextFilename) {
@@ -58,11 +43,6 @@ function syncVideoSelection(node, filename) {
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
-}
-
-function proxyParameter(value, fallback) {
-    const number = Number(value);
-    return Number.isFinite(number) && number > 0 ? clamp(number, 0.1, 1000) : fallback;
 }
 
 function roundToMultiple(value, multiple) {
@@ -170,7 +150,6 @@ function addStyles() {
       .cs-timeline-close { border: 0; background: transparent; color: #aeb5c2; font-size: 22px; cursor: pointer; padding: 0 5px; }
       .cs-video-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #08090b; border-radius: 6px; overflow: hidden; }
       .cs-timeline-video { width: 100%; height: 100%; display: block; background: #08090b; object-fit: contain; }
-      .cs-proxy-wait { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px; color: #e6e9ef; background: #08090be6; font-size: 15px; text-align: center; pointer-events: none; }
       .cs-file-name { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cs-original-info { max-width: 100%; color: #aeb5c2; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }
       .cs-timeline-fields { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
@@ -190,11 +169,6 @@ function addStyles() {
 function videoUrl(filename) {
     const params = new URLSearchParams({ filename, type: "input", subfolder: "", t: String(Date.now()) });
     return api.apiURL(`/view?${params.toString()}`);
-}
-
-function proxyVideoUrl(filename, proxyThreshold, proxySize) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize), t: String(Date.now()) });
-    return api.apiURL(`/cinestyle/video-proxy?${params.toString()}`);
 }
 
 function requestLoaderPreviewCache(node, filename, values) {
@@ -220,13 +194,8 @@ function requestLoaderPreviewCache(node, filename, values) {
     });
 }
 
-function proxyProgressUrl(filename, proxyThreshold, proxySize) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize) });
-    return api.apiURL(`/cinestyle/video-proxy-progress?${params.toString()}`);
-}
-
-async function fetchInfo(filename, proxyThreshold, proxySize) {
-    const params = new URLSearchParams({ filename, proxy_threshold: String(proxyThreshold), proxy_size: String(proxySize) });
+async function fetchInfo(filename) {
+    const params = new URLSearchParams({ filename });
     const response = await api.fetchApi(`/cinestyle/video-info?${params.toString()}`);
     if (!response.ok) throw new Error(await response.text());
     return await response.json();
@@ -244,7 +213,7 @@ function openTimeline(node) {
     dialog.innerHTML = `
       <div class="cs-timeline-shell">
         <div class="cs-timeline-head"><div><h2 class="cs-timeline-title">Edit Timeline</h2><div class="cs-timeline-muted cs-file-name"></div><div class="cs-original-info"></div></div><button class="cs-timeline-close" type="button" aria-label="Close">&times;</button></div>
-        <div class="cs-video-stage"><video class="cs-timeline-video" controls playsinline preload="auto"></video><div class="cs-proxy-wait">Wait for Generate Proxy</div></div>
+        <div class="cs-video-stage"><video class="cs-timeline-video" controls playsinline preload="auto"></video></div>
         <div class="cs-timeline-readout"><span class="cs-current">00:00.00</span><span class="cs-range"></span><span class="cs-duration">00:00.00</span></div>
         ${timelineControlsMarkup()}
         <div class="cs-timeline-fields"><label class="cs-timeline-field cs-timeline-check"><span><input class="cs-keep-aspect" type="checkbox"> keep aspect ratio</span></label><label class="cs-timeline-field">multiple<input class="cs-multiple" type="number" min="1" step="1"></label><label class="cs-timeline-field">Width<input class="cs-width" type="number" min="1" step="1"></label><label class="cs-timeline-field">Height<input class="cs-height" type="number" min="1" step="1"></label><label class="cs-timeline-field">FPS<input class="cs-fps" type="number" min="0.01" max="240" step="0.01"></label></div>
@@ -253,7 +222,6 @@ function openTimeline(node) {
     document.body.append(dialog);
 
     const video = dialog.querySelector(".cs-timeline-video");
-    const proxyWait = dialog.querySelector(".cs-proxy-wait");
     const current = dialog.querySelector(".cs-current");
     const range = dialog.querySelector(".cs-range");
     const durationLabel = dialog.querySelector(".cs-duration");
@@ -273,8 +241,6 @@ function openTimeline(node) {
     const widthInput = dialog.querySelector(".cs-width");
     const heightInput = dialog.querySelector(".cs-height");
     const fpsInput = dialog.querySelector(".cs-fps");
-    const proxyThreshold = proxyParameter(widget(node, "proxy_threshold")?.value, 2.1);
-    const proxySize = proxyParameter(widget(node, "proxy_size")?.value, 0.8);
     const currentValues = {
         start: Number(widget(node, "start_frame")?.value ?? 0),
         end: Number(widget(node, "end_frame")?.value ?? -1),
@@ -326,42 +292,6 @@ function openTimeline(node) {
     video.volume = 1;
     keepAspectInput.checked = true;
     keepAspectInput.disabled = true;
-    let proxyProgressTimer = null;
-    const setProxyWait = (visible, progress = 0) => {
-        proxyWait.style.display = visible ? "flex" : "none";
-        if (visible) proxyWait.textContent = `Wait for Generate Proxy ${Math.max(0, Math.min(100, Math.round(progress)))}%`;
-    };
-    const stopProxyProgress = () => {
-        if (proxyProgressTimer !== null) window.clearTimeout(proxyProgressTimer);
-        proxyProgressTimer = null;
-    };
-    video.addEventListener("loadeddata", () => { stopProxyProgress(); setProxyWait(false); });
-    video.addEventListener("canplay", () => { stopProxyProgress(); setProxyWait(false); });
-    video.addEventListener("error", () => { stopProxyProgress(); setProxyWait(false); });
-    const watchProxyProgress = async () => {
-        try {
-            const response = await api.fetchApi(proxyProgressUrl(filename, proxyThreshold, proxySize));
-            const state = await response.json();
-            if (state.error) {
-                setProxyWait(true, 0);
-                proxyWait.textContent = `Proxy generation failed: ${state.error}`;
-                stopProxyProgress();
-                return;
-            }
-            setProxyWait(true, state.progress);
-            if (state.done) {
-                setProxyWait(true, 100);
-                stopProxyProgress();
-                return;
-            }
-        } catch (error) {
-            proxyWait.textContent = `Proxy progress unavailable: ${error.message}`;
-            stopProxyProgress();
-            return;
-        }
-        proxyProgressTimer = window.setTimeout(watchProxyProgress, 250);
-    };
-
     timelineControls = createTimelineRangeController({
         root: dialog,
         video,
@@ -471,7 +401,7 @@ function openTimeline(node) {
         });
     });
 
-    const close = () => { stopProxyProgress(); video.pause(); dialog.close(); dialog.remove(); };
+    const close = () => { video.pause(); dialog.close(); dialog.remove(); };
     dialog.querySelector(".cs-close")?.addEventListener("click", close);
     dialog.querySelector(".cs-timeline-close").addEventListener("click", close);
     dialog.querySelector(".cs-cancel").addEventListener("click", close);
@@ -506,21 +436,13 @@ function openTimeline(node) {
     });
     dialog.addEventListener("cancel", close);
 
-    fetchInfo(filename, proxyThreshold, proxySize).then((result) => {
+    fetchInfo(filename).then((result) => {
         // This editor must always use the complete source timeline. A shared
         // loader cache represents the currently selected trim and would make
         // frames outside that trim impossible to select on a later edit.
         info = result;
         originalInfo.textContent = formatOriginalInfo(result);
-        if (result.proxy_required) {
-            originalInfo.textContent += ` · 正在生成 ${result.proxy_width}×${result.proxy_height} 预览代理`;
-            setProxyWait(true);
-            video.src = proxyVideoUrl(filename, proxyThreshold, proxySize);
-            watchProxyProgress();
-        } else {
-            setProxyWait(false);
-            video.src = videoUrl(filename);
-        }
+        video.src = videoUrl(filename);
         originalInfo.title = originalInfo.textContent;
         video.load();
         const sourceLastFrame = Math.max(0, Number(info.frames || 1) - 1);
@@ -546,7 +468,6 @@ app.registerExtension({
         const original = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             original?.apply(this, arguments);
-            sanitizeProxyWidgets(this);
             const videoWidget = widget(this, "video");
             if (videoWidget && !this.__csVideoResetInstalled) {
                 this.__csTimelineVideo = String(videoWidget.value ?? "");
@@ -567,7 +488,6 @@ app.registerExtension({
         const originalConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             originalConfigure?.apply(this, arguments);
-            sanitizeProxyWidgets(this);
         };
     },
 });

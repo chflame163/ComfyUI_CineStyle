@@ -31,7 +31,6 @@ _CATEGORY = "😺dzNodes/CineStyle/Video"
 _ROUTE_REGISTERED = False
 _TIME_RE = re.compile(r"^(\d+):(\d{2}):(\d{2})[,.](\d{3})$")
 _SUBTITLE_SRT_CACHE: dict[str, dict[str, str]] = {}
-_SUBTITLE_PROXY_RENDER_SIZE: dict[str, tuple[int, int]] = {}
 _SUBTITLE_SOURCE_METADATA: dict[str, dict[str, Any]] = {}
 _SUBTITLE_LAZY_CACHE_LOCK = threading.RLock()
 _SUBTITLE_VIDEO_ENSURE_LOCK = threading.RLock()
@@ -326,7 +325,6 @@ def _output_style_matching_preview(
     style: dict[str, Any],
     output_width: int,
     output_height: int,
-    proxy_video: Any,
 ) -> dict[str, Any]:
     """Keep logical style values unchanged across preview and final output."""
     return dict(style)
@@ -569,17 +567,11 @@ def _preview_signature_float(value: Any, default: float = 0.0) -> float:
 def _preview_input_signature(
     metadata: dict[str, Any] | None,
     *,
-    proxy: bool = False,
     actual_width: Any = 0,
     actual_height: Any = 0,
 ) -> str:
     """Hash the effective media input, independent of subtitle styling."""
     values = dict(metadata or {})
-    proxy_width = _preview_signature_int(values.get("preview_proxy_width"))
-    proxy_height = _preview_signature_int(values.get("preview_proxy_height"))
-    if proxy:
-        proxy_width = _preview_signature_int(actual_width, proxy_width)
-        proxy_height = _preview_signature_int(actual_height, proxy_height)
     payload = {
         "version": _SUBTITLE_CACHE_SIGNATURE_VERSION,
         "source_filename": str(values.get("source_filename") or "").strip(),
@@ -590,21 +582,11 @@ def _preview_input_signature(
         "loaded_width": _preview_signature_int(values.get("loaded_width") or values.get("width")),
         "loaded_height": _preview_signature_int(values.get("loaded_height") or values.get("height")),
         "loaded_frame_count": _preview_signature_int(values.get("loaded_frame_count") or values.get("frames")),
-        "proxy_width": proxy_width,
-        "proxy_height": proxy_height,
-        "proxy_frame_count": _preview_signature_int(values.get("preview_proxy_frame_count")),
-        "proxy_fps": round(_preview_signature_float(values.get("preview_proxy_fps"), 0.0), 6),
+        "actual_width": _preview_signature_int(actual_width),
+        "actual_height": _preview_signature_int(actual_height),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha1(encoded).hexdigest()
-
-
-def _preview_cache_variant(entry: dict[str, Any] | None) -> str:
-    return str((entry or {}).get("variant") or "").strip().lower()
-
-
-def _preview_entry_is_proxy(entry: dict[str, Any] | None) -> bool:
-    return _preview_cache_variant(entry) in {"proxy", "preview"}
 
 
 def _preview_entry_video_path(entry: dict[str, Any] | None) -> Path | None:
@@ -657,19 +639,16 @@ def _mark_preview_entry_stale(entry: dict[str, Any] | None, stale: bool) -> None
 def _mark_video_cache_versions(
     node_id: Any,
     main_signature: str,
-    proxy_signature: str | None,
 ) -> None:
     """Mark old variants stale without deleting them before replacement succeeds."""
     key = str(node_id or "").strip()
     if not key:
         return
     store = _preview_cache_store()
-    for is_proxy, signature in ((False, main_signature), (True, proxy_signature)):
-        entry = store.get_preview_variant(key, proxy=is_proxy)
-        if entry is None:
-            continue
+    entry = store.get_preview_variant(key, proxy=False)
+    if entry is not None:
         current = str((entry.get("info") or {}).get("input_signature") or "")
-        _mark_preview_entry_stale(entry, not signature or current != signature)
+        _mark_preview_entry_stale(entry, current != main_signature)
 
 
 def _ensure_preview_video(entry: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -692,7 +671,6 @@ def _ensure_preview_video(entry: dict[str, Any] | None) -> dict[str, Any] | None
 
 def _extract_video_frames(
     video: Any,
-    loaded_dimensions: tuple[int, int] | None = None,
 ) -> tuple[np.ndarray, float, dict[str, Any], Any]:
     components = video.get_components()
     images = components.images
@@ -713,7 +691,6 @@ def _extract_video_frames(
     )
     actual_width = int(frames.shape[2])
     actual_height = int(frames.shape[1])
-    loaded_width, loaded_height = loaded_dimensions or (actual_width, actual_height)
     info = {
         "frames": int(frames.shape[0]),
         "width": actual_width,
@@ -721,8 +698,8 @@ def _extract_video_frames(
         "fps": safe_fps,
         "duration": float(frames.shape[0]) / safe_fps,
         "loaded_frame_count": int(frames.shape[0]),
-        "loaded_width": int(loaded_width),
-        "loaded_height": int(loaded_height),
+        "loaded_width": actual_width,
+        "loaded_height": actual_height,
         "loaded_fps": safe_fps,
     }
     # Preserve source/trim metadata so a downstream timeline can distinguish a
@@ -738,8 +715,7 @@ def _extract_video_frames(
         for key in (
             "source_filename", "source_fps", "source_frame_count", "source_duration",
             "source_width", "source_height", "start_frame", "end_frame",
-            "loaded_duration", "preview_proxy_width", "preview_proxy_height",
-            "preview_proxy_frame_count", "preview_proxy_fps",
+            "loaded_duration",
         ):
             if key in metadata:
                 info[key] = metadata[key]
@@ -753,8 +729,8 @@ def _extract_video_frames(
             "height": actual_height,
             "fps": safe_fps,
             "loaded_frame_count": int(frames.shape[0]),
-            "loaded_width": int(loaded_width),
-            "loaded_height": int(loaded_height),
+            "loaded_width": actual_width,
+            "loaded_height": actual_height,
             "loaded_fps": safe_fps,
             "duration": float(frames.shape[0]) / safe_fps,
         }
@@ -796,27 +772,6 @@ def _runtime_descriptor_from_input(
         if fingerprint:
             descriptor["source_fingerprint"] = fingerprint
     return descriptor
-
-
-def _preview_video_descriptor(video: Any) -> dict[str, Any]:
-    """Describe the proxy stream without copying its frame tensor."""
-    if video is None or not hasattr(video, "get_components"):
-        return {}
-    try:
-        components = video.get_components()
-        images = components.images
-        if not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[0] <= 0:
-            return {}
-        fps = float(components.frame_rate)
-        safe_fps = fps if np.isfinite(fps) and fps > 0 else 24.0
-        return {
-            "preview_proxy_width": int(images.shape[2]),
-            "preview_proxy_height": int(images.shape[1]),
-            "preview_proxy_frame_count": int(images.shape[0]),
-            "preview_proxy_fps": safe_fps,
-        }
-    except (AttributeError, TypeError, ValueError, IndexError):
-        return {}
 
 
 def _aspect_delta(width_a: Any, height_a: Any, width_b: Any, height_b: Any) -> float | None:
@@ -907,7 +862,6 @@ def _preview_entry_matches_runtime(entry: dict[str, Any], descriptor: dict[str, 
         descriptor_for_signature["source_fingerprint"] = current_fingerprint
     expected_signature = _preview_input_signature(
         descriptor_for_signature,
-        proxy=_preview_entry_is_proxy(entry),
         actual_width=info.get("width"),
         actual_height=info.get("height"),
     )
@@ -971,20 +925,15 @@ def _preview_entry_matches_runtime(entry: dict[str, Any], descriptor: dict[str, 
 def _cache_video_source(
     video: Any,
     node_id: Any,
-    variant: str,
     cache_label: str,
-    render_size: tuple[int, int] | None = None,
     encode_video: bool = True,
     input_signature: str = "",
 ) -> bool:
     """Write an independent frame/video cache for one subtitle node source."""
     if video is None or not node_id:
         return False
-    if render_size is not None and variant == "preview":
-        _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = (int(render_size[0]), int(render_size[1]))
-    is_proxy = str(variant or "").lower() in {"proxy", "preview"}
     if input_signature:
-        existing = _preview_cache_store().get_preview_variant(node_id, proxy=is_proxy)
+        existing = _preview_cache_store().get_preview_variant(node_id, proxy=False)
         if _preview_entry_matches_signature(existing, input_signature):
             info = existing.setdefault("info", {})
             info["trusted"] = True
@@ -995,11 +944,9 @@ def _cache_video_source(
             else:
                 return True
     try:
-        dimensions = render_size if str(variant or "").lower() in {"proxy", "preview"} else None
-        frames, safe_fps, info, audio = _extract_video_frames(video, dimensions)
+        frames, safe_fps, info, audio = _extract_video_frames(video)
         signature = input_signature or _preview_input_signature(
             info,
-            proxy=is_proxy,
             actual_width=frames.shape[2],
             actual_height=frames.shape[1],
         )
@@ -1008,7 +955,6 @@ def _cache_video_source(
             safe_fps,
             info,
             node_id,
-            variant,
             cache_label,
             encode_video,
             audio,
@@ -1047,7 +993,6 @@ def _store_frame_cache(
     safe_fps: float,
     info: dict[str, Any],
     node_id: Any,
-    variant: str,
     cache_label: str,
     encode_video: bool = True,
     audio: Any = None,
@@ -1063,7 +1008,7 @@ def _store_frame_cache(
         node_id,
         frames,
         safe_fps,
-        proxy=str(variant or "").lower() in {"proxy", "preview"},
+        proxy=False,
         encode_video=encode_video,
         info=cache_info,
         audio=_prepare_audio(audio),
@@ -1079,24 +1024,6 @@ def _store_frame_cache(
     return entry is not None
 
 
-def _cache_proxy_preview(
-    proxy_video: Any,
-    node_id: Any,
-    render_size: tuple[int, int] | None = None,
-    encode_video: bool = True,
-    input_signature: str = "",
-) -> bool:
-    return _cache_video_source(
-        proxy_video,
-        node_id,
-        "preview",
-        "preview",
-        render_size,
-        encode_video=encode_video,
-        input_signature=input_signature,
-    )
-
-
 def _cache_main_video(
     video: Any,
     node_id: Any,
@@ -1108,7 +1035,6 @@ def _cache_main_video(
         video,
         node_id,
         "main",
-        "main",
         encode_video=encode_video,
         input_signature=input_signature,
     )
@@ -1116,22 +1042,16 @@ def _cache_main_video(
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
     """Return a readable preview cache, falling back to the node's main cache."""
-    entry = _preview_cache_store().get_preview(node_id)
+    entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
     if _preview_entry_frames_readable(entry):
         return entry
-    main_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
-    if _preview_entry_frames_readable(main_entry):
-        return main_entry
     return None
 
 
 def _stale_preview_entry(node_id: str) -> dict[str, Any] | None:
     """Keep the previous frame cache visible while a replacement is pending."""
     store = _preview_cache_store()
-    for entry in (
-        store.get_preview_variant(node_id, proxy=True),
-        store.get_preview_variant(node_id, proxy=False),
-    ):
+    for entry in (store.get_preview_variant(node_id, proxy=False),):
         if _preview_entry_frames_readable(entry, allow_stale=True):
             info = entry.setdefault("info", {})
             info["stale"] = True
@@ -1190,17 +1110,6 @@ def _preview_entry_for_request(
     if descriptor and not _preview_entry_matches_runtime(entry, descriptor, video_filename):
         return None
     return entry
-
-
-def _subtitle_proxy_dimensions(width: int, height: int, target_pixels: int = 800_000) -> tuple[int, int]:
-    width = max(2, int(width))
-    height = max(2, int(height))
-    if width * height <= target_pixels:
-        return width - width % 2, height - height % 2
-    scale = (target_pixels / float(width * height)) ** 0.5
-    proxy_width = max(2, int(width * scale) // 2 * 2)
-    proxy_height = max(2, int(height * scale) // 2 * 2)
-    return proxy_width, proxy_height
 
 
 def _audio_from_video_file(source_path: str, start_seconds: float, duration: float) -> dict[str, Any] | None:
@@ -1367,7 +1276,6 @@ def _lazy_cache_trimmed_preview(
             loaded_height = loaded_height or source_height
             if loaded_width <= 0 or loaded_height <= 0 or source_fps <= 0 or target_fps <= 0:
                 return None
-            proxy_width, proxy_height = _subtitle_proxy_dimensions(loaded_width, loaded_height)
             output_count = max(1, int(round((end - start + 1) * target_fps / source_fps)))
             requested = np.rint(np.linspace(start, end, output_count)).astype(np.int64)
             frames: list[np.ndarray] = []
@@ -1382,7 +1290,7 @@ def _lazy_cache_trimmed_preview(
                     if source_index < int(requested[requested_index]):
                         continue
                     while requested_index < len(requested) and int(requested[requested_index]) == source_index:
-                        frames.append(decoded.reformat(width=proxy_width, height=proxy_height, format="rgb24").to_ndarray())
+                        frames.append(decoded.reformat(width=loaded_width, height=loaded_height, format="rgb24").to_ndarray())
                         requested_index += 1
             if not frames:
                 return None
@@ -1405,19 +1313,15 @@ def _lazy_cache_trimmed_preview(
                 "loaded_width": loaded_width,
                 "loaded_height": loaded_height,
                 "frames": len(frames),
-                "width": proxy_width,
-                "height": proxy_height,
+                "width": loaded_width,
+                "height": loaded_height,
                 "fps": target_fps,
                 "duration": float(len(frames)) / target_fps,
                 "has_audio": bool(preview_audio),
             }
-            info["preview_proxy_width"] = int(proxy_width)
-            info["preview_proxy_height"] = int(proxy_height)
-            _SUBTITLE_PROXY_RENDER_SIZE[key] = (loaded_width, loaded_height)
             frame_array = np.stack(frames, axis=0)
             signature = _preview_input_signature(
                 info,
-                proxy=True,
                 actual_width=frame_array.shape[2],
                 actual_height=frame_array.shape[1],
             )
@@ -1427,13 +1331,12 @@ def _lazy_cache_trimmed_preview(
                 info,
                 key,
                 "preview",
-                "preview",
                 encode_video=True,
                 audio=preview_audio,
                 input_signature=signature,
                 trusted=True,
             )
-            result = _preview_cache_store().get_preview_variant(key, proxy=True) if stored else None
+            result = _preview_cache_store().get_preview_variant(key, proxy=False) if stored else None
             if metadata.get("source_filename") or metadata.get("source_fingerprint"):
                 _save_runtime_descriptor(key, {**metadata, **info})
             _set_preview_warning(key, None)
@@ -1512,7 +1415,6 @@ class CSVideoSubtitle(io.ComfyNode):
             description="Burn an editable SRT subtitle track onto a standard ComfyUI VIDEO.",
             inputs=[
                 io.Video.Input("video", tooltip="Connect any compatible VIDEO output."),
-                io.Video.Input("proxy_video", optional=True, tooltip="Optional compatible proxy VIDEO output for Edit Timeline preview."),
                 io.String.Input(
                     "srt",
                     force_input=True,
@@ -1551,7 +1453,6 @@ class CSVideoSubtitle(io.ComfyNode):
     def execute(
         cls,
         video: Any,
-        proxy_video: Any = None,
         srt: Any = "",
         edited_srt: str = "",
         preview_in: int = 0,
@@ -1570,7 +1471,7 @@ class CSVideoSubtitle(io.ComfyNode):
         outline_color: str = "#000000",
         shadow_size: int = 3,
         shadow_color: str = "#000000",
-    ) -> io.NodeOutput:
+        ) -> io.NodeOutput:
         if not hasattr(video, "get_components"):
             raise ValueError("video input is not a compatible VIDEO value.")
         _subtitle_info("start")
@@ -1618,56 +1519,32 @@ class CSVideoSubtitle(io.ComfyNode):
             int(images.shape[1]),
             frame_rate,
         )
-        render_size = (int(images.shape[2]), int(images.shape[1]))
         runtime_descriptor = _runtime_descriptor_from_input(source_metadata, images, frame_rate)
-        proxy_descriptor = _preview_video_descriptor(proxy_video)
-        runtime_descriptor.update(proxy_descriptor)
         main_signature = _preview_input_signature(
             runtime_descriptor,
             actual_width=images.shape[2],
             actual_height=images.shape[1],
         )
-        proxy_signature = None
-        if proxy_descriptor:
-            proxy_signature = _preview_input_signature(
-                runtime_descriptor,
-                proxy=True,
-                actual_width=proxy_descriptor.get("preview_proxy_width"),
-                actual_height=proxy_descriptor.get("preview_proxy_height"),
-            )
         if node_id:
-            _SUBTITLE_PROXY_RENDER_SIZE[str(node_id)] = render_size
             _SUBTITLE_SOURCE_METADATA[str(node_id)] = dict(runtime_descriptor)
             _save_runtime_descriptor(node_id, runtime_descriptor)
             _set_preview_warning(node_id, None)
-            _mark_video_cache_versions(node_id, main_signature, proxy_signature)
+            _mark_video_cache_versions(node_id, main_signature)
             timeline_open = str(node_id) in _SUBTITLE_TIMELINE_OPEN
             loader_origin = str(runtime_descriptor.get("loader_id") or "").strip()
             _subtitle_info(
                 "stage 2/6: %s",
                 f"using shared CS Load Video preview cache (loader={loader_origin})"
                 if loader_origin
-                else f"preparing {'proxy' if proxy_signature else 'main'} preview cache{'' if timeline_open else ' frames; MP4 encoding deferred'}",
+                else f"preparing main preview cache{'' if timeline_open else ' frames; MP4 encoding deferred'}",
             )
             if not loader_origin:
-                cached_preview = False
-                if proxy_signature:
-                    cached_preview = _cache_proxy_preview(
-                        proxy_video,
-                        node_id,
-                        render_size=render_size,
-                        encode_video=timeline_open,
-                        input_signature=proxy_signature,
-                    )
-                if not cached_preview:
-                    main_cached = _cache_main_video(
-                        video,
-                        node_id,
-                        encode_video=timeline_open,
-                        input_signature=main_signature,
-                    )
-                    if proxy_signature and main_cached:
-                        _subtitle_info("proxy cache failed; preview uses the main video cache")
+                _cache_main_video(
+                    video,
+                    node_id,
+                    encode_video=timeline_open,
+                    input_signature=main_signature,
+                )
         else:
             _subtitle_info("stage 2/6: preview cache unavailable without a node id")
         _subtitle_info("stage 3/6: parsing subtitle cues")
@@ -1697,7 +1574,7 @@ class CSVideoSubtitle(io.ComfyNode):
             "shadow_size": shadow_size,
             "shadow_color": shadow_color,
         }
-        output_style = _output_style_matching_preview(style, int(images.shape[2]), int(images.shape[1]), proxy_video)
+        output_style = _output_style_matching_preview(style, int(images.shape[2]), int(images.shape[1]))
         _subtitle_info("subtitle cues ready: count=%d", len(cues))
         _subtitle_info("stage 4/6: rendering subtitles onto %d frames", int(images.shape[0]))
         active_keys, active_by_key = _subtitle_active_frames(cues, int(images.shape[0]), frame_rate)

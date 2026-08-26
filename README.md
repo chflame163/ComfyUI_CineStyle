@@ -43,11 +43,14 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 使用 [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。模型首次使用时自动下载到 `ComfyUI/models/audio_models/moss`。
 
+![CS Transcribe-Subtitle 工作流](images/CS_Transcribe_Subtitle_workflow.jpg)
+
 #### 使用流程
 
 1. 将标准 ComfyUI `AUDIO` 输出连接到 `audio`。
 2. 选择语言模式和字幕分行长度。
 3. 执行节点，获得 SRT 文本，可直接连接到 `CS Video Subtitle` 的 `srt` 输入。
+
 
 #### 节点选项说明
 ![CS MOSS Audio Transcribe 节点](images/CS_MOSS_Audio_Transcribe_node.jpg)
@@ -98,7 +101,15 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ![Edit Timeline 界面](images/CS_Video_Subtitle_Timeline.jpg)
 
-！！！此处插入 Edit Timeline 界面说明！！！
+Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑和位置调整区域组成。
+
+- 预览区域显示当前视频帧和字幕效果。可播放、暂停和拖动查看画面，预览中的字幕会随当前帧更新。
+- 时间线包含 `Subtitles` 和 `Audio` 两条轨道。字幕轨道显示每条字幕的时间范围，音频轨道显示声音波形；拖动当前帧指针或使用播放、前进、后退按钮可以定位画面。
+- 使用 `Set In` 和 `Set Out` 设置字幕 Timeline 的预览起止帧。
+- 在字幕轨道中双击字幕片段，或使用右键菜单，可以编辑、复制、粘贴或删除字幕内容；字幕片段可在时间线上拖动调整时间范围。
+- `Text Style` 区域用于设置字体、字号、斜体、字距、主色、渐变色、描边和阴影。
+- `Position` 区域用于设置文字对齐方式以及规范化的 X/Y 位置。也可以直接在预览画面中拖动字幕，使用边角控制点调整文字区域大小。
+- 点击 `Apply` 将当前时间范围、字幕文本、样式和位置写回节点；点击 `Cancel` 放弃本次编辑。
 
 对于运行后才生成的视频输入，先运行一次工作流建立缓存，再打开节点前端窗口。    
 
@@ -338,7 +349,7 @@ Preview Cache 只用于前端窗口播放、预览和波形显示。
 
 #### Edit Timeline 时间线界面
 
-![Edit Timeline 时间线界面](images/CS_Load_Video_UI.jpg)
+![Edit Timeline 时间线界面](images/CS_Load_Video_Timeline.jpg)
 
 时间线界面从上到下依次包含视频预览、原视频信息、时间读数、当前帧指针、入出点标记栏、时间线操作按钮和输出参数。
 
@@ -369,6 +380,7 @@ Preview Cache 只用于前端窗口播放、预览和波形显示。
 
 ### CS Save Video
 基于 ComfyUI 官方 `Save Video` 节点，增加 save metadata 和符合行业惯例的 H.264 目标码率控制选项。
+![CS Save Video 节点](images/CS_Save_Video_node.jpg)
 
 - `video`：标准 ComfyUI `VIDEO` 输入。
 - `filename_prefix`：输出文件名前缀，支持官方的日期和节点控件格式化语法。

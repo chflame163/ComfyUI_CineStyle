@@ -119,11 +119,11 @@ function appendVideoTrimParams(params, trim) {
     if (trim.loaderSignature) params.set("loader_signature", String(trim.loaderSignature));
     return params;
 }
-async function fetchCachedPreview(node, filename = "", trim = null) {
+async function fetchCachedPreview(node, filename = "", trim = null, onProgress = null) {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId) return null;
     if (trim?.loaderId && filename) {
-        const shared = await ensureLoaderPreviewSource(trim);
+        const shared = await ensureLoaderPreviewSource(trim, { onProgress });
         if (shared?.token && shared?.url) {
             trim.loaderSignature = shared.loaderSignature;
             return { url: shared.url, info: shared.info || {}, label: shared.label || "CS Load Video preview cache", shared: true };
@@ -379,7 +379,7 @@ async function openTimeline(node) {
     dialog.innerHTML = `
       <div class="cs-subtitle-shell">
         <div class="cs-subtitle-head"><div><h2 class="cs-subtitle-title">Subtitle Timeline</h2><div class="cs-subtitle-muted cs-subtitle-file"></div></div><button class="cs-subtitle-close" type="button" aria-label="Close">&times;</button></div>
-         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><div class="cs-subtitle-overlay-clip"><img class="cs-subtitle-overlay-image" alt="" draggable="false"></div><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div><div class="cs-subtitle-preview-loading" role="status" aria-live="polite"><span class="cs-subtitle-preview-loading-text">Preparing subtitle preview...</span></div></div>
+         <div class="cs-subtitle-preview-wrap"><video class="cs-subtitle-video" controls playsinline preload="metadata"></video><div class="cs-subtitle-overlay-clip"><img class="cs-subtitle-overlay-image" alt="" draggable="false"></div><div class="cs-subtitle-interaction-box"><span class="cs-subtitle-resize-handle nw"></span><span class="cs-subtitle-resize-handle ne"></span><span class="cs-subtitle-resize-handle sw"></span><span class="cs-subtitle-resize-handle se"></span></div><div class="cs-subtitle-preview-loading" role="status" aria-live="polite"><span class="cs-subtitle-preview-loading-text">Preparing cache, please wait 0%</span></div></div>
         <div class="cs-subtitle-readout"><span class="current">00:00.00</span><span class="range"></span><span class="duration">00:00.00</span></div>
         <div class="cs-subtitle-pointer-row"><button class="cs-subtitle-pointer" type="button" aria-label="Current time"></button></div>
         <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-audio" aria-label="Audio"><span class="cs-subtitle-track-label">Audio</span><div class="cs-subtitle-track-body"><canvas class="cs-subtitle-waveform" aria-hidden="true"></canvas></div></div></div>
@@ -1120,15 +1120,20 @@ async function openTimeline(node) {
     }
     fetchFonts().then((fonts) => { inputs.font.innerHTML = ""; for (const font of fonts) { const option = document.createElement("option"); option.value = font; option.textContent = font; inputs.font.append(option); } if (!style.font && fonts.length) style.font = fonts[0]; inputs.font.value = style.font; updateOverlay(); }).catch(() => {});
     const initialize = async () => {
-        setLoading("Reading subtitle cache...");
+        setLoading("Preparing cache, please wait 0%");
         cachedSrt = await fetchCachedSrt(node).catch(() => null);
         sourceHash = cachedSrt?.sourceHash || (externalSrt ? await srtSourceHash(externalSrt).catch(() => "") : "");
         if (!sourceSrt && parseSrt(cachedSrt?.srt || "").length) {
             sourceSrt = cachedSrt.srt;
             replaceCues(sourceSrt);
         }
-        setLoading("Preparing video preview cache...");
-        cachedPreview = await fetchCachedPreview(node, filename, sourceTrim).catch(() => null);
+        cachedPreview = await fetchCachedPreview(
+            node,
+            filename,
+            sourceTrim,
+            (progress) => setLoading(`Preparing cache, please wait ${progress}%`),
+        ).catch(() => null);
+        setLoading("Preparing cache, please wait 100%");
         if (cachedPreview?.warning) {
             status.textContent = cachedPreview.warning;
             cachedPreview = null;

@@ -1,133 +1,18 @@
 {
   "id": "c3c87c25-d813-4da6-b2e5-676dab89712d",
   "revision": 0,
-  "last_node_id": 8,
-  "last_link_id": 7,
+  "last_node_id": 9,
+  "last_link_id": 10,
   "nodes": [
-    {
-      "id": 6,
-      "type": "MaskPreview",
-      "pos": [
-        3626.1762465588454,
-        7324.474786770985
-      ],
-      "size": [
-        367.8755354013015,
-        447.36713149126626
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "mask",
-          "type": "MASK",
-          "link": 5
-        }
-      ],
-      "outputs": [
-        {
-          "name": "mask",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "MaskPreview"
-      }
-    },
-    {
-      "id": 5,
-      "type": "CS_Video_Segment_SeC",
-      "pos": [
-        3116.633003108347,
-        7411.2438265170185
-      ],
-      "size": [
-        390,
-        316
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "SEC_MODEL",
-          "link": 7
-        },
-        {
-          "name": "images",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "name": "video_input",
-          "shape": 7,
-          "type": "VIDEO",
-          "link": 4
-        },
-        {
-          "name": "proxy_video",
-          "shape": 7,
-          "type": "VIDEO",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": [
-            5
-          ]
-        },
-        {
-          "name": "anchor_mask",
-          "type": "MASK",
-          "links": null
-        },
-        {
-          "name": "video_info",
-          "type": "DICT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CS_Video_Segment_SeC"
-      },
-      "widgets_values": [
-        30,
-        "bidirectional",
-        -1,
-        12,
-        false,
-        true,
-        "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
-        ""
-      ],
-      "widgets_values_named": {
-        "anchor_frame": 30,
-        "tracking_direction": "bidirectional",
-        "max_frames_to_track": -1,
-        "mllm_memory_size": 12,
-        "offload_video_to_cpu": false,
-        "auto_unload_model": true,
-        "prompt_data": "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
-        "Open Selector": ""
-      },
-      "color": "rgba(67, 105, 82, 0.85)"
-    },
     {
       "id": 8,
       "type": "CS_SeC_ModelLoader",
       "pos": [
-        2677.035077893699,
-        7218.3457124224915
+        2629.839098804309,
+        7235.06095501665
       ],
       "size": [
-        277.033203125,
+        314.39668657076754,
         130
       ],
       "flags": {},
@@ -139,7 +24,7 @@
           "name": "SEC_MODEL",
           "type": "SEC_MODEL",
           "links": [
-            7
+            8
           ]
         }
       ],
@@ -161,11 +46,88 @@
       "color": "rgba(67, 105, 82, 0.85)"
     },
     {
+      "id": 9,
+      "type": "CS_Video_Segment_SeC",
+      "pos": [
+        3004.12175602699,
+        7414.61222871321
+      ],
+      "size": [
+        390,
+        360
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "SEC_MODEL",
+          "link": 8
+        },
+        {
+          "name": "images",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "video_input",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "anchor_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "DICT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CS_Video_Segment_SeC"
+      },
+      "widgets_values": [
+        0,
+        "bidirectional",
+        -1,
+        12,
+        false,
+        true,
+        "{\"version\":2,\"objects\":[]}",
+        ""
+      ],
+      "widgets_values_named": {
+        "anchor_frame": 0,
+        "tracking_direction": "bidirectional",
+        "max_frames_to_track": -1,
+        "mllm_memory_size": 12,
+        "offload_video_to_cpu": false,
+        "auto_unload_model": true,
+        "prompt_data": "{\"version\":2,\"objects\":[]}",
+        "Open Selector": ""
+      },
+      "color": "rgba(67, 105, 82, 0.85)"
+    },
+    {
       "id": 1,
       "type": "CS_Load_Video",
       "pos": [
-        2594.369153839268,
-        7455.079203546543
+        2612.952570605716,
+        7423.418567574078
       ],
       "size": [
         360,
@@ -180,7 +142,7 @@
           "name": "VIDEO",
           "type": "VIDEO",
           "links": [
-            4
+            9
           ]
         },
         {
@@ -222,9 +184,7 @@
         640,
         24,
         2.1,
-        0.8,
-        "image",
-        ""
+        0.8
       ],
       "widgets_values_named": {
         "video": "ComfyUI_00010_.mp4",
@@ -235,48 +195,78 @@
         "width": 1120,
         "height": 640,
         "fps": 24,
-        "proxy_threshold": 2.1,
-        "proxy_size": 0.8,
-        "upload": "image",
-        "Edit Timeline": ""
+        "upload": 2.1,
+        "Edit Timeline": 0.8
       },
       "color": "rgba(67, 105, 82, 0.85)"
+    },
+    {
+      "id": 6,
+      "type": "MaskPreview",
+      "pos": [
+        3425.8883102982463,
+        7343.254853450303
+      ],
+      "size": [
+        298.3597912008863,
+        659.3557375677801
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MaskPreview"
+      }
     }
   ],
   "links": [
     [
-      4,
+      8,
+      8,
+      0,
+      9,
+      0,
+      "SEC_MODEL"
+    ],
+    [
+      9,
       1,
       0,
-      5,
+      9,
       2,
       "VIDEO"
     ],
     [
-      5,
-      5,
+      10,
+      9,
       0,
       6,
       0,
       "MASK"
-    ],
-    [
-      7,
-      8,
-      0,
-      5,
-      0,
-      "SEC_MODEL"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.7627768444386934,
+      "scale": 0.9229599817708193,
       "offset": [
-        -2177.7221085674264,
-        -6926.288969544942
+        -1927.523123359651,
+        -6975.77789259822
       ]
     },
     "frontendVersion": "1.49.6"

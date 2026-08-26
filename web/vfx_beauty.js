@@ -57,7 +57,9 @@ function addStyles() {
       .cs-vfx-head{justify-content:space-between}.cs-vfx-title{margin:0;font-size:17px}.cs-vfx-muted,.cs-vfx-status{color:#9da5b4}
       .cs-vfx-button{min-height:31px;border:1px solid #424956;border-radius:5px;padding:6px 10px;background:#20232a;color:#f2f4f7;cursor:pointer}
       .cs-vfx-button:hover{border-color:#6aa9df}.cs-vfx-button.active{background:#317ec4;border-color:#6db6ee}.cs-vfx-close{font-size:18px;padding:3px 10px}
-      .cs-vfx-view-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;min-height:260px}
+      .cs-vfx-view-grid{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:9px;min-height:260px}
+      .cs-vfx-cache-loading{position:absolute;z-index:10;inset:0;display:flex;align-items:center;justify-content:center;padding:18px;background:#08090be8;color:#dce7f3;text-align:center}
+      .cs-vfx-cache-loading[hidden]{display:none}
       .cs-vfx-viewport{position:relative;min-height:260px;overflow:hidden;background:#08090b;border:1px solid #343943;border-radius:6px;cursor:default}.cs-vfx-viewport.pan-ready{cursor:grab}.cs-vfx-viewport.pan-active{cursor:grabbing}
       .cs-vfx-viewport-label{position:absolute;z-index:2;top:8px;left:9px;padding:3px 6px;border-radius:4px;background:#111419c9;color:#cbd2dc;font-size:12px}
       .cs-vfx-viewport img{display:block;width:100%;height:100%;min-height:260px;object-fit:contain;transform-origin:center center;transition:transform .08s linear}
@@ -126,22 +128,12 @@ async function openPreview(node) {
         const element = dialog?.querySelector(".cs-vfx-status");
         if (element) { element.textContent = message; element.classList.toggle("cs-vfx-error", error); }
     };
-    let source = null;
-    let cachedSource = null;
-    try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
-    const upstreamSource = connectedVideoSource(node, ["image", "images", "video_input"]);
-    source = upstreamSource?.loaderId ? upstreamSource : cachedSource;
-    if (!source) source = upstreamSource;
-    if (!source) { app.canvas?.prompt?.("Run this VFX node once to cache its own connected image/video input.", ""); return; }
-    if (source.loaderId && !source.token) {
-        try { source = await ensureLoaderPreviewSource(source); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
-    }
-    if (!source.token && !source.filename) { app.canvas?.prompt?.("No previewable input source was found.", ""); return; }
-    let info = source.info;
-    if (!info) {
-        try { info = prepareInputTimeline(source, await fetchInfo(source.filename)); } catch (error) { app.canvas?.prompt?.(error.message, ""); return; }
-    }
     const initialWeights = parseWeights(valueOf(node, "weights", "6.0, 0.0, 3.0"));
+    let source = null;
+    let info = null;
+    let closed = false;
+    let timer = null;
+    let resizeObserver = null;
     dialog = document.createElement("dialog");
     dialog.className = "cs-vfx-dialog";
     dialog._vfxZoom = 1;
@@ -149,7 +141,7 @@ async function openPreview(node) {
     dialog._vfxCompare = 0;
     dialog.innerHTML = `<div class="cs-vfx-shell">
       <div class="cs-vfx-head"><div><h2 class="cs-vfx-title">VFX Preview</h2><div class="cs-vfx-muted cs-vfx-file"></div></div><button class="cs-vfx-button cs-vfx-close" type="button">&times;</button></div>
-      <div class="cs-vfx-view-grid"><div class="cs-vfx-viewport"><span class="cs-vfx-viewport-label">Original</span><img class="cs-vfx-image cs-vfx-original" alt="Original frame"></div><div class="cs-vfx-viewport cs-vfx-compare"><span class="cs-vfx-viewport-label">Result</span><img class="cs-vfx-image cs-vfx-result" alt="Result preview"><div class="cs-vfx-compare-original-clip"><img class="cs-vfx-image cs-vfx-compare-original" alt="Original comparison"></div><div class="cs-vfx-compare-divider" title="Drag to compare Original and Result"><span></span></div></div></div>
+      <div class="cs-vfx-view-grid"><div class="cs-vfx-viewport"><span class="cs-vfx-viewport-label">Original</span><img class="cs-vfx-image cs-vfx-original" alt="Original frame"></div><div class="cs-vfx-viewport cs-vfx-compare"><span class="cs-vfx-viewport-label">Result</span><img class="cs-vfx-image cs-vfx-result" alt="Result preview"><div class="cs-vfx-compare-original-clip"><img class="cs-vfx-image cs-vfx-compare-original" alt="Original comparison"></div><div class="cs-vfx-compare-divider" title="Drag to compare Original and Result"><span></span></div></div><div class="cs-vfx-cache-loading" role="status" aria-live="polite">Preparing cache, please wait 0%</div></div>
       <div class="cs-vfx-row"><div class="cs-vfx-zoom"><span class="cs-vfx-muted">Zoom</span><button class="cs-vfx-button" data-zoom="0.5" type="button">50%</button><button class="cs-vfx-button" data-zoom="1" type="button">100%</button><button class="cs-vfx-button" data-zoom="2" type="button">200%</button><button class="cs-vfx-button" data-zoom="fit" type="button">Fit</button><span class="cs-vfx-muted cs-vfx-zoom-value">100%</span></div></div>
       <div class="cs-vfx-controls"><div class="cs-vfx-step-buttons"><button class="cs-vfx-button cs-vfx-prev" type="button">|&lt;</button><button class="cs-vfx-button cs-vfx-next" type="button">&gt;|</button></div><input class="cs-vfx-timeline" type="range" min="0" max="0" step="1" value="0"><input class="cs-vfx-frame-input" type="number" min="0" max="0" step="1" value="0"><span class="cs-vfx-frame-count cs-vfx-muted">0 / 0</span></div>
       <div class="cs-vfx-input-grid">
@@ -160,6 +152,35 @@ async function openPreview(node) {
       <div class="cs-vfx-actions"><span class="cs-vfx-status">Loading preview...</span><button class="cs-vfx-button cs-vfx-cancel" type="button">Close</button><button class="cs-vfx-button active cs-vfx-apply" type="button">Apply to Node</button></div>
     </div>`;
     document.body.append(dialog);
+    const loading = dialog.querySelector(".cs-vfx-cache-loading");
+    const setLoading = (message, visible = true) => { if (!loading) return; loading.textContent = message; loading.hidden = !visible; };
+    const earlyClose = () => { closed = true; dialog.close(); dialog.remove(); };
+    dialog.querySelector(".cs-vfx-close").addEventListener("click", earlyClose);
+    dialog.querySelector(".cs-vfx-cancel").addEventListener("click", earlyClose);
+    dialog.addEventListener("cancel", earlyClose);
+    dialog.showModal();
+    try {
+        let cachedSource = null;
+        try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { throw error; }
+        const upstreamSource = connectedVideoSource(node, ["image", "images", "video_input"]);
+        source = upstreamSource?.loaderId ? upstreamSource : cachedSource;
+        if (!source) source = upstreamSource;
+        if (!source) throw new Error("Run this VFX node once to cache its own connected image/video input.");
+        if (source.loaderId && !source.token) {
+            source = await ensureLoaderPreviewSource(source, { onProgress: (progress) => setLoading(`Preparing cache, please wait ${progress}%`) });
+        }
+        if (!source.token && !source.filename) throw new Error("No previewable input source was found.");
+        info = source.info;
+        if (!info) info = prepareInputTimeline(source, await fetchInfo(source.filename));
+        if (closed) return;
+    } catch (error) {
+        if (!closed) setLoading(error?.message || "Unable to prepare cache");
+        return;
+    }
+    dialog.querySelector(".cs-vfx-close").removeEventListener("click", earlyClose);
+    dialog.querySelector(".cs-vfx-cancel").removeEventListener("click", earlyClose);
+    dialog.removeEventListener("cancel", earlyClose);
+    setLoading("Preparing cache, please wait 100%", false);
     setComparePosition(dialog, 0);
     dialog.querySelector(".cs-vfx-file").textContent = `${source.label || source.filename || "Cached input"} · ${info.frames || 1} frames`;
     const maxFrame = Math.max(0, Number(info.frames || 1) - 1);
@@ -184,7 +205,7 @@ async function openPreview(node) {
     };
     setColourDisplay(colourInput.value) || setColourDisplay("#878787");
     timeline.max = String(maxFrame); frameInput.max = String(maxFrame);
-    let frame = 0; let requestSerial = 0; let timer = null; let colourChanged = false;
+    let frame = 0; let requestSerial = 0; let colourChanged = false;
     let compareDragging = false;
     const setFrame = (next) => { frame = clamp(Math.round(Number(next) || 0), 0, maxFrame); timeline.value = String(frame); frameInput.value = String(frame); dialog.querySelector(".cs-vfx-frame-count").textContent = `${frame} / ${maxFrame}`; schedulePreview(); };
     const weightsValue = () => Array.from(dialog.querySelectorAll("[data-weight]")).map((input) => input.value.trim()).join(", ");
@@ -247,9 +268,9 @@ async function openPreview(node) {
         const stopPan = (event) => { if (!dialog._vfxPanDrag || dialog._vfxPanDrag.pointerId !== event.pointerId) return; viewport.releasePointerCapture?.(event.pointerId); dialog._vfxPanDrag = null; viewport.classList.remove("pan-active"); };
         viewport.addEventListener("pointerup", stopPan); viewport.addEventListener("pointercancel", stopPan);
     });
-    const resizeObserver = new ResizeObserver(() => { clampPan(dialog); applyViewportTransform(dialog); });
+    resizeObserver = new ResizeObserver(() => { clampPan(dialog); applyViewportTransform(dialog); });
     resizeObserver.observe(dialog.querySelector(".cs-vfx-view-grid"));
-    const close = () => { clearTimeout(timer); resizeObserver.disconnect(); dialog.close(); dialog.remove(); }; dialog.querySelector(".cs-vfx-close").addEventListener("click", close); dialog.querySelector(".cs-vfx-cancel").addEventListener("click", close); dialog.addEventListener("cancel", close);
+    const close = () => { closed = true; clearTimeout(timer); resizeObserver.disconnect(); dialog.close(); dialog.remove(); }; dialog.querySelector(".cs-vfx-close").addEventListener("click", close); dialog.querySelector(".cs-vfx-cancel").addEventListener("click", close); dialog.addEventListener("cancel", close);
     dialog.querySelector(".cs-vfx-apply").addEventListener("click", () => {
         const setValue = (name, value) => {
             const target = widget(node, name); if (!target) return;
@@ -262,7 +283,7 @@ async function openPreview(node) {
         dialog.querySelectorAll("[data-param]").forEach((input) => setValue(input.dataset.param, Number(input.value)));
         node.graph?.setDirtyCanvas(true, true); close();
     });
-    dialog.showModal(); setZoom(dialog, 1); setFrame(0);
+    setZoom(dialog, 1); setFrame(0);
 }
 
 app.registerExtension({

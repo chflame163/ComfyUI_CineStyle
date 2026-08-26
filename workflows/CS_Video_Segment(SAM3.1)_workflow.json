@@ -1,8 +1,8 @@
 {
   "id": "a2eed32a-ab99-440a-ae63-5534dca77c0c",
   "revision": 0,
-  "last_node_id": 15,
-  "last_link_id": 18,
+  "last_node_id": 17,
+  "last_link_id": 21,
   "nodes": [
     {
       "id": 4,
@@ -24,7 +24,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            9
+            19
           ]
         },
         {
@@ -49,15 +49,15 @@
       }
     },
     {
-      "id": 10,
+      "id": 17,
       "type": "CS_Video_Segment_SAM3",
       "pos": [
-        2574.017276769499,
-        7399.857157427223
+        2574.793888010903,
+        7460.86627981609
       ],
       "size": [
         390,
-        244
+        360
       ],
       "flags": {},
       "order": 2,
@@ -66,7 +66,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 9
+          "link": 19
         },
         {
           "name": "images",
@@ -78,13 +78,7 @@
           "name": "video_input",
           "shape": 7,
           "type": "VIDEO",
-          "link": 10
-        },
-        {
-          "name": "proxy_video",
-          "shape": 7,
-          "type": "VIDEO",
-          "link": null
+          "link": 20
         }
       ],
       "outputs": [
@@ -92,7 +86,7 @@
           "name": "MASK",
           "type": "MASK",
           "links": [
-            12
+            21
           ]
         },
         {
@@ -110,17 +104,17 @@
         "Node name for S&R": "CS_Video_Segment_SAM3"
       },
       "widgets_values": [
-        56,
+        0,
         "both",
         16,
-        "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
+        "{\"version\":2,\"objects\":[]}",
         ""
       ],
       "widgets_values_named": {
-        "anchor_frame": 56,
+        "anchor_frame": 0,
         "propagation_direction": "both",
         "max_objects": 16,
-        "prompt_data": "{\"version\":2,\"objects\":[{\"id\":1,\"bbox\":null,\"points\":[],\"mask\":null}]}",
+        "prompt_data": "{\"version\":2,\"objects\":[]}",
         "Open Selector": ""
       },
       "color": "rgba(67, 105, 82, 0.85)"
@@ -129,12 +123,12 @@
       "id": 8,
       "type": "MaskPreview",
       "pos": [
-        3076.3287756111117,
-        7319.679750862927
+        2992.6306721984533,
+        7339.994824506777
       ],
       "size": [
-        217.46814749521218,
-        298.62828830045964
+        353.9854423818797,
+        531.8453337318497
       ],
       "flags": {},
       "order": 3,
@@ -143,7 +137,7 @@
         {
           "name": "mask",
           "type": "MASK",
-          "link": 12
+          "link": 21
         }
       ],
       "outputs": [
@@ -161,8 +155,8 @@
       "id": 2,
       "type": "CS_Load_Video",
       "pos": [
-        2001.9335791029555,
-        7445.839494230709
+        2152.3524285161557,
+        7405.430965928209
       ],
       "size": [
         360,
@@ -177,7 +171,7 @@
           "name": "VIDEO",
           "type": "VIDEO",
           "links": [
-            10
+            20
           ]
         },
         {
@@ -219,9 +213,7 @@
         640,
         24,
         2.1,
-        0.8,
-        "image",
-        ""
+        0.8
       ],
       "widgets_values_named": {
         "video": "ComfyUI_00010_.mp4",
@@ -232,34 +224,32 @@
         "width": 1120,
         "height": 640,
         "fps": 24,
-        "proxy_threshold": 2.1,
-        "proxy_size": 0.8,
-        "upload": "image",
-        "Edit Timeline": ""
+        "upload": 2.1,
+        "Edit Timeline": 0.8
       },
       "color": "rgba(67, 105, 82, 0.85)"
     }
   ],
   "links": [
     [
-      9,
+      19,
       4,
       0,
-      10,
+      17,
       0,
       "MODEL"
     ],
     [
-      10,
+      20,
       2,
       0,
-      10,
+      17,
       2,
       "VIDEO"
     ],
     [
-      12,
-      10,
+      21,
+      17,
       0,
       8,
       0,
@@ -270,10 +260,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.7627768444386932,
+      "scale": 0.922959981770819,
       "offset": [
-        -1459.8888637044674,
-        -6869.4832842828855
+        -1459.1056308706918,
+        -6903.95564068497
       ]
     },
     "frontendVersion": "1.49.6"

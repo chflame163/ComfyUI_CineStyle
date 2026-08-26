@@ -67,6 +67,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 ### CS Video Subtitle
 
 将 SRT 字幕渲染到标准 ComfyUI `VIDEO`，并提供可交互的 Subtitle Timeline。字幕样式包括字体、字号、颜色、渐变、对齐、斜体、字距、位置、描边和阴影。
+节点从ComfyUI/models/fonts 目录扫描并加载字体。请提前将字体放置到此目录。
 
 #### 使用流程
 

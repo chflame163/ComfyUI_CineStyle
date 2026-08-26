@@ -41,7 +41,8 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ### CS MOSS Audio Transcribe
 
-使用 [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。模型首次使用时自动下载到 `ComfyUI/models/audio_models/moss`。
+使用 [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。
+首次运行会自动下载模型。或者从[OpenMOSS-Team/MOSS-Transcribe-Diarize/](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/tree/main) 手动下载模型，然后放到`ComfyUI/models/audio_models/moss`目录。
 
 ![CS Transcribe-Subtitle 工作流](images/CS_Transcribe_Subtitle_workflow.jpg)
 
@@ -71,14 +72,14 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 #### 使用流程
 
-1. 将 CS Load Video 或其他兼容节点的 `VIDEO` 输出连接到 `video`。
+1. 将 CS Load Video 或其他兼容节点的 `VIDEO` 输出连接到 `video`。自动预览功能仅在接入CS Load Video节点时支持。
 2. 将 SRT 文本连接到 `srt`，或直接填写/保留 `edited_srt`。
 3. 点击 `Edit Timeline` 编辑字幕时间、样式和位置。
 4. 点击 `Apply` 保存字幕设置，再执行节点得到最终视频。
 
 #### 节点选项说明
 ![CS Video Subtitle 节点](images/CS_Video_Subtitle_node.jpg)
-- `video`：兼容 ComfyUI `VIDEO` 类型的输入。
+- `video`：兼容 ComfyUI `VIDEO` 类型的输入，自动预览功能仅在接入CS Load Video节点时支持。
 - `srt`：可选 `STRING`，用于提供原始 SRT。
 - `edited_srt`：Timeline 保存的 SRT 文本；格式有效时优先使用，格式无效时使用srt输入。
 - `preview_in` / `preview_out`：字幕 Timeline 的预览范围，分别表示起始帧和结束帧。
@@ -132,14 +133,14 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 
 #### 使用流程
 
-- 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点。
+- 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image`节点，自动预览功能仅在接入CS Load Video节点时支持。
 - 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
 - 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
 - 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 保存预览参数。
 
 #### 节点选项说明
 ![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
-- image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。
+- image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。自动预览功能仅在接入CS Load Video节点时支持。
 - mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域。
 - colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
 - weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时保存参数。
@@ -213,7 +214,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 使用流程
 
 1. 先执行 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader)，再把输出的 `SEC_MODEL` 连接到节点的 `model`。
-2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；Selector 统一使用 CS Load Video 共享 preview cache。
+2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。自动预览功能仅在接入CS Load Video节点时支持。
 3. 点击 `Open Selector`，在锚点帧中定义一个或多个对象的提示。
 4. 点击 `Preview Current Frame` 检查 SeC-4B 的当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。默认情况下，节点执行结束会卸载 SeC-4B 的推理子模型以释放显存。
@@ -221,7 +222,7 @@ ComfyUI/models/facexlib/parsing_bisenet.pth
 #### 节点选项说明
 ![CS Video Segment (SeC-4B) 节点](images/CS_Video_Segment(Sec-4B)_node.jpg)
 - `model`：`CS SeC-4B Model Loader` 输出的 `SEC_MODEL`，必需输入。
-- `images`：可选 `IMAGE` 帧批次，连接后作为执行和 Selector 的首选视频来源。
+- `images`：可选 `IMAGE` 帧批次。自动预览功能仅在接入CS Load Video节点时支持。
 - `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始，通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的多对象 Mask、BBox 和 Point 提示数据，不建议手动编辑。
@@ -246,7 +247,7 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 #### 使用流程
 
 1. 使用官方 `CheckpointLoaderSimple`加载 SAM3/SAM3.1 模型，并连接节点的 `model`。
-2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`；Selector 统一使用 CS Load Video 共享 preview cache。
+2. 将 CS Load Video 的 `IMAGE` 或 `VIDEO` 输出连接到节点。`images` 与 `video_input` 同时连接时，节点优先使用 `images`。自动预览功能仅在接入CS Load Video节点时支持。
 3. 点击节点上的 `Open Selector`，在实际输入视频的帧上定义提示。
 4. 点击 Selector 的 `Preview Current Frame` 检查当前帧分割结果，确认后点击 `Apply to Node`。
 5. 执行节点，得到整段视频的 mask。
@@ -254,8 +255,8 @@ SAM3.1 官方权重下载地址：[Comfy-Org/sam3.1](https://huggingface.co/Comf
 #### 节点选项说明
 ![CS Video Segment (SAM3.1) 节点](images/CS_Video_Segment(SAM3.1)_node.jpg)
 - `model`：官方 SAM3/SAM3.1 模型，必需输入。
-- `images`：可选 `IMAGE` 帧批次。连接后作为执行和 Selector 的首选视频来源。
-- `video_input`：可选 `VIDEO` 输入。仅在 `images` 未连接时使用。
+- `images`：可选 `IMAGE` 帧批次。自动预览功能仅在接入CS Load Video节点时支持。
+- `video_input`：可选 `VIDEO` 输入，仅在 `images` 未连接时使用。自动预览功能仅在接入CS Load Video节点时支持。
 - `anchor_frame`：锚点帧在当前输入帧批次中的本地编号，从 `0` 开始。通常由 Selector 自动写入。
 - `prompt_data`：Selector 序列化的 Mask、BBox、Point 和对象列表，不建议手动编辑。
 - `propagation_direction`：传播方向，`both` 双向传播，`forward` 向后传播，`backward` 向前传播。

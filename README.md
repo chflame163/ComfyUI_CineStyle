@@ -27,11 +27,10 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
-* 添加 [CS Color Grade](#cs-color-grade) 节点，对视频进行专业级调色。
+* 添加 [CS Color Grade](#cs-color-grade) 节点，提供 HEX 白点、色温/色调、AFX/Nuke 风格基础调色、RGB 通道控制、PCHIP 曲线和 `.cube` LUT，对视频进行专业级调色。
 * 添加 [CS Video Subtitle](#cs-video-subtitle) 节点，将 SRT 字幕渲染到标准 ComfyUI VIDEO，并提供字幕时间线编辑器。
 * 添加 [CS MOSS Audio Transcribe](#cs-moss-audio-transcribe) 节点，将标准 ComfyUI AUDIO 转写为带时间戳的 SRT。
 * 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理。
-* 添加 [CS Color Grade](#cs-color-grade) 节点，提供 HEX 白点、色温/色调、AFX/Nuke 风格基础调色、RGB 通道控制、PCHIP 曲线和 `.cube` LUT。
 * 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
@@ -43,7 +42,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ### CS Color Grade
 
-专业级视频调色节点。
+提供 HEX 白点、色温/色调、基础调色、RGB 通道控制、RGB多通道曲线和LUT加载，对视频进行专业级调色。
 
 #### 使用流程
 

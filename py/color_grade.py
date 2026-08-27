@@ -1,4 +1,4 @@
-"""AFX Grade-inspired colour grading node with interactive curve preview."""
+
 
 from __future__ import annotations
 

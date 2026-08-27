@@ -57,10 +57,10 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 ![CS Color Grade 节点参数](images/CS_Color_Grade_node.jpg)
 
 - image：标准 ComfyUI `IMAGE`，自动预览功能仅在接入CS Load Video节点时支持。
-- mask：可选标准 ComfyUI `MASK`，支持 `[height, width]`、`[batch, height, width]` 和 `[batch, height, width, 1]`。Batch 为 1 时可以广播到所有图像帧；Batch 既不是 1 也不等于图像 Batch 时会报错。空间尺寸不一致时会调整到图像尺寸。
+- mask：可选标准 ComfyUI `MASK`。
 - Load LUT：加载外部LUT文件，默认 `None`。支持 1D LUT、3D LUT，以及带 1D Shaper 的 1D+3D LUT。新增文件后需要刷新节点列表或重启 ComfyUI 才会出现在选项中。
-- White Point：`#RRGGBB` 格式的颜色字符串，默认 `#FFFFFF`。颜色会按 sRGB 解码为线性 Rec.709 RGB，再按通道均值归一化；`#FFFFFF` 因而对应中性白点。节点会保护过小通道，并拒绝非有限值或无效格式。
-- Color Temperature：Matchbox 原始 `temp` 参数，范围 `-1–1`，默认 `0`。与 `Tint` 一起参与白平衡计算。
+- White Point：`#RRGGBB` 格式的颜色字符串，默认 `#FFFFFF`对应中性白点。
+- Color Temperature：范围 `-1–1`，默认 `0`。与 `Tint` 一起参与白平衡计算。
 - Tint：白平衡中的绿色/洋红偏移，范围 `-1–1`，默认 `0`。
 - Offset：三个通道同时增加的整体偏移，范围 `-1–1`，默认 `0`。
 - Multiply：三个通道同时使用的整体增益，范围 `0–2`，默认 `1`。

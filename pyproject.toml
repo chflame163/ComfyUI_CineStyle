@@ -1,6 +1,6 @@
 [project]
 name = "cinestyle"
-version = "1.0.7"
+version = "1.0.8"
 description = "A set of ComfyUI custom nodes for video workflows."
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

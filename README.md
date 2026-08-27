@@ -27,9 +27,11 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Color Grade](#cs-color-grade) 节点，对视频进行专业级调色。
 * 添加 [CS Video Subtitle](#cs-video-subtitle) 节点，将 SRT 字幕渲染到标准 ComfyUI VIDEO，并提供字幕时间线编辑器。
 * 添加 [CS MOSS Audio Transcribe](#cs-moss-audio-transcribe) 节点，将标准 ComfyUI AUDIO 转写为带时间戳的 SRT。
 * 添加 [CS VFX Beauty](#cs-vfx-beauty) 节点，自动估算视频片段肤色并执行皮肤磨皮美化处理。
+* 添加 [CS Color Grade](#cs-color-grade) 节点，提供 HEX 白点、色温/色调、AFX/Nuke 风格基础调色、RGB 通道控制、PCHIP 曲线和 `.cube` LUT。
 * 添加 [CS Video Segment (SAM3.1)](#cs-video-segment-sam31) 节点，在锚点帧用 Semantic、粗略 Mask、Point 或 BBox 定义对象，并自动传播 mask。
 * 添加 [CS Video Segment (SeC-4B)](#cs-video-segment-sec-4b) 节点，使用 SeC-4B 的概念理解和 LongSAM2.1 记忆传播 mask。
 * 添加 [CS SeC-4B Model Loader](#cs-sec-4b-model-loader) 节点，用于加载和复用 SeC-4B 推理模型。
@@ -38,6 +40,64 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 
 ## 节点说明
+
+### CS Color Grade
+
+专业级视频调色节点。
+
+#### 使用流程
+
+1. 将图片节点或 `CS Load Video` 的 `IMAGE` 输出连接到 `image`。`CS Load Video` 输入可以为视频帧批次，节点会按帧批次逐块处理。
+2. 将可选的 `MASK` 连接到 `mask`。黑色区域保持原图，白色区域应用完整调色，灰度区域按遮罩值线性混合。
+3. 将 `.cube` 文件放入 `ComfyUI/models/luts/`，在 `Load LUT` 中选择文件；不需要外部 LUT 时选择 `None`。
+4. 直接执行节点得到 RGB `IMAGE`，或先点击 `Grade Preview` 调整当前帧，再点击 `Apply to Node` 将预览参数写回节点。
+5. 如果输入来自上游运行后才生成的图像或视频，首次打开 `Grade Preview` 前先运行一次工作流建立 Preview cache。
+
+#### 节点输入
+
+![CS Color Grade 节点参数](images/CS_Color_Grade_node.jpg)
+
+- image：标准 ComfyUI `IMAGE`，自动预览功能仅在接入CS Load Video节点时支持。
+- mask：可选标准 ComfyUI `MASK`，支持 `[height, width]`、`[batch, height, width]` 和 `[batch, height, width, 1]`。Batch 为 1 时可以广播到所有图像帧；Batch 既不是 1 也不等于图像 Batch 时会报错。空间尺寸不一致时会调整到图像尺寸。
+- Load LUT：加载外部LUT文件，默认 `None`。支持 1D LUT、3D LUT，以及带 1D Shaper 的 1D+3D LUT。新增文件后需要刷新节点列表或重启 ComfyUI 才会出现在选项中。
+- White Point：`#RRGGBB` 格式的颜色字符串，默认 `#FFFFFF`。颜色会按 sRGB 解码为线性 Rec.709 RGB，再按通道均值归一化；`#FFFFFF` 因而对应中性白点。节点会保护过小通道，并拒绝非有限值或无效格式。
+- Color Temperature：Matchbox 原始 `temp` 参数，范围 `-1–1`，默认 `0`。与 `Tint` 一起参与白平衡计算。
+- Tint：白平衡中的绿色/洋红偏移，范围 `-1–1`，默认 `0`。
+- Offset：三个通道同时增加的整体偏移，范围 `-1–1`，默认 `0`。
+- Multiply：三个通道同时使用的整体增益，范围 `0–2`，默认 `1`。
+- Gamma：三个通道同时使用的 Gamma，范围 `0–10`，默认 `1`；实际计算使用 `1 / Gamma` 指数，并保留负值的符号。Gamma 必须大于 epsilon。
+- Brightness：Gamma 后的整体加法偏移，范围 `-1–1`，默认 `0`。
+- Contrast：以 `0.5` 为中心的线性对比度，范围 `-1–1`，默认 `0`。`0` 不改变对比度，`-1` 将所有值压到 `0.5`，正值提高对比度。
+- Saturation：基于 Rec.709 亮度权重的饱和度，范围 `0–10`，默认 `1`。`0` 为灰度，`1` 保持原饱和度，大于 `1` 会增强色彩。
+- RGB Offset：分别作用于 R、G、B 的偏移数组，默认 `[0.0,0.0,0.0]`。
+- RGB Multiply：分别作用于 R、G、B 的增益数组，默认 `[1.0,1.0,1.0]`。
+- RGB Gamma：分别作用于 R、G、B 的 Gamma 数组，默认 `[1.0,1.0,1.0]`；每个通道必须大于 epsilon。
+- curves：RGB 主曲线和 R/G/B 独立曲线的 JSON 字符串。该输入属于高级参数，通常通过 `Grade Preview` 编辑，不建议手动修改。
+
+
+#### 输出
+
+- `IMAGE`：调色后的 RGB 图像。
+
+#### 外部 LUT
+LUT 文件必须放在 `ComfyUI/models/luts`
+
+#### Grade Preview
+
+![CS Color Grade Preview](images/CS_Color_Grade_Preview.jpg)
+
+Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参数区：
+
+- 预览视口显示 `Result / Original`。拖动中间的对比条可以在原图和结果之间进行左右比较。
+- `50%`、`100%`、`200%` 和 `Fit` 用于设置缩放；放大后按住鼠标左键拖动可以平移画面，鼠标滚轮也可以调整缩放比例。
+- 时间线支持拖动定位、帧号输入，以及 `|<` / `>|` 单帧前进和后退。视频帧批次会显示总帧数。
+- 点击 White Point 的色块打开取色器，旁边的文本框接受严格的 `#RRGGBB` 格式。
+- `Color Temperature`、`Tint`、`Brightness`、`Contrast` 和 `Saturation` 使用滑块，并保留数值输入框和单项重置按钮。
+- `Offset`、`Multiply` 和 `Gamma` 包含整体滑块、RGB 色轮以及 R/G/B 数值。在色轮上拖动鼠标改变对应的 RGB 通道参数，数值框可进行精确调整。
+- 曲线可分别调整 `RGB`、`R`、`G`、`B` 四个通道；`Reset` 重置当前曲线。在曲线编辑器单击空白处添加点，按住拖动控制点，右键删除点；端点不可删除。
+- `Reset All` 重置所有参数、RGB 数组、LUT 选择和曲线。 
+- 点击 `Apply to Node` 把当前参数写回节点；点击 `Close` 关闭窗口并放弃未应用的修改。
+
 
 ### CS MOSS Audio Transcribe
 

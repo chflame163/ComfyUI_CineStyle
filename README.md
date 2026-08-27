@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Mask Grow](#cs-mask-grow) 节点，较官方Grow Mask节点运算速度大幅提升，并能更好的保持轮廓特征。
 * 添加 [CS Color Grade](#cs-color-grade) 节点，提供 HEX 白点、色温/色调、基础调色、RGB 通道控制、RGB多通道曲线和LUT加载，对视频进行专业级调色。
 * 添加 [CS Video Subtitle](#cs-video-subtitle) 节点，将 SRT 字幕渲染到标准 ComfyUI VIDEO，并提供字幕时间线编辑器。
 * 添加 [CS MOSS Audio Transcribe](#cs-moss-audio-transcribe) 节点，将标准 ComfyUI AUDIO 转写为带时间戳的 SRT。
@@ -39,6 +40,23 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 
 ## 节点说明
+
+### CS Mask Grow
+
+使用精确离散欧氏圆盘算法， 对`MASK` 进行精确欧氏距离的膨胀或收缩。较官方Grow Mask节点运算速度大幅提升，并避免了大 grow 值下产生菱形轮廓的曼哈顿距离问题，能更好的保持轮廓特征。
+
+![CS Mask Grow 节点](images/CS_Mask_Grow_node.jpg)
+
+#### 节点输入
+
+- `mask`：标准 ComfyUI `MASK`。
+- `grow`：以像素为单位；正值向外膨胀，负值向内收缩，`0` 不改变尺寸。
+- `Preserve Soft Edges`：默认关闭。关闭时先以灰度值 `128` 为阈值将输入二值化，输出仅包含 `0/1`；开启时保留输入 Mask 的灰度 alpha 过渡。
+
+#### 输出
+
+- `MASK`：与输入帧数和画面尺寸相同的标准 ComfyUI `MASK`。
+
 
 ### CS Color Grade
 

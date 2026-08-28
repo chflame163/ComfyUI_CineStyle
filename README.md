@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Preview Any](#cs-preview-any) 节点，自动识别并预览 ComfyUI 的常见图像、视频、音频和数据类型。
 * 添加 [CS Mask Grow](#cs-mask-grow) 节点，较官方Grow Mask节点运算速度大幅提升，并能更好的保持轮廓特征。
 * 添加 [CS Color Grade](#cs-color-grade) 节点，提供 HEX 白点、色温/色调、基础调色、RGB 通道控制、RGB多通道曲线和LUT加载，对视频进行专业级调色。
 * 添加 [CS Video Subtitle](#cs-video-subtitle) 节点，将 SRT 字幕渲染到标准 ComfyUI VIDEO，并提供字幕时间线编辑器。
@@ -40,6 +41,31 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 
 ## 节点说明
+
+### CS Preview Any
+
+自动识别输入数据类型并提供统一的多视口预览节点。节点包含画面视口和文本视口：画面视口用于显示图片、Mask、视频或音频波形，文本视口用于显示类型、尺寸、批次和调试信息。
+
+![CS Preview Any 节点](images/CS_Preview_Any.jpg)
+
+#### 使用流程
+
+1. 将任意 ComfyUI 节点的输出连接到 `source`。`source` 接受任意类型，不需要预先指定输入类型。
+2. 执行工作流，节点会根据实际输入自动选择预览方式。
+
+
+#### 支持的类型
+
+- `VIDEO`：使用临时 Preview Cache 生成保持宽高比的预览视频，预览像素数上限为 1 Mpixels，预览帧率上限为 25 fps，并保留完整输入时长。注意预览视频的画面大小和质量经过处理，并非原始精度。保存原始精度的视频文件请使用 `CS Save Video` 节点。
+- `IMAGE`：按 ComfyUI 原生图片预览方式显示图片，可以在列表和单张显示之间切换。文本视口显示 Tensor 形状、图片尺寸、批次和通道模式。
+- `MASK`：按 ComfyUI 原生 mask 预览显示 Mask，并显示对应的形状、尺寸和批次信息。
+- `AUDIO`：画面视口显示音频波形；文本视口显示波形形状、采样率、声道、时长、峰值和 RMS 等信息。
+- `STRING`、`BOOL`、`INT`、`FLOAT`：在文本视口显示类型和值。
+- `LATENT`：在文本视口显示 latent 的形状、dtype、device、批次、通道、维度、统计值、keys、noise mask 和 batch index 等元数据。
+- `LIST`、`DICT`：在文本视口显示长度以及调试信息。数值 item 显示值，非数值对象只显示类型。
+
+其他无法预览的对象只显示数据类型；无法识别的数据会显示 `Unable to parse data type`。
+
 
 ### CS Mask Grow
 
@@ -56,6 +82,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 #### 输出
 
 - `MASK`：与输入帧数和画面尺寸相同的标准 ComfyUI `MASK`。
+
 
 
 ### CS Color Grade

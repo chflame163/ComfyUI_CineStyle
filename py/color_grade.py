@@ -9,6 +9,7 @@ import logging
 import math
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +20,11 @@ import torch.nn.functional as F
 from aiohttp import web
 from PIL import Image
 from typing_extensions import override
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - ComfyUI normally provides tqdm
+    tqdm = None
 
 from comfy_api.latest import ComfyExtension, io
 
@@ -39,6 +45,8 @@ _CACHE_LOCK = threading.RLock()
 _MASK_CACHE: dict[str, torch.Tensor | None] = {}
 _PREVIEW_CACHE_STORE = None
 _ROUTES_REGISTERED = False
+_ANSI_GREEN = "\033[32m"
+_ANSI_RESET = "\033[0m"
 
 _DEFAULT_CURVES = {
     "version": 1,
@@ -49,6 +57,36 @@ _DEFAULT_CURVES = {
     "b": [[0.0, 0.0], [1.0, 1.0]],
 }
 _DEFAULT_CURVES_JSON = json.dumps(_DEFAULT_CURVES, separators=(",", ":"))
+
+
+def _grade_info(message: str, *args: Any) -> None:
+    """Keep status lines consistent with the other CineStyle video nodes."""
+    _LOGGER.info("[CS Color Grade] " + message, *args)
+
+
+class _GradeProgress:
+    """Emit a single throttled tqdm-style frame progress bar when available."""
+
+    def __init__(self, total: int, description: str = "frame processing"):
+        self.bar = None
+        if tqdm is not None:
+            self.bar = tqdm(
+                total=max(1, int(total)),
+                desc=f"{_ANSI_GREEN}[INFO]{_ANSI_RESET} [CS Color Grade] {description}",
+                unit="frame",
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                mininterval=0.1,
+                dynamic_ncols=True,
+                leave=True,
+            )
+
+    def update(self, amount: int = 1) -> None:
+        if self.bar is not None:
+            self.bar.update(max(0, int(amount)))
+
+    def close(self) -> None:
+        if self.bar is not None:
+            self.bar.close()
 
 
 def _lut_root() -> Path:
@@ -781,6 +819,7 @@ def _run_color_grade(
     parameters: dict[str, Any],
     curves: dict[str, tuple[tuple[float, float], ...]],
     lut: Any = _NO_EXTERNAL_LUT,
+    progress: _GradeProgress | None = None,
 ) -> torch.Tensor:
     rgb = _as_rgb(image)
     total, height, width = map(int, rgb.shape[:3])
@@ -791,6 +830,14 @@ def _run_color_grade(
     luts = _curve_luts(curves, device)
     cube = _cube_on_device(_load_cube(lut), device)
     batch_size = _batch_size(rgb, device)
+    _grade_info(
+        "render setup: device=%s; frames=%d; frame_batch=%d; external_lut=%s; active_curves=%s",
+        device,
+        total,
+        batch_size,
+        str(lut or _NO_EXTERNAL_LUT),
+        ",".join(sorted(luts)) if luts else "none",
+    )
     output = torch.empty((total, height, width, 3), device="cpu", dtype=torch.float32)
     start = 0
     while start < total:
@@ -811,8 +858,11 @@ def _run_color_grade(
             _LOGGER.warning("[CS Color Grade] CUDA OOM; retrying with batch=%d", batch_size)
             continue
         output[start:end].copy_(graded.to(device="cpu", dtype=torch.float32), non_blocking=True)
+        processed = end - start
         del source, effect_mask, graded
         start = end
+        if progress is not None:
+            progress.update(processed)
     return output
 
 
@@ -1060,10 +1110,20 @@ class CSColorGrade(io.ComfyNode):
         rgb_gamma: Any = "[1.0,1.0,1.0]",
         curves: Any = _DEFAULT_CURVES_JSON,
     ) -> io.NodeOutput:
+        started_at = time.perf_counter()
         node_id = getattr(getattr(cls, "hidden", None), "unique_id", "")
         prompt = getattr(getattr(cls, "hidden", None), "prompt", None)
-        _LOGGER.info("[CS Color Grade] start: frames=%d", int(image.shape[0]))
+        _grade_info("start: frames=%d", int(image.shape[0]))
+        _grade_info("stage 1/5: caching source preview")
         _cache_input(node_id, prompt, image, mask)
+        _grade_info(
+            "source ready: frames=%d; size=%dx%d; mask=%s",
+            int(image.shape[0]),
+            int(image.shape[2]),
+            int(image.shape[1]),
+            "available" if mask is not None else "none",
+        )
+        _grade_info("stage 2/5: validating grade parameters")
         parameters = _validated_parameters(
             white_point,
             color_temperature,
@@ -1078,9 +1138,27 @@ class CSColorGrade(io.ComfyNode):
             rgb_multiply,
             rgb_gamma,
         )
+        _grade_info("stage 3/5: preparing curves and external LUT")
         parsed_curves = _parse_curves(curves)
-        output = _run_color_grade(image, mask, parameters, parsed_curves, lut)
-        _LOGGER.info("[CS Color Grade] complete: frames=%d", int(output.shape[0]))
+        active_curves = tuple(
+            channel for channel, points in parsed_curves.items() if not _is_identity_curve(points)
+        )
+        _grade_info(
+            "grade setup ready: active_curves=%s; external_lut=%s",
+            ",".join(active_curves) if active_curves else "none",
+            str(lut or _NO_EXTERNAL_LUT),
+        )
+        _grade_info("stage 4/5: rendering frames")
+        progress = _GradeProgress(int(image.shape[0]))
+        try:
+            output = _run_color_grade(image, mask, parameters, parsed_curves, lut, progress)
+        finally:
+            progress.close()
+        _grade_info(
+            "stage 5/5: complete, output frames=%d; elapsed=%.2fs",
+            int(output.shape[0]),
+            time.perf_counter() - started_at,
+        )
         return io.NodeOutput(output)
 
 

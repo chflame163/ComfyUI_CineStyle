@@ -219,6 +219,7 @@ class CSLoadVideo(io.ComfyNode):
                 io.Int.Output(display_name="frame_count"),
                 io.Audio.Output(display_name="audio"),
                 io.Dict.Output(display_name="video_info"),
+                io.Float.Output(display_name="fps"),
             ],
         )
 
@@ -356,7 +357,7 @@ class CSLoadVideo(io.ComfyNode):
         except (AttributeError, TypeError):
             pass
         _LOGGER.info("[CS Load Video] stage 6/6: complete, output frames=%d", selected.shape[0])
-        return io.NodeOutput(output_video, selected, int(selected.shape[0]), audio, info)
+        return io.NodeOutput(output_video, selected, int(selected.shape[0]), audio, info, float(target_fps))
 
     @classmethod
     def fingerprint_inputs(cls, video: str, **kwargs: Any) -> float:

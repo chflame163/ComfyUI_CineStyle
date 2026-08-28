@@ -663,6 +663,7 @@ def _validated_parameters(
     brightness: Any,
     contrast: Any,
     saturation: Any,
+    lut_strength: Any,
     rgb_offset: Any,
     rgb_multiply: Any,
     rgb_gamma: Any,
@@ -677,6 +678,7 @@ def _validated_parameters(
         "brightness": _finite_float(brightness, "brightness", minimum=-1.0, maximum=1.0),
         "contrast": _finite_float(contrast, "contrast", minimum=-1.0, maximum=1.0),
         "saturation": _finite_float(saturation, "saturation", minimum=0.0, maximum=10.0),
+        "lut_strength": _finite_float(lut_strength, "lut_strength", minimum=0.0, maximum=1.0),
         "rgb_offset": _parse_vec3(rgb_offset, (0.0, 0.0, 0.0), "rgb_offset"),
         "rgb_multiply": _parse_vec3(rgb_multiply, (1.0, 1.0, 1.0), "rgb_multiply"),
         "rgb_gamma": _parse_vec3(rgb_gamma, (1.0, 1.0, 1.0), "rgb_gamma"),
@@ -751,7 +753,13 @@ def _grade_chunk(
     for index, channel in enumerate(("r", "g", "b")):
         values = result[..., index]
         channels.append(_apply_lut(values, luts[channel]) if channel in luts else values)
-    return _apply_cube(torch.stack(channels, dim=-1), cube)
+    before_external_lut = torch.stack(channels, dim=-1)
+    if cube is None or parameters["lut_strength"] <= 0.0:
+        return before_external_lut
+    after_external_lut = _apply_cube(before_external_lut, cube)
+    if parameters["lut_strength"] >= 1.0:
+        return after_external_lut
+    return torch.lerp(before_external_lut, after_external_lut, parameters["lut_strength"])
 
 
 def _normalise_mask(mask: torch.Tensor | None, batch: int) -> torch.Tensor | None:
@@ -831,11 +839,12 @@ def _run_color_grade(
     cube = _cube_on_device(_load_cube(lut), device)
     batch_size = _batch_size(rgb, device)
     _grade_info(
-        "render setup: device=%s; frames=%d; frame_batch=%d; external_lut=%s; active_curves=%s",
+        "render setup: device=%s; frames=%d; frame_batch=%d; external_lut=%s; lut_strength=%.3f; active_curves=%s",
         device,
         total,
         batch_size,
         str(lut or _NO_EXTERNAL_LUT),
+        parameters["lut_strength"],
         ",".join(sorted(luts)) if luts else "none",
     )
     output = torch.empty((total, height, width, 3), device="cpu", dtype=torch.float32)
@@ -1006,6 +1015,7 @@ async def _preview_route(request: web.Request) -> web.Response:
             payload.get("brightness", 0.0),
             payload.get("contrast", 0.0),
             payload.get("saturation", 1.0),
+            payload.get("lut_strength", 1.0),
             payload.get("rgb_offset", [0.0, 0.0, 0.0]),
             payload.get("rgb_multiply", [1.0, 1.0, 1.0]),
             payload.get("rgb_gamma", [1.0, 1.0, 1.0]),
@@ -1084,6 +1094,15 @@ class CSColorGrade(io.ComfyNode):
                     advanced=True,
                     tooltip="Versioned JSON control points for RGB, R, G, and B PCHIP curves.",
                 ),
+                io.Float.Input(
+                    "lut_strength",
+                    display_name="LUT Strength",
+                    default=1.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.001,
+                    tooltip="Blend between the image before the external LUT (0) and the full LUT result (1).",
+                ),
             ],
             outputs=[io.Image.Output("image", display_name="IMAGE")],
             hidden=[io.Hidden.prompt, io.Hidden.unique_id],
@@ -1096,6 +1115,7 @@ class CSColorGrade(io.ComfyNode):
         image: torch.Tensor,
         mask: torch.Tensor | None = None,
         lut: str = _NO_EXTERNAL_LUT,
+        lut_strength: float = 1.0,
         white_point: str = "#FFFFFF",
         color_temperature: float = 0.0,
         tint: float = 0.0,
@@ -1134,6 +1154,7 @@ class CSColorGrade(io.ComfyNode):
             brightness,
             contrast,
             saturation,
+            lut_strength,
             rgb_offset,
             rgb_multiply,
             rgb_gamma,
@@ -1144,9 +1165,10 @@ class CSColorGrade(io.ComfyNode):
             channel for channel, points in parsed_curves.items() if not _is_identity_curve(points)
         )
         _grade_info(
-            "grade setup ready: active_curves=%s; external_lut=%s",
+            "grade setup ready: active_curves=%s; external_lut=%s; lut_strength=%.3f",
             ",".join(active_curves) if active_curves else "none",
             str(lut or _NO_EXTERNAL_LUT),
+            lut_strength,
         )
         _grade_info("stage 4/5: rendering frames")
         progress = _GradeProgress(int(image.shape[0]))

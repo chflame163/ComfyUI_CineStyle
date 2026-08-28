@@ -822,7 +822,10 @@ def _run_beauty(
     if progress is not None:
         progress.info("final colour pass", "regrain and YUV hue/saturation adjustment complete")
         progress.info("complete", f"frames={batch}")
-    return output.to(device=source_device, non_blocking=True)
+    # The caller may immediately release the GPU batch after this function
+    # returns.  Use a blocking transfer for CPU outputs so the host tensor is
+    # fully materialized before it can be copied, reused, or handed downstream.
+    return output.to(device=source_device, non_blocking=False)
 
 
 def _sample_indices(batch: int, limit: int, device: torch.device | str = "cpu") -> torch.Tensor:
@@ -1004,7 +1007,12 @@ def _run_beauty_batched(
             if progress is not None:
                 progress.info("reduce batch", f"CUDA OOM; retrying with batch={batch_size}")
             continue
-        output_store[start:end].copy_(output_chunk.to(device="cpu", dtype=torch.float32), non_blocking=True)
+        # Keep this host-side merge synchronous.  A non-blocking copy from a
+        # temporary pinned tensor can outlive ``output_chunk`` and overwrite a
+        # later frame batch, producing reordered or black frames.
+        output_cpu = output_chunk.to(device="cpu", dtype=torch.float32, non_blocking=False).contiguous()
+        output_store[start:end].copy_(output_cpu, non_blocking=False)
+        del output_cpu
         del output_chunk, image_chunk, matte_chunk
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

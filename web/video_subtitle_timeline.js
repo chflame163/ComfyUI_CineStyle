@@ -32,8 +32,7 @@ function normalizeHex(value, fallback) {
 function configureSubtitleWidgetValues(node, info) {
     const incoming = Array.isArray(info?.widgets_values) ? info.widgets_values : null;
     if (!incoming || !node.widgets?.length) return info;
-    const hasPersistedSrtInput = Array.isArray(info?.inputs) && info.inputs.some((item) => item?.name === "edited_srt");
-    const values = hasPersistedSrtInput ? incoming : ["", ...incoming];
+    const values = incoming;
     if (values.length !== PERSISTED_WIDGET_NAMES.length) {
         console.warn(`[CS Video Subtitle] widgets_values length ${incoming.length} does not match the ${PERSISTED_WIDGET_NAMES.length} named values.`);
     }
@@ -48,8 +47,7 @@ function configureSubtitleWidgetValues(node, info) {
 function canonicalSubtitleValues(info) {
     const incoming = Array.isArray(info?.widgets_values) ? info.widgets_values : null;
     if (!incoming) return null;
-    const hasPersistedSrtInput = Array.isArray(info?.inputs) && info.inputs.some((item) => item?.name === "edited_srt");
-    return hasPersistedSrtInput ? incoming : ["", ...incoming];
+    return incoming;
 }
 function applySubtitleWidgetValuesByName(node, info) {
     const values = canonicalSubtitleValues(info);

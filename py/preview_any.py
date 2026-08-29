@@ -891,7 +891,13 @@ class CSPreviewAny(io.ComfyNode):
                 io.AnyType.Input("source", tooltip="Any ComfyUI value, including OUTPUT_IS_LIST values."),
             ],
             hidden=[io.Hidden.unique_id, io.Hidden.prompt],
-            outputs=[],
+            outputs=[
+                io.AnyType.Output(
+                    "output",
+                    display_name="output",
+                    tooltip="The input value passed through unchanged.",
+                ),
+            ],
             is_input_list=True,
             is_output_node=True,
         )
@@ -965,7 +971,9 @@ class CSPreviewAny(io.ComfyNode):
         # masks, audio, and text instead of sending ``[false]``.
         if kind == "video":
             ui_payload["animated"] = (True,)
+        passthrough = source[0] if source else None
         return io.NodeOutput(
+            passthrough,
             ui=ui_payload
         )
 

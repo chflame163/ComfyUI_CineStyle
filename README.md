@@ -93,7 +93,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 1. 将图片节点或 `CS Load Video` 的 `IMAGE` 输出连接到 `image`。`CS Load Video` 输入可以为视频帧批次，节点会按帧批次逐块处理。
 2. 将可选的 `MASK` 连接到 `mask`。黑色区域保持原图，白色区域应用完整调色，灰度区域按遮罩值线性混合。
-3. 将 `.cube` 文件放入 `ComfyUI/models/luts/`，在 `Load LUT` 中选择文件；不需要外部 LUT 时选择 `None`。
+3. 将 `.cube` 文件放入 `ComfyUI/models/luts/`，在 `Load LUT` 中选择文件；不需要外部 LUT 时选择 `None`。使用 `LUT Strength` 控制外部 LUT 的混合强度，`0` 为不应用 LUT，`1` 为完整应用。
 4. 直接执行节点得到 RGB `IMAGE`，或先点击 `Grade Preview` 调整当前帧，再点击 `Apply to Node` 将预览参数写回节点。
 5. 如果输入来自上游运行后才生成的图像或视频，首次打开 `Grade Preview` 前先运行一次工作流建立 Preview cache。
 
@@ -104,6 +104,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 - image：标准 ComfyUI `IMAGE`，自动预览功能仅在接入CS Load Video节点时支持。
 - mask：可选标准 ComfyUI `MASK`。
 - Load LUT：加载外部LUT文件，默认 `None`。支持 1D LUT、3D LUT，以及带 1D Shaper 的 1D+3D LUT。新增文件后需要刷新节点列表或重启 ComfyUI 才会出现在选项中。
+- LUT Strength：外部 LUT 的混合强度，范围 `0–1`，默认 `1`。`0` 保持应用其它调色参数后的结果，`0.5` 为一半 LUT 效果，`1` 为完整 LUT 效果。
 - White Point：`#RRGGBB` 格式的颜色字符串，默认 `#FFFFFF`对应中性白点。
 - Color Temperature：范围 `-1–1`，默认 `0`。与 `Tint` 一起参与白平衡计算。
 - Tint：白平衡中的绿色/洋红偏移，范围 `-1–1`，默认 `0`。
@@ -136,7 +137,7 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 - `50%`、`100%`、`200%` 和 `Fit` 用于设置缩放；放大后按住鼠标左键拖动可以平移画面，鼠标滚轮也可以调整缩放比例。
 - 时间线支持拖动定位、帧号输入，以及 `|<` / `>|` 单帧前进和后退。视频帧批次会显示总帧数。
 - 点击 White Point 的色块打开取色器，旁边的文本框接受严格的 `#RRGGBB` 格式。
-- `Color Temperature`、`Tint`、`Brightness`、`Contrast` 和 `Saturation` 使用滑块，并保留数值输入框和单项重置按钮。
+- `LUT Strength`、`Color Temperature`、`Tint`、`Brightness`、`Contrast` 和 `Saturation` 使用滑块，并保留数值输入框和单项重置按钮；拖动 LUT 强度会实时更新当前帧预览。
 - `Offset`、`Multiply` 和 `Gamma` 包含整体滑块、RGB 色轮以及 R/G/B 数值。在色轮上拖动鼠标改变对应的 RGB 通道参数，数值框可进行精确调整。
 - 曲线可分别调整 `RGB`、`R`、`G`、`B` 四个通道；`Reset` 重置当前曲线。在曲线编辑器单击空白处添加点，按住拖动控制点，右键删除点；端点不可删除。
 - `Reset All` 重置所有参数、RGB 数组、LUT 选择和曲线。 

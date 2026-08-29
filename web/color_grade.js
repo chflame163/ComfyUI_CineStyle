@@ -23,6 +23,7 @@ const DEFAULT_CURVES = Object.freeze({
     b: [[0, 0], [1, 1]],
 });
 const COLOR_PARAMS = [
+    ["lut_strength", "LUT Strength", 0, 1, 1, 0.001],
     ["color_temperature", "Color Temperature", -1, 1, 0, 0.001],
     ["tint", "Tint", -1, 1, 0, 0.001],
     ["brightness", "Brightness", -1, 1, 0, 0.001],

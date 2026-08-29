@@ -244,10 +244,6 @@ def parse_srt(text: str) -> list[dict[str, Any]]:
     return cues
 
 
-def _coerce_cues(srt: str, edited_srt: str = "") -> list[dict[str, Any]]:
-    return parse_srt(edited_srt.strip() or srt)
-
-
 def _format_srt_time(seconds: float) -> str:
     milliseconds = max(0, int(round(float(seconds) * 1000.0)))
     hours, remainder = divmod(milliseconds, 3_600_000)
@@ -281,17 +277,25 @@ def _coerce_srt_input(value: Any) -> str:
     return ""
 
 
-def _select_srt_text(edited_srt: Any, srt: Any, cached_srt: Any = "") -> tuple[str, str]:
-    """Prefer edited SRT, then connected SRT, then a matching cached SRT."""
-    edited_text = _coerce_srt_input(edited_srt).strip()
+def _prompt_input_connected(prompt: Any, node_id: Any, input_name: str) -> bool:
+    if not isinstance(prompt, dict):
+        return False
+    node = prompt.get(str(node_id)) or prompt.get(node_id)
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    value = inputs.get(input_name) if isinstance(inputs, dict) else None
+    return isinstance(value, (list, tuple)) and len(value) >= 2
+
+
+def _select_srt_text(srt: Any, edited_srt: Any, srt_connected: bool = False) -> str:
+    """Use srt only when its input is linked; otherwise use the persisted edit."""
     source_text = _coerce_srt_input(srt).strip()
-    cached_text = _coerce_srt_input(cached_srt).strip()
+    if srt_connected:
+        if parse_srt(source_text):
+            return source_text
+        raise ValueError("The connected srt input contains no valid SRT cues.")
+    edited_text = _coerce_srt_input(edited_srt).strip()
     if edited_text and parse_srt(edited_text):
-        return edited_text, source_text if source_text and parse_srt(source_text) else edited_text
-    if source_text and parse_srt(source_text):
-        return source_text, source_text
-    if cached_text and parse_srt(cached_text):
-        return cached_text, cached_text
+        return edited_text
     raise ValueError("Provide valid SRT cues in edited_srt or the optional srt input.")
 
 
@@ -1398,14 +1402,14 @@ class CSVideoSubtitle(io.ComfyNode):
                     "srt",
                     force_input=True,
                     optional=True,
-                    tooltip="Optional STRING input containing valid SRT cues. edited_srt is preferred when valid.",
+                    tooltip="Optional STRING input containing valid SRT cues. When connected, this input takes priority over edited_srt.",
                 ),
                 io.String.Input(
                     "edited_srt",
                     default="",
                     multiline=True,
                     optional=True,
-                    tooltip="Persisted SRT text edited in Edit Timeline. When valid, it takes priority over the optional srt input.",
+                    tooltip="Persisted SRT text edited in Edit Timeline. Used when the optional srt input is not connected.",
                 ),
                 io.Int.Input("preview_in", default=0, min=0, max=10000000, step=1, advanced=True),
                 io.Int.Input("preview_out", default=-1, min=-1, max=10000000, step=1, advanced=True),
@@ -1470,18 +1474,20 @@ class CSVideoSubtitle(io.ComfyNode):
         raw_node_id = getattr(getattr(cls, "hidden", None), "unique_id", None)
         cache_key = str(raw_node_id or "").strip()
         node_id = cache_key or None
-        source_hash = _srt_source_hash(srt)
-        cached_srt = _SUBTITLE_SRT_CACHE.get(cache_key) if cache_key else None
-        cached_edited_srt = (
-            str(cached_srt.get("srt", ""))
-            if cached_srt and (not cached_srt.get("source_hash") or cached_srt.get("source_hash") == source_hash)
-            else ""
+        srt_connected = _prompt_input_connected(
+            getattr(getattr(cls, "hidden", None), "prompt", None),
+            cache_key,
+            "srt",
         )
-        edited_srt, srt_source = _select_srt_text(edited_input, srt, cached_edited_srt)
-        srt = srt_source
+        try:
+            selected_srt = _select_srt_text(srt, edited_input, srt_connected)
+        except ValueError:
+            if srt_connected and cache_key:
+                _SUBTITLE_SRT_CACHE.pop(cache_key, None)
+            raise
         source_hash = _srt_source_hash(srt)
         if cache_key:
-            _SUBTITLE_SRT_CACHE[cache_key] = {"source_hash": source_hash, "srt": edited_srt, "node_id": cache_key}
+            _SUBTITLE_SRT_CACHE[cache_key] = {"source_hash": source_hash, "srt": selected_srt, "node_id": cache_key}
         components = video.get_components()
         source_metadata = dict(getattr(video, "_cinestyle_runtime_metadata", None) or {})
         source_metadata.update(dict(components.metadata or {}))
@@ -1529,7 +1535,7 @@ class CSVideoSubtitle(io.ComfyNode):
         else:
             _subtitle_info("stage 2/6: preview cache unavailable without a node id")
         _subtitle_info("stage 3/6: parsing subtitle cues")
-        cues = _coerce_cues(srt, edited_srt)
+        cues = parse_srt(selected_srt)
         source_offset = 0.0
         if source_metadata.get("source_fps"):
             source_offset = float(source_metadata.get("start_frame", 0) or 0) / float(source_metadata["source_fps"])

@@ -62,6 +62,10 @@ function serializeSubtitleWidgetValues(node) {
     return PERSISTED_WIDGET_NAMES.map((name) => widget(node, name)?.value ?? null);
 }
 function graphNode(graph, id) { return graph?.getNodeById?.(id) || (graph?._nodes || []).find((item) => String(item?.id) === String(id)) || null; }
+function inputConnected(node, inputName) {
+    const input = node.inputs?.find((item) => item.name === inputName);
+    return input?.link != null || (Array.isArray(input?.links) && input.links.length > 0);
+}
 function connectedOrigin(node, inputName) {
     const index = node.inputs?.findIndex((item) => item.name === inputName) ?? -1;
     const input = index >= 0 ? node.inputs?.[index] : null;
@@ -215,8 +219,8 @@ function parseSrt(text) {
     }
     return cues;
 }
-function readCues(node, sourceSrt = "") {
-    return parseSrt(sourceSrt || String(widget(node, "srt")?.value || ""));
+function readCues(sourceSrt = "") {
+    return parseSrt(sourceSrt);
 }
 function formatSrtTime(seconds) {
     const milliseconds = Math.max(0, Math.round((Number(seconds) || 0) * 1000));
@@ -305,6 +309,16 @@ function addStyles() {
       .cs-subtitle-controls { display:flex; flex-wrap:wrap; gap:6px; }
       .cs-subtitle-controls button,.cs-subtitle-foot button { border:1px solid #424956; border-radius:5px; padding:7px 10px; background:#242832; color:#e6e9ef; cursor:pointer; }
       .cs-subtitle-controls button:hover,.cs-subtitle-foot button:hover { background:#303643; }
+      .cs-subtitle-controls .load-edited-srt { margin-left:auto; }
+      .cs-subtitle-controls button:disabled { opacity:.45; cursor:not-allowed; }
+      .cs-subtitle-warning { position:fixed; inset:0; z-index:40; display:flex; align-items:center; justify-content:center; padding:20px; background:#050609b8; }
+      .cs-subtitle-warning-panel { width:min(440px,calc(100vw - 40px)); padding:20px; border:1px solid #525b68; border-radius:8px; background:#1b1e24; color:#e6e9ef; box-shadow:0 18px 60px #000c; }
+      .cs-subtitle-warning-title { margin:0 0 12px; color:#f7b955; font-size:16px; font-weight:600; }
+      .cs-subtitle-warning-message { margin:0; line-height:1.5; }
+      .cs-subtitle-warning-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
+      .cs-subtitle-warning-actions button { border:1px solid #424956; border-radius:5px; padding:7px 10px; background:#242832; color:#e6e9ef; cursor:pointer; }
+      .cs-subtitle-warning-actions button:hover { background:#303643; }
+      .cs-subtitle-warning-actions .cancel-close { background:#317ec4; border-color:#4b9de8; }
       .cs-subtitle-point-frame { min-width:52px; padding-left:7px !important; padding-right:7px !important; color:#9fc9ec !important; font-variant-numeric:tabular-nums; }
       .cs-subtitle-fields { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; }
       .cs-subtitle-style-section { display:grid; gap:8px; padding:10px; border:1px solid #343943; border-radius:6px; background:#1b1e24; }
@@ -364,13 +378,14 @@ async function openTimeline(node) {
     const connectedSource = connectedVideoSource(node, ["video"]);
     const filename = String(connectedSource?.filename || "");
     const sourceTrim = connectedSource?.isCSLoad ? connectedSource : null;
-    const externalSrtCandidate = graphSrtText(node) || String(widget(node, "srt")?.value || "");
+    const srtConnected = inputConnected(node, "srt");
+    const externalSrtCandidate = srtConnected ? graphSrtText(node) : "";
     const externalSrt = parseSrt(externalSrtCandidate).length ? externalSrtCandidate : "";
     const editedSrtCandidate = String(widget(node, "edited_srt")?.value || "").trim();
     const persistedSrt = parseSrt(editedSrtCandidate).length ? editedSrtCandidate : "";
     let cachedSrt = null;
     let cachedPreview = null;
-    let sourceSrt = persistedSrt || externalSrt;
+    let sourceSrt = srtConnected ? externalSrt : persistedSrt;
     addStyles();
     const dialog = document.createElement("dialog");
     dialog.className = "cs-subtitle-dialog";
@@ -381,7 +396,7 @@ async function openTimeline(node) {
         <div class="cs-subtitle-readout"><span class="current">00:00.00</span><span class="range"></span><span class="duration">00:00.00</span></div>
         <div class="cs-subtitle-pointer-row"><button class="cs-subtitle-pointer" type="button" aria-label="Current time"></button></div>
         <div class="cs-subtitle-viewport"><div class="cs-subtitle-axis"></div><div class="cs-subtitle-range-band"><span class="cs-subtitle-range-marker in"></span><span class="cs-subtitle-range-marker out"></span></div><div class="cs-subtitle-track cs-subtitle-track-subtitles"><span class="cs-subtitle-track-label">Subtitles</span><div class="cs-subtitle-track-body"></div></div><div class="cs-subtitle-track cs-subtitle-track-audio" aria-label="Audio"><span class="cs-subtitle-track-label">Audio</span><div class="cs-subtitle-track-body"><canvas class="cs-subtitle-waveform" aria-hidden="true"></canvas></div></div></div>
-        <div class="cs-subtitle-controls"><button class="set-in">Set In</button><button class="cs-subtitle-point-frame in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="back">|&lt;</button><button class="play">Play</button><button class="forward">&gt;|</button><button class="cs-subtitle-point-frame out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="set-out">Set Out</button></div>
+        <div class="cs-subtitle-controls"><button class="set-in">Set In</button><button class="cs-subtitle-point-frame in-frame" type="button" aria-label="Jump to in point" title="Jump to in point">0</button><button class="back">|&lt;</button><button class="play">Play</button><button class="forward">&gt;|</button><button class="cs-subtitle-point-frame out-frame" type="button" aria-label="Jump to out point" title="Jump to out point">0</button><button class="set-out">Set Out</button><button class="load-edited-srt" type="button">Load Edited SRT</button></div>
         <div class="cs-subtitle-style-section cs-subtitle-style-editor"><div class="cs-subtitle-style-section-title">Text Style</div><div class="cs-subtitle-style-grid">
           <div class="cs-subtitle-style-group"><div class="cs-subtitle-style-group-title">Typography</div><div class="cs-subtitle-style-group-fields cs-subtitle-typography-fields"><label class="cs-subtitle-field">Font<select class="font"></select></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-font-size">Size</label><input id="cs-subtitle-font-size" class="font-size" type="range" min="8" max="200" step="1"><output data-subtitle-output="font_size">${DEFAULT_FONT_SIZE}</output><button class="cs-subtitle-param-reset" data-reset="font_size" type="button" title="Reset Size">&#8634;</button></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="italic" type="checkbox"> Italic</span></label><div class="cs-subtitle-param cs-subtitle-param-compact"><label for="cs-subtitle-letter-spacing">Spacing</label><input id="cs-subtitle-letter-spacing" class="letter-spacing" type="range" min="-10" max="50" step="1"><output data-subtitle-output="letter_spacing">0</output><button class="cs-subtitle-param-reset" data-reset="letter_spacing" type="button" title="Reset Letter Spacing">&#8634;</button></div></div></div>
           <div class="cs-subtitle-style-group"><div class="cs-subtitle-style-group-title">Fill</div><div class="cs-subtitle-style-group-fields cs-subtitle-fill-fields"><div class="cs-subtitle-field">Primary Color<div class="cs-subtitle-color-row"><input class="primary-color" type="color"><output class="cs-subtitle-hex primary-color-hex">#FFFFFF</output></div></div><div class="cs-subtitle-field">Secondary Color<div class="cs-subtitle-color-row"><input class="secondary-color" type="color" value="#FF0000"><output class="cs-subtitle-hex secondary-color-hex">#FF0000</output></div></div><label class="cs-subtitle-field cs-subtitle-check"><span><input class="gradient" type="checkbox"> Vertical Gradient</span></label></div></div>
@@ -409,6 +424,7 @@ async function openTimeline(node) {
     const pointer = dialog.querySelector(".cs-subtitle-pointer");
     const inFrameButton = dialog.querySelector(".in-frame");
     const outFrameButton = dialog.querySelector(".out-frame");
+    const loadEditedSrtButton = dialog.querySelector(".load-edited-srt");
     const current = dialog.querySelector(".current");
     const range = dialog.querySelector(".range");
     const durationLabel = dialog.querySelector(".duration");
@@ -416,7 +432,8 @@ async function openTimeline(node) {
     const loading = dialog.querySelector(".cs-subtitle-preview-loading");
     const loadingText = dialog.querySelector(".cs-subtitle-preview-loading-text");
     const setLoading = (message, visible = true) => { loadingText.textContent = message; loading.hidden = !visible; };
-    const cues = readCues(node, sourceSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
+    loadEditedSrtButton.disabled = !persistedSrt;
+    const cues = readCues(sourceSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
     function normalizeCueLayout() {
         cues.sort((a, b) => Number(a.start) - Number(b.start));
         let cursor = 0;
@@ -430,7 +447,7 @@ async function openTimeline(node) {
     }
     normalizeCueLayout();
     function replaceCues(nextSrt) {
-        const next = readCues(node, nextSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
+        const next = readCues(nextSrt).map((cue, index) => ({ ...cue, id: cue.id ?? index + 1 }));
         cues.splice(0, cues.length, ...next);
         normalizeCueLayout();
         duration = Math.max(1, ...cues.map((cue) => Number(cue.end) || 0));
@@ -1012,8 +1029,35 @@ async function openTimeline(node) {
     }
     function close() { void setTimelineOpen(node, false).catch(() => {}); video.pause(); closeContextMenu(); textEditor.destroy(); if (previewTimer) clearTimeout(previewTimer); if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl); window.removeEventListener("resize", updateInteractionBox); window.removeEventListener("resize", drawAudioWaveform); window.removeEventListener("pointerdown", handleTimelinePointerDown, true); window.removeEventListener("contextmenu", handleWindowContextMenu, true); dialog.close(); dialog.remove(); }
 
+    function confirmEmptySubtitleOverwrite() {
+        return new Promise((resolve) => {
+            const warning = document.createElement("div");
+            warning.className = "cs-subtitle-warning";
+            warning.setAttribute("role", "dialog");
+            warning.setAttribute("aria-modal", "true");
+            warning.innerHTML = `<div class="cs-subtitle-warning-panel"><h2 class="cs-subtitle-warning-title">Warning</h2><p class="cs-subtitle-warning-message">Subtitle content is empty. Are you sure overwrite <strong>edited_srt</strong>?</p><div class="cs-subtitle-warning-actions"><button class="cancel-close" type="button">Cancel and close</button><button class="continue" type="button">Continue</button></div></div>`;
+            const finish = (confirmed) => { warning.remove(); resolve(confirmed); };
+            warning.querySelector(".continue").addEventListener("click", () => finish(true));
+            warning.querySelector(".cancel-close").addEventListener("click", () => { finish(false); close(); });
+            dialog.append(warning);
+            warning.querySelector(".cancel-close").focus();
+        });
+    }
+
     dialog.querySelector(".set-in").addEventListener("click", () => { inFrame = currentFrame(); normalizeRange(); renderTimeline(); });
     dialog.querySelector(".set-out").addEventListener("click", () => { outFrame = currentFrame(); normalizeRange(); renderTimeline(); });
+    loadEditedSrtButton.addEventListener("click", () => {
+        if (!persistedSrt) return;
+        const currentDuration = duration;
+        sourceSrt = persistedSrt;
+        replaceCues(persistedSrt);
+        duration = Math.max(currentDuration, duration);
+        viewStart = 0;
+        viewDuration = duration;
+        renderTimeline();
+        updateOverlay();
+        status.textContent = "Loaded the node's saved edited_srt.";
+    });
     dialog.querySelector(".back").addEventListener("click", () => setFrame(currentFrame() - 1));
     dialog.querySelector(".forward").addEventListener("click", () => setFrame(currentFrame() + 1));
     dialog.querySelector(".play").addEventListener("click", () => { if (!video.paused) { ++playbackToken; selectionSeeking = false; video.pause(); return; } playSelection(); });
@@ -1098,16 +1142,19 @@ async function openTimeline(node) {
     dialog.querySelector(".cs-subtitle-close").addEventListener("click", close); dialog.querySelector(".cancel").addEventListener("click", close); dialog.addEventListener("cancel", close);
     dialog.querySelector(".apply").addEventListener("click", async () => {
         normalizeRange();
+        const editedSrt = cuesToSrt(cues);
+        const existingEditedSrt = String(widget(node, "edited_srt")?.value || "").trim();
+        if (!cues.length && existingEditedSrt && !await confirmEmptySubtitleOverwrite()) return;
         setWidgetValue(node, "preview_in", inFrame); setWidgetValue(node, "preview_out", outFrame);
         setWidgetValue(node, "position_x", style.position_x); setWidgetValue(node, "position_y", style.position_y);
         for (const [key, input] of Object.entries(inputs)) setWidgetValue(node, key, input.type === "checkbox" ? input.checked : input.value);
-        const editedSrt = cuesToSrt(cues);
         setWidgetValue(node, "edited_srt", editedSrt);
         try {
             await saveCachedSrt(node, sourceHash, editedSrt);
             node.graph?.setDirtyCanvas(true, true); close();
         } catch (error) {
             status.textContent = error.message;
+            close();
         }
     });
     async function loadAudioWaveform() {
@@ -1120,8 +1167,8 @@ async function openTimeline(node) {
     const initialize = async () => {
         setLoading("Preparing cache, please wait 0%");
         cachedSrt = await fetchCachedSrt(node).catch(() => null);
-        sourceHash = cachedSrt?.sourceHash || (externalSrt ? await srtSourceHash(externalSrt).catch(() => "") : "");
-        if (!sourceSrt && parseSrt(cachedSrt?.srt || "").length) {
+        sourceHash = srtConnected ? (externalSrt ? await srtSourceHash(externalSrt).catch(() => "") : (cachedSrt?.sourceHash || "")) : "";
+        if (srtConnected && !sourceSrt && parseSrt(cachedSrt?.srt || "").length) {
             sourceSrt = cachedSrt.srt;
             replaceCues(sourceSrt);
         }

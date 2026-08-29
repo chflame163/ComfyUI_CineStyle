@@ -147,7 +147,7 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 ### CS MOSS Audio Transcribe
 
 使用 [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。
-首次运行会自动下载模型。或者从[OpenMOSS-Team/MOSS-Transcribe-Diarize/](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/tree/main) 手动下载模型，然后放到`ComfyUI/models/audio_models/moss`目录。
+首次运行会自动下载模型。或者从[OpenMOSS-Team/MOSS-Transcribe-Diarize/](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/tree/main) 手动下载模型，然后放到`ComfyUI/models/moss`目录。
 
 ![CS Transcribe-Subtitle 工作流](images/CS_Transcribe_Subtitle_workflow.jpg)
 
@@ -178,15 +178,15 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 #### 使用流程
 
 1. 将 CS Load Video 或其他兼容节点的 `VIDEO` 输出连接到 `video`。自动预览功能仅在接入CS Load Video节点时支持。
-2. 将 SRT 文本连接到 `srt`，或直接填写/保留 `edited_srt`。
+2. 将 SRT 文本连接到 `srt`；如果不连接 `srt`，节点会自动使用 `edited_srt` 中保存的字幕。
 3. 点击 `Edit Timeline` 编辑字幕时间、样式和位置。
 4. 点击 `Apply` 保存字幕设置，再执行节点得到最终视频。
 
 #### 节点选项说明
 ![CS Video Subtitle 节点](images/CS_Video_Subtitle_node.jpg)
 - `video`：兼容 ComfyUI `VIDEO` 类型的输入，自动预览功能仅在接入CS Load Video节点时支持。
-- `srt`：可选 `STRING`，用于提供原始 SRT。
-- `edited_srt`：Timeline 保存的 SRT 文本；格式有效时优先使用，格式无效时使用srt输入。
+- `srt`：可选 `STRING`。只要该输入已连接，节点始终以 `srt` 为准。如果无法从上游节点回溯srt，则时间线为空。
+- `edited_srt`：经Timeline 编辑保存的 SRT 文本；可在 Timeline 中通过`Load Edited SRT`按钮加载到时间线，或在 `srt` 输入未连接时自动使用。
 - `preview_in` / `preview_out`：字幕 Timeline 的预览范围，分别表示起始帧和结束帧。
 - `font`：字幕字体。
 - `font_size`：字体大小，范围 `8–200`。
@@ -212,13 +212,17 @@ Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑�
 
 - 预览区域显示当前视频帧和字幕效果。可播放、暂停和拖动查看画面，预览中的字幕会随当前帧更新。
 - 时间线包含 `Subtitles` 和 `Audio` 两条轨道。字幕轨道显示每条字幕的时间范围，音频轨道显示声音波形；拖动当前帧指针或使用播放、前进、后退按钮可以定位画面。
+- `Load Edited SRT`：手动加载节点中保存的 `edited_srt`，用于在获得新的上游 SRT 后恢复之前的编辑结果；不会改变节点的 `srt` 输入优先级。
 - 使用 `Set In` 和 `Set Out` 设置字幕 Timeline 的预览起止帧。
 - 在字幕轨道中双击字幕片段，或使用右键菜单，可以编辑、复制、粘贴或删除字幕内容；字幕片段可在时间线上拖动调整时间范围。
 - `Text Style` 区域用于设置字体、字号、斜体、字距、主色、渐变色、描边和阴影。
 - `Position` 区域用于设置文字对齐方式以及规范化的 X/Y 位置。也可以直接在预览画面中拖动字幕，使用边角控制点调整文字区域大小。
 - 点击 `Apply` 将当前时间范围、字幕文本、样式和位置写回节点；点击 `Cancel` 放弃本次编辑。
 
+
+注意：如果想强制使用节点内已编辑的字幕时间线`edited_srt`，请断开`str`的输入，否则渲染时`edited_srt`不会生效，仍然使用`srt`输入的内容。
 对于运行后才生成的视频输入，先运行一次工作流建立缓存，再打开节点前端窗口。
+
 
 
 ### CS VFX Beauty

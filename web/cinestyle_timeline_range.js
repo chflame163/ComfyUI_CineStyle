@@ -11,9 +11,10 @@ export function installTimelineRangeStyles() {
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
+      :root { --cs-timeline-accent: #55a9f5; }
       .cs-timeline-readout,.cs-subtitle-readout { display:flex; justify-content:space-between; color:#aeb5c2; font-variant-numeric:tabular-nums; }
       .cs-timeline-pointer-row,.cs-subtitle-pointer-row { position:relative; height:16px; margin-bottom:-4px; user-select:none; touch-action:none; }
-      .cs-timeline-pointer,.cs-subtitle-pointer { position:absolute; top:0; width:18px; height:16px; transform:translateX(-50%); padding:0; border:0; background:#55a9f5; clip-path:polygon(0 0,100% 0,50% 100%); cursor:ew-resize; z-index:5; }
+      .cs-timeline-pointer,.cs-subtitle-pointer { position:absolute; top:0; width:18px; height:16px; transform:translateX(-50%); padding:0; border:0; background:var(--cs-timeline-accent); clip-path:polygon(0 0,100% 0,50% 100%); cursor:ew-resize; z-index:5; }
       .cs-timeline-pointer:hover,.cs-subtitle-pointer:hover { background:#78bcff; }
       .cs-timeline-viewport,.cs-subtitle-viewport { position:relative; overflow:hidden; border:1px solid #363b45; border-radius:6px; background:#20232a; }
       .cs-timeline-axis,.cs-subtitle-axis { position:relative; height:22px; color:#9299a8; font-size:11px; font-variant-numeric:tabular-nums; }

@@ -155,7 +155,6 @@ class CSLoadVideo(io.ComfyNode):
                 io.Combo.Input(
                     "video",
                     options=_video_files(),
-                    upload=io.UploadType.video,
                     tooltip="Video file in the ComfyUI input directory.",
                 ),
                 io.Int.Input(

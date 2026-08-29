@@ -25,6 +25,264 @@ function setWidgetValue(node, name, value) {
     target.callback?.(value);
 }
 
+const VIDEO_UPLOAD_MIME_TYPES = [
+    "video/webm",
+    "video/mp4",
+    "video/x-matroska",
+    "image/gif",
+];
+
+function isSupportedVideoFile(file) {
+    if (!file) return false;
+    const mime = String(file.type || "").toLowerCase();
+    return VIDEO_UPLOAD_MIME_TYPES.includes(mime)
+        || mime.startsWith("video/")
+        || /\.(mp4|webm|mov|m4v|mkv|avi|gif)$/i.test(String(file.name || ""));
+}
+
+async function uploadVideoFile(file, progressCallback) {
+    try {
+        const body = new FormData();
+        const relativePath = String(file.webkitRelativePath || "");
+        const separator = relativePath.lastIndexOf("/");
+        const subfolder = separator >= 0 ? relativePath.slice(0, separator + 1) : "";
+        const uploadFile = new File([file], file.name, {
+            type: file.type,
+            lastModified: file.lastModified,
+        });
+        body.append("image", uploadFile);
+        if (subfolder) body.append("subfolder", subfolder);
+        const response = await new Promise((resolve, reject) => {
+            const request = new XMLHttpRequest();
+            request.upload.onprogress = (event) => {
+                if (event.lengthComputable) progressCallback?.(event.loaded / event.total);
+            };
+            request.onload = () => resolve(request);
+            request.onerror = () => reject(new Error("Video upload request failed"));
+            request.open("POST", api.apiURL("/upload/image"), true);
+            request.send(body);
+        });
+        if (response.status !== 200) {
+            if (response.status === 413) {
+                const sizeMb = (Number(file.size || 0) / (1024 * 1024)).toFixed(1);
+                alert(
+                    `Video upload rejected (413): this file is ${sizeMb} MB, which exceeds ComfyUI's server upload limit. `
+                    + `Restart ComfyUI with --max-upload-size <MB> (for example, --max-upload-size 256), then try again.`,
+                );
+            } else {
+                alert(`${response.status} - ${response.statusText}`);
+            }
+        }
+        return response;
+    } catch (error) {
+        alert(error);
+        return null;
+    }
+}
+
+function addVideoUpload(node, pathWidget) {
+    if (!node || !pathWidget || node.__csVideoUploadInstalled) return;
+    const fileInput = document.createElement("input");
+    Object.assign(fileInput, {
+        type: "file",
+        accept: VIDEO_UPLOAD_MIME_TYPES.join(","),
+        style: "display: none",
+    });
+
+    async function doUpload(file) {
+        const response = await uploadVideoFile(file, (progress) => { node.progress = progress; });
+        node.progress = undefined;
+        if (!response || response.status !== 200) return false;
+        const result = JSON.parse(response.responseText);
+        const filename = result.subfolder ? `${result.subfolder}/${result.name}` : result.name;
+        if (!pathWidget.options.values.includes(filename)) pathWidget.options.values.push(filename);
+        pathWidget.value = filename;
+        pathWidget.callback?.(filename);
+        node.graph?.setDirtyCanvas(true, true);
+        return true;
+    }
+
+    fileInput.onchange = async () => {
+        if (fileInput.files.length) await doUpload(fileInput.files[0]);
+        fileInput.value = "";
+    };
+    node.onDragOver = (event) => {
+        const hasFiles = Boolean(event?.dataTransfer?.types?.includes?.("Files"));
+        if (hasFiles) app.dragOverNode = node;
+        return hasFiles;
+    };
+    node.onDragDrop = async (event) => {
+        if (!event?.dataTransfer?.types?.includes?.("Files")) return false;
+        const file = event.dataTransfer?.files?.[0];
+        if (!isSupportedVideoFile(file)) return false;
+        return doUpload(file);
+    };
+
+    document.body.append(fileInput);
+    const uploadWidget = node.addWidget("button", "choose file to upload", "image", () => {
+        app.canvas.node_widget = null;
+        fileInput.click();
+    });
+    uploadWidget.options = { ...(uploadWidget.options || {}), serialize: false };
+
+    const originalRemoved = node.onRemoved;
+    node.onRemoved = function () {
+        fileInput.remove();
+        return originalRemoved?.apply(this, arguments);
+    };
+    node.__csVideoUploadInstalled = true;
+}
+
+function addVideoPreview(node, pathWidget) {
+    if (!node || !pathWidget || node.__csVideoPreviewInstalled) return;
+    const element = document.createElement("div");
+    const previewWidget = node.addDOMWidget("videopreview", "preview", element, {
+        serialize: false,
+        hideOnZoom: false,
+        getValue: () => element.value,
+        setValue: (value) => { element.value = value; },
+    });
+    const rangeIndicator = document.createElement("div");
+    const rangeSelection = document.createElement("div");
+    Object.assign(rangeIndicator.style, {
+        position: "relative",
+        width: "100%",
+        height: "4px",
+        margin: "0",
+        padding: "0",
+        background: "#626a73",
+        overflow: "hidden",
+        pointerEvents: "none",
+    });
+    Object.assign(rangeSelection.style, {
+        position: "absolute",
+        top: "0",
+        bottom: "0",
+        left: "0",
+        width: "0%",
+        background: "var(--cs-timeline-accent, #55a9f5)",
+    });
+    rangeIndicator.append(rangeSelection);
+    rangeIndicator.hidden = true;
+    element.append(rangeIndicator);
+    const video = document.createElement("video");
+    video.controls = false;
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.style.width = "100%";
+    video.style.display = "block";
+    video.style.background = "#08090b";
+    element.append(video);
+    element.style.width = "100%";
+    element.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        app.dragOverNode = node;
+    });
+    element.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const file = event.dataTransfer?.files?.[0];
+        if (isSupportedVideoFile(file)) await node.onDragDrop?.(event);
+        app.dragOverNode = null;
+    });
+    element.value = { hidden: true, filename: "" };
+    let rangeInfo = null;
+    let rangeInfoRequest = 0;
+    const updateRangeIndicator = () => {
+        const frameCount = Math.max(0, Math.round(Number(rangeInfo?.frames) || 0));
+        if (!frameCount) {
+            rangeIndicator.hidden = true;
+            return;
+        }
+        const lastFrame = frameCount - 1;
+        const startValue = Number(widget(node, "start_frame")?.value ?? 0);
+        const endValue = Number(widget(node, "end_frame")?.value ?? -1);
+        const start = clamp(Number.isFinite(startValue) ? startValue : 0, 0, lastFrame);
+        const end = clamp(Number.isFinite(endValue) && endValue >= 0 ? endValue : lastFrame, start, lastFrame);
+        rangeIndicator.hidden = false;
+        rangeSelection.style.left = `${(start / frameCount) * 100}%`;
+        rangeSelection.style.width = `${((end - start + 1) / frameCount) * 100}%`;
+    };
+    const updateRangeInfo = (filename) => {
+        const value = String(filename || "");
+        const requestId = ++rangeInfoRequest;
+        rangeInfo = null;
+        updateRangeIndicator();
+        if (!value) return;
+        fetchInfo(value).then((result) => {
+            if (requestId !== rangeInfoRequest || String(pathWidget.value || "") !== value) return;
+            rangeInfo = result;
+            updateRangeIndicator();
+        }).catch(() => {
+            if (requestId === rangeInfoRequest) updateRangeIndicator();
+        });
+    };
+    for (const name of ["start_frame", "end_frame"]) {
+        const rangeWidget = widget(node, name);
+        if (!rangeWidget || rangeWidget.__csRangeIndicatorBound) continue;
+        const originalCallback = rangeWidget.callback;
+        rangeWidget.callback = function (value) {
+            const result = originalCallback?.apply(this, arguments);
+            updateRangeIndicator();
+            return result;
+        };
+        rangeWidget.__csRangeIndicatorBound = true;
+    }
+    previewWidget.computeSize = (width) => {
+        if (video.videoWidth > 0 && video.videoHeight > 0 && !element.value.hidden) {
+            const aspectRatio = video.videoWidth / video.videoHeight;
+            // Match VHS's DOM preview sizing and reserve the widget's
+            // vertical padding so the final rows of the video stay visible.
+            const videoHeight = Math.max(0, (Math.max(160, node.size?.[0] || width) - 20) / aspectRatio + 10);
+            const height = 4 + videoHeight;
+            return [width, height];
+        }
+        return [width, rangeIndicator.hidden ? -4 : 4];
+    };
+    const updateSource = (filename) => {
+        const value = String(filename || "");
+        element.value = { hidden: !value, filename: value };
+        updateRangeInfo(value);
+        if (!value) {
+            video.removeAttribute("src");
+            video.load();
+            node.graph?.setDirtyCanvas(true, true);
+            return;
+        }
+        const params = new URLSearchParams({ filename: value, type: "input", subfolder: "", t: String(Date.now()) });
+        video.src = api.apiURL(`/view?${params.toString()}`);
+        video.load();
+        video.play().catch(() => {});
+        node.graph?.setDirtyCanvas(true, true);
+    };
+    const fitPreviewHeight = () => {
+        const width = Math.max(160, node.size?.[0] || 360);
+        // Compute the complete node height so the preview does not clip the
+        // widgets above it (LiteGraph's computeSize includes all widgets).
+        const computed = node.computeSize?.([width, node.size?.[1] || 0]);
+        const totalHeight = Number(computed?.[1]);
+        if (Number.isFinite(totalHeight) && totalHeight > 0) {
+            node.setSize?.([width, totalHeight]);
+        }
+        node.graph?.setDirtyCanvas(true, true);
+    };
+    video.addEventListener("loadedmetadata", () => {
+        previewWidget.aspectRatio = video.videoWidth / video.videoHeight;
+        fitPreviewHeight();
+        updateRangeIndicator();
+    });
+    video.addEventListener("error", () => {
+        element.value.hidden = true;
+        fitPreviewHeight();
+    });
+    node.__csVideoPreviewUpdate = updateSource;
+    node.__csVideoRangeIndicatorUpdate = updateRangeIndicator;
+    node.__csVideoPreviewInstalled = true;
+    requestAnimationFrame(() => updateSource(pathWidget.value));
+}
+
 function resetTimelineWidgets(node) {
     for (const [name, value] of Object.entries(DEFAULT_TIMELINE_VALUES)) {
         setWidgetValue(node, name, value);
@@ -47,6 +305,54 @@ function clamp(value, min, max) {
 function roundToMultiple(value, multiple) {
     const safeMultiple = Math.max(1, Math.round(Number(multiple) || 1));
     return Math.max(safeMultiple, Math.floor(Number(value) / safeMultiple + 0.5) * safeMultiple);
+}
+
+function syncNodeDimensions(node, changed = null, forceSource = false) {
+    const sourceInfo = node?.__csSourceVideoInfo;
+    const widthWidget = widget(node, "width");
+    const heightWidget = widget(node, "height");
+    const multipleWidget = widget(node, "multiple");
+    if (!sourceInfo || !widthWidget || !heightWidget) return;
+    const sourceWidth = Math.max(1, Math.round(Number(sourceInfo.width) || 1));
+    const sourceHeight = Math.max(1, Math.round(Number(sourceInfo.height) || 1));
+    const multiple = Math.max(1, Math.round(Number(multipleWidget?.value) || 1));
+    let width = Number(widthWidget.value);
+    let height = Number(heightWidget.value);
+    if (forceSource || (!Number.isFinite(width) || width <= 0) && (!Number.isFinite(height) || height <= 0)) {
+        // A newly selected source starts from its own dimensions. Rounding
+        // each axis independently preserves the documented default behavior.
+        width = roundToMultiple(sourceWidth, multiple);
+        height = roundToMultiple(sourceHeight, multiple);
+    } else if (changed === "height") {
+        height = roundToMultiple(height, multiple);
+        width = roundToMultiple(height * sourceWidth / sourceHeight, multiple);
+    } else if (changed === "width") {
+        width = roundToMultiple(width, multiple);
+        height = roundToMultiple(width * sourceHeight / sourceWidth, multiple);
+    } else {
+        // Workflow values remain intact on load, but are always normalized to
+        // the active multiple. A later edit establishes aspect-ratio linkage.
+        width = roundToMultiple(Number.isFinite(width) && width > 0 ? width : sourceWidth, multiple);
+        height = roundToMultiple(Number.isFinite(height) && height > 0 ? height : sourceHeight, multiple);
+    }
+    node.__csDimensionSyncing = true;
+    widthWidget.value = width;
+    heightWidget.value = height;
+    node.__csDimensionSyncing = false;
+    node.graph?.setDirtyCanvas(true, true);
+}
+
+function refreshNodeSourceInfo(node, filename, forceSource = false) {
+    const value = String(filename || "");
+    const requestId = (node.__csSourceInfoRequest || 0) + 1;
+    node.__csSourceInfoRequest = requestId;
+    node.__csSourceVideoInfo = null;
+    if (!value) return;
+    fetchInfo(value).then((result) => {
+        if (node.__csSourceInfoRequest !== requestId || String(widget(node, "video")?.value || "") !== value) return;
+        node.__csSourceVideoInfo = result;
+        syncNodeDimensions(node, null, forceSource);
+    }).catch(() => {});
 }
 
 function effectiveOutputDimensions(values, sourceInfo) {
@@ -440,7 +746,9 @@ function openTimeline(node) {
         widthInput.value = currentValues.width > 0 ? currentValues.width : roundToMultiple(info.width, activeMultiple());
         heightInput.value = currentValues.height > 0 ? currentValues.height : roundToMultiple(info.height, activeMultiple());
         fpsInput.value = currentValues.fps || info.fps;
-        syncAspect(currentValues.width > 0 ? "width" : "height");
+        if (currentValues.width > 0 || currentValues.height > 0) {
+            syncAspect(currentValues.width > 0 ? "width" : "height", true);
+        }
         timelineControls?.render();
     }).catch((error) => {
         fileLabel.textContent = `${filename} - ${error.message}`;
@@ -456,25 +764,49 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             original?.apply(this, arguments);
             const videoWidget = widget(this, "video");
+            for (const name of ["width", "height", "multiple"]) {
+                const dimensionWidget = widget(this, name);
+                if (!dimensionWidget || dimensionWidget.__csDimensionSyncBound) continue;
+                const originalDimensionCallback = dimensionWidget.callback;
+                dimensionWidget.callback = function (value) {
+                    const result = originalDimensionCallback?.apply(this, arguments);
+                    if (!thisNode.__csDimensionSyncing) {
+                        syncNodeDimensions(thisNode, name === "multiple" ? null : name, false);
+                    }
+                    return result;
+                };
+                dimensionWidget.__csDimensionSyncBound = true;
+            }
             if (videoWidget && !this.__csVideoResetInstalled) {
                 this.__csTimelineVideo = String(videoWidget.value ?? "");
                 const originalVideoCallback = videoWidget.callback;
                 videoWidget.callback = function (value) {
-                    syncVideoSelection(thisNode, value ?? this.value);
+                    const filename = value ?? this.value;
+                    syncVideoSelection(thisNode, filename);
+                    thisNode.__csVideoPreviewUpdate?.(filename);
+                    refreshNodeSourceInfo(thisNode, filename, true);
                     return originalVideoCallback?.apply(this, arguments);
                 };
                 const thisNode = this;
                 this.__csVideoResetInstalled = true;
             }
+            const thisNode = this;
+            refreshNodeSourceInfo(thisNode, videoWidget?.value, false);
+            addVideoUpload(this, videoWidget);
             const button = this.addWidget("button", "Edit Timeline", "", () => openTimeline(this));
             button.name = "Edit Timeline";
             button.label = "Edit Timeline";
             button.options = { ...(button.options || {}), serialize: false };
+            addVideoPreview(this, videoWidget);
             this.setSize?.([360, Math.max(220, this.computeSize?.()[1] || 220)]);
         };
         const originalConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             originalConfigure?.apply(this, arguments);
+            const configuredVideo = widget(this, "video")?.value;
+            this.__csVideoPreviewUpdate?.(configuredVideo);
+            this.__csVideoRangeIndicatorUpdate?.();
+            refreshNodeSourceInfo(this, configuredVideo, false);
         };
     },
 });

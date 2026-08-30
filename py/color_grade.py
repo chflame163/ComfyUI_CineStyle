@@ -43,6 +43,7 @@ _CATEGORY = "😺dzNodes/CineStyle"
 _LOGGER = logging.getLogger("CineStyleColorGrade")
 _CACHE_LOCK = threading.RLock()
 _MASK_CACHE: dict[str, torch.Tensor | None] = {}
+_MASK_CACHE_BY_TOKEN: dict[str, torch.Tensor | None] = {}
 _PREVIEW_CACHE_STORE = None
 _ROUTES_REGISTERED = False
 _ANSI_GREEN = "\033[32m"
@@ -295,6 +296,30 @@ def _loader_preview_cache():
     package = __name__.rsplit(".", 1)[0]
     module = sys.modules.get(f"{package}._py_loader_preview_cache")
     return module.get_loader_preview_cache() if module is not None else None
+
+
+def _cache_wait_input(node_id: Any, prompt: Any, image: torch.Tensor) -> dict[str, Any] | None:
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    if module is None:
+        return None
+    chain = module.build_input_chain(prompt, node_id, ("image",))
+    if chain is None:
+        return None
+    try:
+        return module.get_wait_input_cache_store().put_chain(
+            chain,
+            image[..., :3],
+            _source_fps_from_prompt(prompt, node_id),
+            info={
+                "producer_node_id": str(node_id or ""),
+                "producer_node_type": "CS_Color_Grade",
+            },
+            force=True,
+        )
+    except Exception as exc:
+        _LOGGER.warning("[CS Color Grade] wait input cache failed: %s", exc)
+        return None
 
 
 def _loader_id_from_prompt(prompt: Any, node_id: Any) -> str:
@@ -880,17 +905,6 @@ def _cache_input(node_id: Any, prompt: Any, image: torch.Tensor, mask: torch.Ten
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
     loader_origin = _loader_id_from_prompt(prompt, node_id)
-    try:
-        _preview_cache_store().put_preview(
-            key,
-            image[..., :3],
-            _source_fps_from_prompt(prompt, node_id),
-            encode_video=not loader_origin,
-        )
-        if loader_origin:
-            _LOGGER.info("[CS Color Grade] using shared loader preview cache: loader=%s", loader_origin)
-    except Exception as exc:
-        _LOGGER.warning("[CS Color Grade] preview cache failed for node %s: %s", key, exc)
     cached_mask = None
     if isinstance(mask, torch.Tensor):
         try:
@@ -899,19 +913,47 @@ def _cache_input(node_id: Any, prompt: Any, image: torch.Tensor, mask: torch.Ten
                 cached_mask = cached_mask.detach().to(device="cpu", dtype=torch.float32).contiguous()
         except ValueError:
             cached_mask = None
+    entry = None
+    try:
+        cache_fingerprint = ""
+        if cached_mask is not None:
+            cache_fingerprint = f"mask:{_preview_cache_store().fingerprint_value(cached_mask)}"
+        entry = _preview_cache_store().put_preview(
+            key,
+            image[..., :3],
+            _source_fps_from_prompt(prompt, node_id),
+            cache_fingerprint=cache_fingerprint,
+            encode_video=not loader_origin,
+        )
+        if loader_origin:
+            _LOGGER.info("[CS Color Grade] using shared loader preview cache: loader=%s", loader_origin)
+    except Exception as exc:
+        _LOGGER.warning("[CS Color Grade] preview cache failed for node %s: %s", key, exc)
     with _CACHE_LOCK:
         _MASK_CACHE[key] = cached_mask
+        token = str((entry or {}).get("token") or "").strip()
+        if token:
+            _MASK_CACHE_BY_TOKEN[token] = cached_mask
+            while len(_MASK_CACHE_BY_TOKEN) > 64:
+                _MASK_CACHE_BY_TOKEN.pop(next(iter(_MASK_CACHE_BY_TOKEN)))
 
 
 def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str) -> int:
     try:
         loader_cache = _loader_preview_cache()
+        wait_cache_module = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
         source_entry = (
             loader_cache.entry_for_token(source_token)
             if source_token.startswith("loader_preview:") and loader_cache is not None
+            else wait_cache_module.get_wait_input_cache_store().get_token(source_token)
+            if source_token.startswith("wait_input:") and wait_cache_module is not None
             else _preview_cache_store().get_token(source_token)
         )
-        original_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
+        original_entry = (
+            source_entry
+            if source_entry is not None and not source_token.startswith("loader_preview:")
+            else _preview_cache_store().get_preview_variant(node_id, proxy=False)
+        )
         source_count = int((source_entry or {}).get("info", {}).get("frames") or 0)
         original_count = int((original_entry or {}).get("info", {}).get("frames") or 0)
         if source_count > 1 and original_count > 1 and source_count != original_count:
@@ -921,9 +963,19 @@ def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str)
     return frame_index
 
 
-def _preview_mask(node_id: str, frame_index: int, height: int, width: int) -> torch.Tensor | None:
+def _preview_mask(
+    node_id: str,
+    frame_index: int,
+    height: int,
+    width: int,
+    source_token: str = "",
+) -> torch.Tensor | None:
     with _CACHE_LOCK:
-        mask = _MASK_CACHE.get(node_id)
+        mask = _MASK_CACHE_BY_TOKEN.get(source_token) if source_token else None
+        if source_token and source_token not in _MASK_CACHE_BY_TOKEN:
+            mask = _MASK_CACHE.get(node_id)
+        elif not source_token:
+            mask = _MASK_CACHE.get(node_id)
     if mask is None or mask.ndim != 3 or frame_index < 0:
         return None
     if frame_index >= mask.shape[0] and mask.shape[0] != 1:
@@ -1000,11 +1052,17 @@ async def _preview_route(request: web.Request) -> web.Response:
             if cache is None:
                 raise ValueError("The shared loader preview cache is unavailable.")
             frame = cache.decode_frame(source_token, frame_index)
+        elif source_token.startswith("wait_input:"):
+            package = __name__.rsplit(".", 1)[0]
+            module = sys.modules.get(f"{package}._py_preview_cache")
+            if module is None:
+                raise ValueError("The shared wait input preview cache is unavailable.")
+            frame = module.get_wait_input_cache_store().decode_frame(payload, frame_index)
         else:
             frame = _preview_cache_store().decode_frame(payload, frame_index)
         height, width = int(frame.shape[1]), int(frame.shape[2])
         mask_index = _preview_mask_frame_index(node_id, frame_index, source_token)
-        mask = _preview_mask(node_id, mask_index, height, width)
+        mask = _preview_mask(node_id, mask_index, height, width, source_token)
         parameters = _validated_parameters(
             payload.get("white_point", "#FFFFFF"),
             payload.get("color_temperature", 0.0),
@@ -1103,6 +1161,13 @@ class CSColorGrade(io.ComfyNode):
                     step=0.001,
                     tooltip="Blend between the image before the external LUT (0) and the full LUT result (1).",
                 ),
+                io.Boolean.Input(
+                    "wait_for_input_cache",
+                    display_name="wait for input cache",
+                    default=False,
+                    advanced=True,
+                    tooltip="Interrupt execution when this node is reached after caching its input.",
+                ),
             ],
             outputs=[io.Image.Output("image", display_name="IMAGE")],
             hidden=[io.Hidden.prompt, io.Hidden.unique_id],
@@ -1114,6 +1179,7 @@ class CSColorGrade(io.ComfyNode):
         cls,
         image: torch.Tensor,
         mask: torch.Tensor | None = None,
+        wait_for_input_cache: bool = False,
         lut: str = _NO_EXTERNAL_LUT,
         lut_strength: float = 1.0,
         white_point: str = "#FFFFFF",
@@ -1136,6 +1202,11 @@ class CSColorGrade(io.ComfyNode):
         _grade_info("start: frames=%d", int(image.shape[0]))
         _grade_info("stage 1/5: caching source preview")
         _cache_input(node_id, prompt, image, mask)
+        if bool(wait_for_input_cache):
+            _cache_wait_input(node_id, prompt, image)
+            from comfy.model_management import InterruptProcessingException
+
+            raise InterruptProcessingException()
         _grade_info(
             "source ready: frames=%d; size=%dx%d; mask=%s",
             int(image.shape[0]),

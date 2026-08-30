@@ -1,11 +1,13 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import {
+    connectedInputChain,
     connectedVideoSource,
     ensureLoaderPreviewSource,
     fetchInfo,
     prepareInputTimeline,
     sourceFrameForLocal,
+    fetchWaitInputCache,
 } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Color_Grade";
@@ -385,9 +387,14 @@ async function openPreview(node) {
     dialog.querySelector(".cs-grade-close").addEventListener("click", earlyClose); dialog.querySelector(".cs-grade-cancel").addEventListener("click", earlyClose); dialog.addEventListener("cancel", earlyClose); dialog.showModal();
     let source = null; let info = null;
     try {
-        const cachedSource = await fetchCachedSource(node); const upstreamSource = connectedVideoSource(node, ["image", "images", "video_input"]);
-        source = upstreamSource?.loaderId ? upstreamSource : cachedSource || upstreamSource;
-        if (!source) throw new Error("Run CS Color Grade once to cache its connected image/video input.");
+        const upstreamSource = connectedVideoSource(node, ["image", "images", "video_input"]);
+        const chain = connectedInputChain(node, ["image", "images", "video_input"]);
+        if (chain) source = await fetchWaitInputCache(chain).catch(() => null);
+        if (!source) {
+            const cachedSource = upstreamSource ? await fetchCachedSource(node) : null;
+            source = upstreamSource?.loaderId ? upstreamSource : cachedSource || upstreamSource;
+        }
+        if (!source) throw new Error("Run ComfyUI once to generate preview cache.");
         if (source.loaderId && !source.token) source = await ensureLoaderPreviewSource(source, { onProgress: (progress) => setLoading(`Preparing cache, please wait ${progress}%`) });
         if (!source.token && !source.filename) throw new Error("No previewable input source was found.");
         info = source.info || prepareInputTimeline(source, await fetchInfo(source.filename));

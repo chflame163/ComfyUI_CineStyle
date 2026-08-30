@@ -91,6 +91,103 @@ function connectedVideoSource(node, inputNames = ["images", "video_input"]) {
     return null;
 }
 
+function chainSlot(value) {
+    const number = Number(value);
+    return Number.isInteger(number) ? number : String(value ?? "");
+}
+
+function connectedInputLink(node, inputName) {
+    const index = node.inputs?.findIndex((item) => item.name === inputName) ?? -1;
+    if (index < 0) return null;
+    const input = node.inputs?.[index];
+    const graph = node.graph || app.graph;
+    const call = (method, argument) => { try { return typeof method === "function" ? method.call(node, argument) : null; } catch { return null; } };
+    const candidates = [call(node.getInputLink, index), call(node.getInputLink, inputName), call(node.getInputNode, index), call(node.getInputNode, inputName), input?.link];
+    if (Array.isArray(input?.links)) candidates.push(...input.links);
+    for (const candidate of candidates) {
+        const link = graphLink(graph, candidate);
+        let origin = link ? graphNode(graph, link.origin_id ?? link.originId ?? link.origin) : null;
+        if (!origin) origin = originFromConnection(graph, candidate);
+        if (origin) {
+            const outputSlot = chainSlot(link?.origin_slot ?? link?.originSlot ?? candidate?.origin_slot ?? candidate?.originSlot ?? 0);
+            return { origin, outputSlot };
+        }
+    }
+    const linked = input?.link != null || (Array.isArray(input?.links) && input.links.length > 0);
+    return linked ? { origin: null, outputSlot: 0 } : null;
+}
+
+function connectedInputChain(node, inputNames = ["images", "video_input"]) {
+    let selectedName = "";
+    let rootLink = null;
+    for (const name of inputNames) {
+        const link = connectedInputLink(node, name);
+        if (link) {
+            selectedName = String(name);
+            rootLink = link;
+            break;
+        }
+    }
+    if (!rootLink?.origin || rootLink.origin.id == null) return null;
+    const roots = [{ input_name: selectedName, node_id: String(rootLink.origin.id), output_slot: rootLink.outputSlot }];
+    const queue = [rootLink.origin];
+    const visited = new Set();
+    const nodes = new Set();
+    const edges = [];
+    let complete = true;
+    while (queue.length) {
+        const current = queue.shift();
+        const currentId = String(current?.id ?? "").trim();
+        if (!currentId) { complete = false; continue; }
+        if (visited.has(currentId)) continue;
+        visited.add(currentId);
+        nodes.add(currentId);
+        for (const input of current.inputs || []) {
+            const link = connectedInputLink(current, input.name);
+            if (!link) continue;
+            const upstreamId = String(link.origin?.id ?? "").trim();
+            if (!upstreamId) { complete = false; continue; }
+            edges.push({ node_id: currentId, input_name: String(input.name), upstream_node_id: upstreamId, output_slot: link.outputSlot });
+            queue.push(link.origin);
+        }
+    }
+    edges.sort((left, right) => `${left.node_id}\u0000${left.input_name}\u0000${left.upstream_node_id}\u0000${left.output_slot}`.localeCompare(`${right.node_id}\u0000${right.input_name}\u0000${right.upstream_node_id}\u0000${right.output_slot}`));
+    return {
+        version: 1,
+        input_name: selectedName,
+        roots,
+        nodes: Array.from(nodes).sort(),
+        edges,
+        complete: complete && Boolean(selectedName && roots.length && nodes.size),
+    };
+}
+
+async function fetchWaitInputCache(chain) {
+    if (!chain?.complete) return null;
+    const response = await api.fetchApi("/cinestyle/wait-input-cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chain }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(result.error || "Unable to read wait input preview cache");
+    const info = result.info || {};
+    return {
+        filename: "",
+        kind: "video",
+        label: String(result.label || "Shared preview cache from input chain"),
+        url: api.apiURL(String(result.video_url || "")),
+        token: String(result.token || ""),
+        info,
+        startFrame: 0,
+        endFrame: Math.max(0, Number(info.frames || 1) - 1),
+        targetFps: Number(info.fps || 24),
+        waitInputCache: true,
+        sourceChainFingerprint: String(result.source_chain_fingerprint || ""),
+    };
+}
+
 function loaderPreviewPayload(source) {
     return {
         loader_id: String(source?.loaderId || ""),
@@ -196,10 +293,14 @@ async function openSelector(node, config) {
     dialog.addEventListener("cancel", earlyClose);
     dialog.showModal();
     try {
-        try { source = await fetchCachedSource(node); } catch { source = null; }
-        if (!source) source = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
-        if (!source) throw new Error("Run the workflow once to cache the connected video input before opening the selector");
         const upstreamSource = connectedVideoSource(node, config.videoInputs || ["images", "video_input"]);
+        const chain = connectedInputChain(node, config.videoInputs || ["images", "video_input"]);
+        if (chain) source = await fetchWaitInputCache(chain).catch(() => null);
+        if (!source && upstreamSource) {
+            try { source = await fetchCachedSource(node); } catch { source = null; }
+            source = upstreamSource?.loaderId ? upstreamSource : source || upstreamSource;
+        }
+        if (!source) throw new Error("Run ComfyUI once to generate preview cache.");
         const reportCacheProgress = (progress) => setLoading(`Preparing cache, please wait ${progress}%`);
         if (upstreamSource?.loaderId) {
             source = await ensureLoaderPreviewSource(upstreamSource, { onProgress: reportCacheProgress });
@@ -343,9 +444,11 @@ export function registerVideoSelector(config) {
 // Shared by lightweight preview dialogs that need the same recursive input
 // discovery and Selector cache as the full Video Segment UI.
 export {
+    connectedInputChain,
     connectedVideoSource,
     ensureLoaderPreviewSource,
     fetchCachedSource,
+    fetchWaitInputCache,
     fetchInfo,
     prepareInputTimeline,
     sourceFrameForLocal,

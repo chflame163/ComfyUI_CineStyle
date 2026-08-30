@@ -158,6 +158,53 @@ def _loader_preview_entry(loader_id: Any, signature: Any) -> dict[str, Any] | No
         return None
 
 
+def _wait_input_cache_entry(token: Any) -> dict[str, Any] | None:
+    value = str(token or "").strip()
+    if not value.startswith("wait_input:"):
+        return None
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    if module is None:
+        return None
+    try:
+        return module.get_wait_input_cache_store().get_token(value)
+    except (AttributeError, OSError, ValueError, TypeError):
+        return None
+
+
+def _cache_wait_input(
+    node_id: Any,
+    prompt: Any,
+    frames: np.ndarray,
+    safe_fps: float,
+    info: dict[str, Any],
+    audio: Any,
+) -> dict[str, Any] | None:
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    if module is None:
+        return None
+    chain = module.build_input_chain(prompt, node_id, ("video",))
+    if chain is None:
+        return None
+    try:
+        return module.get_wait_input_cache_store().put_chain(
+            chain,
+            frames,
+            safe_fps,
+            info={
+                "producer_node_id": str(node_id or ""),
+                "producer_node_type": "CS_Video_Subtitle",
+                "input_signature": str(info.get("input_signature") or ""),
+            },
+            audio=_prepare_audio(audio),
+            force=True,
+        )
+    except Exception as exc:
+        _subtitle_info("wait input cache failed: %s", exc)
+        return None
+
+
 class _SubtitleProgress:
     """Emit the same console-friendly progress style as the video nodes."""
 
@@ -296,6 +343,8 @@ def _select_srt_text(srt: Any, edited_srt: Any, srt_connected: bool = False) -> 
     edited_text = _coerce_srt_input(edited_srt).strip()
     if edited_text and parse_srt(edited_text):
         return edited_text
+    if not edited_text:
+        return ""
     raise ValueError("Provide valid SRT cues in edited_srt or the optional srt input.")
 
 
@@ -932,11 +981,13 @@ def _cache_video_source(
     cache_label: str,
     encode_video: bool = True,
     input_signature: str = "",
+    wait_for_input_cache: bool = False,
+    prompt: Any = None,
 ) -> bool:
     """Write an independent frame/video cache for one subtitle node source."""
     if video is None or not node_id:
         return False
-    if input_signature:
+    if input_signature and not wait_for_input_cache:
         existing = _preview_cache_store().get_preview_variant(node_id, proxy=False)
         if _preview_entry_matches_signature(existing, input_signature):
             info = existing.setdefault("info", {})
@@ -954,7 +1005,7 @@ def _cache_video_source(
             actual_width=frames.shape[2],
             actual_height=frames.shape[1],
         )
-        return bool(_store_frame_cache(
+        stored = bool(_store_frame_cache(
             frames,
             safe_fps,
             info,
@@ -965,6 +1016,9 @@ def _cache_video_source(
             input_signature=signature,
             trusted=True,
         ))
+        if wait_for_input_cache:
+            _cache_wait_input(node_id, prompt, frames, safe_fps, {**info, "input_signature": signature}, audio)
+        return stored
     except Exception as exc:
         _subtitle_info("%s cache unavailable: %s", cache_label, exc)
     return False
@@ -1013,6 +1067,7 @@ def _store_frame_cache(
         frames,
         safe_fps,
         proxy=False,
+        cache_fingerprint=input_signature,
         encode_video=encode_video,
         info=cache_info,
         audio=_prepare_audio(audio),
@@ -1034,6 +1089,8 @@ def _cache_main_video(
     *,
     encode_video: bool = True,
     input_signature: str = "",
+    wait_for_input_cache: bool = False,
+    prompt: Any = None,
 ) -> bool:
     return _cache_video_source(
         video,
@@ -1041,6 +1098,8 @@ def _cache_main_video(
         "main",
         encode_video=encode_video,
         input_signature=input_signature,
+        wait_for_input_cache=wait_for_input_cache,
+        prompt=prompt,
     )
 
 
@@ -1427,6 +1486,13 @@ class CSVideoSubtitle(io.ComfyNode):
                 io.String.Input("outline_color", default="#000000", advanced=True),
                 io.Int.Input("shadow_size", default=3, min=0, max=20, step=1, advanced=True),
                 io.String.Input("shadow_color", default="#000000", advanced=True),
+                io.Boolean.Input(
+                    "wait_for_input_cache",
+                    display_name="wait for input cache",
+                    default=False,
+                    advanced=True,
+                    tooltip="Interrupt execution when this node is reached after caching its input.",
+                ),
             ],
             outputs=[io.Video.Output("video"), io.String.Output("srt", display_name="SRT")],
             hidden=[io.Hidden.prompt, io.Hidden.unique_id],
@@ -1454,6 +1520,7 @@ class CSVideoSubtitle(io.ComfyNode):
         outline_color: str = "#000000",
         shadow_size: int = 3,
         shadow_color: str = "#000000",
+        wait_for_input_cache: bool = False,
         ) -> io.NodeOutput:
         if not hasattr(video, "get_components"):
             raise ValueError("video input is not a compatible VIDEO value.")
@@ -1529,11 +1596,26 @@ class CSVideoSubtitle(io.ComfyNode):
                 _cache_main_video(
                     video,
                     node_id,
-                    encode_video=timeline_open,
+                    encode_video=bool(timeline_open or wait_for_input_cache),
                     input_signature=main_signature,
+                    wait_for_input_cache=bool(wait_for_input_cache),
+                    prompt=getattr(getattr(cls, "hidden", None), "prompt", None),
+                )
+            elif bool(wait_for_input_cache):
+                _cache_main_video(
+                    video,
+                    node_id,
+                    encode_video=True,
+                    input_signature=main_signature,
+                    wait_for_input_cache=True,
+                    prompt=getattr(getattr(cls, "hidden", None), "prompt", None),
                 )
         else:
             _subtitle_info("stage 2/6: preview cache unavailable without a node id")
+        if bool(wait_for_input_cache):
+            from comfy.model_management import InterruptProcessingException
+
+            raise InterruptProcessingException()
         _subtitle_info("stage 3/6: parsing subtitle cues")
         cues = parse_srt(selected_srt)
         source_offset = 0.0
@@ -1565,24 +1647,37 @@ class CSVideoSubtitle(io.ComfyNode):
         _subtitle_info("subtitle cues ready: count=%d", len(cues))
         _subtitle_info("stage 4/6: rendering subtitles onto %d frames", int(images.shape[0]))
         active_keys, active_by_key = _subtitle_active_frames(cues, int(images.shape[0]), frame_rate)
-        progress = _SubtitleProgress(int(images.shape[0]))
-        try:
-            if _subtitle_gpu_device(images) is not None and active_by_key:
-                try:
-                    output_images = _render_subtitles_gpu(
-                        images,
-                        active_keys,
-                        active_by_key,
-                        output_style,
-                        _fonts_root(),
-                        progress,
-                    )
-                except RuntimeError as exc:
-                    if "out of memory" not in str(exc).lower():
-                        raise
-                    progress.close()
-                    _subtitle_info("GPU subtitle rendering unavailable; falling back to CPU")
-                    progress = _SubtitleProgress(int(images.shape[0]))
+        if not active_by_key:
+            output_images = images
+            _subtitle_info("no active subtitle cues; skipping subtitle rendering")
+        else:
+            progress = _SubtitleProgress(int(images.shape[0]))
+            try:
+                if _subtitle_gpu_device(images) is not None:
+                    try:
+                        output_images = _render_subtitles_gpu(
+                            images,
+                            active_keys,
+                            active_by_key,
+                            output_style,
+                            _fonts_root(),
+                            progress,
+                        )
+                    except RuntimeError as exc:
+                        if "out of memory" not in str(exc).lower():
+                            raise
+                        progress.close()
+                        _subtitle_info("GPU subtitle rendering unavailable; falling back to CPU")
+                        progress = _SubtitleProgress(int(images.shape[0]))
+                        output_images = _render_subtitles_cpu(
+                            images,
+                            active_keys,
+                            active_by_key,
+                            output_style,
+                            _fonts_root(),
+                            progress,
+                        )
+                else:
                     output_images = _render_subtitles_cpu(
                         images,
                         active_keys,
@@ -1591,17 +1686,8 @@ class CSVideoSubtitle(io.ComfyNode):
                         _fonts_root(),
                         progress,
                     )
-            else:
-                output_images = _render_subtitles_cpu(
-                    images,
-                    active_keys,
-                    active_by_key,
-                    output_style,
-                    _fonts_root(),
-                    progress,
-                )
-        finally:
-            progress.close()
+            finally:
+                progress.close()
         _subtitle_info("frame rendering complete: %d frames", int(output_images.shape[0]))
         _subtitle_info("stage 5/6: assembling output video")
         metadata = source_metadata
@@ -1752,8 +1838,9 @@ async def _subtitle_preview_route(request):
         return web.json_response({"error": "Missing subtitle node id."}, status=400)
     video_filename = str(payload.get("video_filename", "")).strip()
     trim_metadata = _trim_metadata_from_values(payload)
+    wait_entry = _wait_input_cache_entry(payload.get("source_token"))
     loader_entry = _loader_preview_entry(payload.get("loader_id"), payload.get("loader_signature"))
-    entry = loader_entry or _preview_entry_for_request(node_id, video_filename, trim_metadata)
+    entry = wait_entry or loader_entry or _preview_entry_for_request(node_id, video_filename, trim_metadata)
     if entry is None and video_filename and trim_metadata:
         entry = _lazy_cache_trimmed_preview(node_id, video_filename, trim_metadata)
     try:
@@ -1821,8 +1908,9 @@ async def _subtitle_waveform_route(request):
     node_id = str(request.query.get("node_id", "")).strip()
     filename = str(request.query.get("video_filename", "")).strip()
     trim_metadata = _trim_metadata_from_request(request)
+    wait_entry = _wait_input_cache_entry(request.query.get("source_token"))
     loader_entry = _loader_preview_entry(request.query.get("loader_id"), request.query.get("loader_signature"))
-    entry = loader_entry or (_preview_entry_for_request(node_id, filename, trim_metadata) if node_id else None)
+    entry = wait_entry or loader_entry or (_preview_entry_for_request(node_id, filename, trim_metadata) if node_id else None)
     if entry is None and node_id and filename and (trim_metadata or node_id in _SUBTITLE_SOURCE_METADATA or _load_runtime_descriptor(node_id)):
         entry = _lazy_cache_trimmed_preview(node_id, filename, trim_metadata)
     if entry is not None:

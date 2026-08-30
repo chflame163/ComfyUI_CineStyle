@@ -1,11 +1,13 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import {
+    connectedInputChain,
     connectedVideoSource,
     ensureLoaderPreviewSource,
     fetchInfo,
     prepareInputTimeline,
     sourceFrameForLocal,
+    fetchWaitInputCache,
 } from "./video_selector_multi.js";
 
 const STYLE_ID = "cinestyle-vfx-beauty-style";
@@ -160,12 +162,16 @@ async function openPreview(node) {
     dialog.addEventListener("cancel", earlyClose);
     dialog.showModal();
     try {
-        let cachedSource = null;
-        try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { throw error; }
         const upstreamSource = connectedVideoSource(node, ["image", "images", "video_input"]);
-        source = upstreamSource?.loaderId ? upstreamSource : cachedSource;
-        if (!source) source = upstreamSource;
-        if (!source) throw new Error("Run this VFX node once to cache its own connected image/video input.");
+        const chain = connectedInputChain(node, ["image", "images", "video_input"]);
+        if (chain) source = await fetchWaitInputCache(chain).catch(() => null);
+        let cachedSource = null;
+        if (!source && upstreamSource) {
+            try { cachedSource = await fetchBeautyCachedSource(node); } catch (error) { throw error; }
+            source = upstreamSource?.loaderId ? upstreamSource : cachedSource;
+            if (!source) source = upstreamSource;
+        }
+        if (!source) throw new Error("Run ComfyUI once to generate preview cache.");
         if (source.loaderId && !source.token) {
             source = await ensureLoaderPreviewSource(source, { onProgress: (progress) => setLoading(`Preparing cache, please wait ${progress}%`) });
         }

@@ -95,6 +95,36 @@ def _loader_preview_cache():
     return module.get_loader_preview_cache() if module is not None else None
 
 
+def _cache_wait_input(
+    node_id: Any,
+    prompt: Any,
+    images: torch.Tensor,
+    input_names: tuple[str, ...],
+    video_input: Any = None,
+) -> dict[str, Any] | None:
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    if module is None:
+        return None
+    chain = module.build_input_chain(prompt, node_id, input_names)
+    if chain is None:
+        return None
+    try:
+        return module.get_wait_input_cache_store().put_chain(
+            chain,
+            images,
+            _video_input_fps(video_input, prompt, node_id),
+            info={
+                "producer_node_id": str(node_id or ""),
+                "producer_node_type": "CS_Video_Segment",
+            },
+            force=True,
+        )
+    except Exception as exc:
+        _segment_info("CS Video Segment", f"wait input cache failed: {exc}")
+        return None
+
+
 def _no_nested_tqdm(iterable: Any, *args: Any, **kwargs: Any) -> Any:
     return iterable
 
@@ -416,6 +446,12 @@ def _decode_selector_frame(payload: dict[str, Any], frame_index: int) -> torch.T
         if cache is None:
             raise ValueError("The shared loader preview cache is unavailable.")
         return cache.decode_frame(token, frame_index)
+    if token.startswith("wait_input:"):
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        if module is None:
+            raise ValueError("The shared wait input preview cache is unavailable.")
+        return module.get_wait_input_cache_store().decode_frame(payload, frame_index)
     entry = _selector_cache_for_token(token)
     if entry is None:
         raise ValueError("The cached Selector input is no longer available. Run the workflow once again.")
@@ -1497,6 +1533,13 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 io.Int.Input("mllm_memory_size", default=12, min=1, max=20, step=1, advanced=True),
                 io.Boolean.Input("offload_video_to_cpu", default=False, advanced=True),
                 io.Boolean.Input("auto_unload_model", default=True, advanced=True),
+                io.Boolean.Input(
+                    "wait_for_input_cache",
+                    display_name="wait for input cache",
+                    default=False,
+                    advanced=True,
+                    tooltip="Interrupt execution when this node is reached after caching its input.",
+                ),
             ],
             outputs=[
                 io.Mask.Output("mask", display_name="MASK"),
@@ -1518,6 +1561,7 @@ class CSVideoSegmentSeC(io.ComfyNode):
         mllm_memory_size: int = 12,
         offload_video_to_cpu: bool = False,
         auto_unload_model: bool = True,
+        wait_for_input_cache: bool = False,
     ) -> io.NodeOutput:
         node_name = "CS Video Segment (SeC-4B)"
         _segment_info(node_name, "start")
@@ -1540,6 +1584,17 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 images,
                 _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
             )
+        if bool(wait_for_input_cache):
+            _cache_wait_input(
+                cls.hidden.unique_id,
+                cls.hidden.prompt,
+                images,
+                ("images", "video_input"),
+                video_input,
+            )
+            from comfy.model_management import InterruptProcessingException
+
+            raise InterruptProcessingException()
         frame_count, height, width = map(int, images.shape[:3])
         anchor = int(anchor_frame)
         if not 0 <= anchor < frame_count:
@@ -1790,6 +1845,13 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                     advanced=True,
                     tooltip="Maximum SAM3.1 multiplex object slots.",
                 ),
+                io.Boolean.Input(
+                    "wait_for_input_cache",
+                    display_name="wait for input cache",
+                    default=False,
+                    advanced=True,
+                    tooltip="Interrupt execution when this node is reached after caching its input.",
+                ),
             ],
             outputs=[
                 io.Mask.Output("mask", display_name="MASK"),
@@ -1808,6 +1870,7 @@ class CSVideoSegmentSAM3(io.ComfyNode):
         prompt_data: str = '{"version":2,"objects":[]}',
         propagation_direction: str = "both",
         max_objects: int = 16,
+        wait_for_input_cache: bool = False,
     ) -> io.NodeOutput:
         global _LAST_MODEL
         node_name = "CS Video Segment (SAM3.1)"
@@ -1834,6 +1897,17 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                 images,
                 _video_input_fps(video_input, cls.hidden.prompt, cls.hidden.unique_id),
             )
+        if bool(wait_for_input_cache):
+            _cache_wait_input(
+                cls.hidden.unique_id,
+                cls.hidden.prompt,
+                images,
+                ("images", "video_input"),
+                video_input,
+            )
+            from comfy.model_management import InterruptProcessingException
+
+            raise InterruptProcessingException()
         frame_count, height, width = map(int, images.shape[:3])
         anchor = int(anchor_frame)
         if anchor < 0 or anchor >= frame_count:

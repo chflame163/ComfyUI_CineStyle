@@ -1,7 +1,7 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { createCineStyleTextEditor } from "./cinestyle_text_editor.js";
-import { connectedVideoSource, ensureLoaderPreviewSource } from "./video_selector_multi.js";
+import { connectedInputChain, connectedVideoSource, ensureLoaderPreviewSource, fetchWaitInputCache } from "./video_selector_multi.js";
 
 const NODE_ID = "CS_Video_Subtitle";
 const STYLE_ID = "cinestyle-subtitle-timeline-style";
@@ -10,7 +10,7 @@ const SOURCE_VIDEO_REQUIRED_MESSAGE = "找不到可访问的源视频文件，�
 const PERSISTED_WIDGET_NAMES = [
     "edited_srt", "preview_in", "preview_out", "font", "font_size", "primary_color", "secondary_color",
     "gradient", "text_align", "italic", "letter_spacing", "position_x", "position_y",
-    "outline_size", "outline_color", "shadow_size", "shadow_color", "Edit Timeline",
+    "outline_size", "outline_color", "shadow_size", "shadow_color", "wait_for_input_cache", "Edit Timeline",
 ];
 const NODE_SUBTITLE_CLIPBOARDS = new WeakMap();
 
@@ -138,10 +138,11 @@ async function fetchCachedPreview(node, filename = "", trim = null, onProgress =
     if (!response.ok) throw new Error(result.error || "Unable to read subtitle preview cache");
     return { url: api.apiURL(String(result.video_url || "")), info: result.info || {}, label: String(result.label || "Subtitle preview cache") };
 }
-async function fetchAudioWaveform(node, filename = "", trim = null) {
+async function fetchAudioWaveform(node, filename = "", trim = null, sourceToken = "") {
     const nodeId = String(node?.id ?? "").trim();
     if (!nodeId && !filename) return null;
     const params = appendVideoTrimParams(new URLSearchParams({ node_id: nodeId, video_filename: String(filename || ""), t: String(Date.now()) }), trim);
+    if (sourceToken) params.set("source_token", String(sourceToken));
     const response = await api.fetchApi(`/cinestyle/video-subtitle-waveform?${params}`);
     if (!response.ok) return null;
     const result = await response.json();
@@ -376,6 +377,7 @@ function addStyles() {
 
 async function openTimeline(node) {
     const connectedSource = connectedVideoSource(node, ["video"]);
+    const inputChain = connectedInputChain(node, ["video"]);
     const filename = String(connectedSource?.filename || "");
     const sourceTrim = connectedSource?.isCSLoad ? connectedSource : null;
     const srtConnected = inputConnected(node, "srt");
@@ -386,6 +388,8 @@ async function openTimeline(node) {
     let cachedSrt = null;
     let cachedPreview = null;
     let sourceSrt = srtConnected ? externalSrt : persistedSrt;
+    if (inputChain) cachedPreview = await fetchWaitInputCache(inputChain).catch(() => null);
+    if (!cachedPreview && !connectedSource) throw new Error("Run ComfyUI once to generate preview cache.");
     addStyles();
     const dialog = document.createElement("dialog");
     dialog.className = "cs-subtitle-dialog";
@@ -607,6 +611,7 @@ async function openTimeline(node) {
                 loaded_fps: sourceTrim?.targetFps,
                 loader_id: sourceTrim?.loaderId,
                 loader_signature: sourceTrim?.loaderSignature,
+                source_token: cachedPreview?.token || "",
                 cues,
                 style,
             }),
@@ -1158,7 +1163,7 @@ async function openTimeline(node) {
         }
     });
     async function loadAudioWaveform() {
-        const result = await fetchAudioWaveform(node, filename, sourceTrim).catch(() => null);
+        const result = await fetchAudioWaveform(node, filename, sourceTrim, cachedPreview?.token || "").catch(() => null);
         waveformPeaks = result?.peaks || [];
         waveformDuration = Number(result?.duration) || duration;
         drawAudioWaveform();
@@ -1172,12 +1177,14 @@ async function openTimeline(node) {
             sourceSrt = cachedSrt.srt;
             replaceCues(sourceSrt);
         }
-        cachedPreview = await fetchCachedPreview(
-            node,
-            filename,
-            sourceTrim,
-            (progress) => setLoading(`Preparing cache, please wait ${progress}%`),
-        ).catch(() => null);
+        if (!cachedPreview) {
+            cachedPreview = await fetchCachedPreview(
+                node,
+                filename,
+                sourceTrim,
+                (progress) => setLoading(`Preparing cache, please wait ${progress}%`),
+            ).catch(() => null);
+        }
         setLoading("Preparing cache, please wait 100%");
         if (cachedPreview?.warning) {
             status.textContent = cachedPreview.warning;

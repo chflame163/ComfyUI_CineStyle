@@ -48,6 +48,14 @@ class _ScannedExtension(ComfyExtension):
         self._extensions: list[ComfyExtension] = []
 
     async def on_load(self) -> None:
+        from server import PromptServer
+
+        server_instance = getattr(PromptServer, "instance", None)
+        preview_cache = sys.modules.get(f"{__name__}._py_preview_cache")
+        if preview_cache is not None:
+            register_routes = getattr(preview_cache, "register_wait_input_cache_routes", None)
+            if callable(register_routes):
+                register_routes(server_instance)
         self._extensions = []
         for entrypoint in self._entrypoints:
             extension = await entrypoint()

@@ -44,6 +44,8 @@ _BISE_NET_HF_URL = "https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/m
 _BISE_NET_OFFICIAL_URL = "https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth"
 _LOGGER = logging.getLogger("CineStyleVFXBeauty")
 _PREVIEW_CACHE_STORE = None
+_VFX_MASK_CACHE_BY_TOKEN: dict[str, torch.Tensor | None] = {}
+_VFX_COLOUR_CACHE_BY_TOKEN: dict[str, torch.Tensor] = {}
 _BEAUTY_GPU_MEMORY_FRACTION = 0.45
 _BEAUTY_MEMORY_RESERVE_BYTES = 512 * 1024 * 1024
 _BEAUTY_MAX_GPU_BATCH = 32
@@ -65,6 +67,58 @@ def _loader_preview_cache():
     package = __name__.rsplit(".", 1)[0]
     module = sys.modules.get(f"{package}._py_loader_preview_cache")
     return module.get_loader_preview_cache() if module is not None else None
+
+
+def _cache_wait_input(node_id: Any, prompt: Any, image: torch.Tensor) -> dict[str, Any] | None:
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    if module is None:
+        return None
+    chain = module.build_input_chain(prompt, node_id, ("image",))
+    if chain is None:
+        return None
+    try:
+        return module.get_wait_input_cache_store().put_chain(
+            chain,
+            image[..., :3],
+            _source_fps_from_prompt(prompt, node_id),
+            info={
+                "producer_node_id": str(node_id or ""),
+                "producer_node_type": "CS_VFX_Beauty",
+            },
+            force=True,
+        )
+    except Exception as exc:
+        _LOGGER.warning("[CS VFX Beauty] wait input cache failed: %s", exc)
+        return None
+
+
+def _source_fps_from_prompt(prompt: Any, node_id: Any) -> float:
+    if not isinstance(prompt, dict):
+        return 24.0
+    pending = [prompt.get(str(node_id)) or prompt.get(node_id)]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop(0)
+        if not isinstance(current, dict):
+            continue
+        inputs = current.get("inputs") if isinstance(current.get("inputs"), dict) else {}
+        for name in ("fps", "frame_rate", "target_fps"):
+            try:
+                candidate = float(inputs.get(name))
+                if math.isfinite(candidate) and candidate > 0:
+                    return candidate
+            except (TypeError, ValueError, OverflowError):
+                pass
+        for value in inputs.values():
+            if not isinstance(value, (list, tuple)) or len(value) < 2:
+                continue
+            upstream_id = str(value[0])
+            if upstream_id in visited:
+                continue
+            visited.add(upstream_id)
+            pending.append(prompt.get(upstream_id) or prompt.get(value[0]))
+    return 24.0
 
 
 def _loader_id_from_prompt(prompt: Any, node_id: Any) -> str:
@@ -1031,6 +1085,12 @@ def _cache_vfx_input(
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
     loader_origin = _loader_id_from_prompt(prompt, node_id)
+    cached_mask = None
+    if isinstance(mask, torch.Tensor) and mask.ndim >= 3:
+        cached_mask = mask.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        if cached_mask.ndim == 4:
+            cached_mask = cached_mask[..., 0]
+    entry = None
     try:
         fps = 24.0
         if isinstance(prompt, dict):
@@ -1055,19 +1115,31 @@ def _cache_vfx_input(
                         pending.append(prompt.get(str(value[0])) or prompt.get(value[0]))
         # CS Load Video owns the shared preview MP4. Keep a frame-only local
         # entry for optional colour estimation, but avoid encoding it again.
-        _preview_cache_store().put_preview(key, image, fps, encode_video=not loader_origin)
+        cache_fingerprint = ""
+        if cached_mask is not None:
+            cache_fingerprint = f"mask:{_preview_cache_store().fingerprint_value(cached_mask)}"
+        entry = _preview_cache_store().put_preview(
+            key,
+            image,
+            fps,
+            cache_fingerprint=cache_fingerprint,
+            encode_video=not loader_origin,
+        )
         if loader_origin:
             _console_info(key, "shared loader preview", f"loader={loader_origin}")
     except Exception as exc:
         print(f"[CineStyle] VFX Beauty preview cache failed for node {key}: {exc}")
-    cached_mask = None
-    if isinstance(mask, torch.Tensor) and mask.ndim >= 3:
-        cached_mask = mask.detach().to(device="cpu", dtype=torch.float32).contiguous()
-        if cached_mask.ndim == 4:
-            cached_mask = cached_mask[..., 0]
     with _VFX_CACHE_LOCK:
         _VFX_MASK_CACHE[key] = cached_mask
         _VFX_COLOUR_CACHE.pop(key, None)
+        token = str((entry or {}).get("token") or "").strip()
+        if token:
+            _VFX_MASK_CACHE_BY_TOKEN[token] = cached_mask
+            _VFX_COLOUR_CACHE_BY_TOKEN.pop(token, None)
+            while len(_VFX_MASK_CACHE_BY_TOKEN) > 64:
+                _VFX_MASK_CACHE_BY_TOKEN.pop(next(iter(_VFX_MASK_CACHE_BY_TOKEN)))
+            while len(_VFX_COLOUR_CACHE_BY_TOKEN) > 64:
+                _VFX_COLOUR_CACHE_BY_TOKEN.pop(next(iter(_VFX_COLOUR_CACHE_BY_TOKEN)))
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
@@ -1080,12 +1152,19 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
 def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str) -> int:
     """Map a proxy frame to the corresponding original mask frame."""
     try:
+        wait_cache_module = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
         source_entry = (
             _loader_preview_cache().entry_for_token(source_token)
             if source_token.startswith("loader_preview:") and _loader_preview_cache() is not None
+            else wait_cache_module.get_wait_input_cache_store().get_token(source_token)
+            if source_token.startswith("wait_input:") and wait_cache_module is not None
             else _preview_cache_store().get_token(source_token)
         )
-        original_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
+        original_entry = (
+            source_entry
+            if source_entry is not None and not source_token.startswith("loader_preview:")
+            else _preview_cache_store().get_preview_variant(node_id, proxy=False)
+        )
         source_count = int((source_entry or {}).get("info", {}).get("frames") or 0)
         original_count = int((original_entry or {}).get("info", {}).get("frames") or 0)
         if source_count > 1 and original_count > 1 and source_count != original_count:
@@ -1095,9 +1174,19 @@ def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str)
     return frame_index
 
 
-def _preview_mask_for_node(node_id: str, frame_index: int, height: int, width: int) -> torch.Tensor | None:
+def _preview_mask_for_node(
+    node_id: str,
+    frame_index: int,
+    height: int,
+    width: int,
+    source_token: str = "",
+) -> torch.Tensor | None:
     with _VFX_CACHE_LOCK:
-        mask = _VFX_MASK_CACHE.get(node_id)
+        mask = _VFX_MASK_CACHE_BY_TOKEN.get(source_token) if source_token else None
+        if source_token and source_token not in _VFX_MASK_CACHE_BY_TOKEN:
+            mask = _VFX_MASK_CACHE.get(node_id)
+        elif not source_token:
+            mask = _VFX_MASK_CACHE.get(node_id)
     if mask is None or mask.ndim != 3 or frame_index < 0 or (frame_index >= mask.shape[0] and mask.shape[0] != 1):
         return None
     frame = mask[0:1] if mask.shape[0] == 1 else mask[frame_index : frame_index + 1]
@@ -1111,24 +1200,42 @@ def _preview_colour(
     requested: Any,
     current_frame: torch.Tensor,
     current_mask: torch.Tensor | None,
+    source_token: str = "",
 ) -> tuple[torch.Tensor, str]:
     parsed = _parse_hex_colour(requested)
     if parsed is not None:
         return parsed, str(requested).strip().upper()
     with _VFX_CACHE_LOCK:
-        cached = _VFX_COLOUR_CACHE.get(node_id)
+        cached = _VFX_COLOUR_CACHE_BY_TOKEN.get(source_token) if source_token else None
+        if source_token and source_token not in _VFX_COLOUR_CACHE_BY_TOKEN:
+            cached = _VFX_COLOUR_CACHE.get(node_id)
+        elif not source_token:
+            cached = _VFX_COLOUR_CACHE.get(node_id)
     if cached is not None:
         return cached, "#%02X%02X%02X" % tuple(int(round(float(v) * 255.0)) for v in cached)
 
     clip = current_frame
     external = current_mask
-    entry = _preview_cache_entry(node_id)
+    wait_cache_module = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
+    entry = (
+        wait_cache_module.get_wait_input_cache_store().get_token(source_token)
+        if source_token.startswith("wait_input:") and wait_cache_module is not None
+        else _preview_cache_store().get_token(source_token)
+        if source_token and not source_token.startswith("loader_preview:")
+        else _preview_cache_entry(node_id)
+    )
     if entry is not None:
         try:
             frames = np.load(str(entry["frames_path"]), mmap_mode="r", allow_pickle=False)
             clip = torch.from_numpy(np.array(frames, copy=True)).to(torch.float32).div_(255.0)
             with _VFX_CACHE_LOCK:
-                all_mask = _VFX_MASK_CACHE.get(node_id)
+                all_mask = (
+                    _VFX_MASK_CACHE_BY_TOKEN.get(str(entry.get("token") or ""))
+                    if entry is not None
+                    else _VFX_MASK_CACHE.get(node_id)
+                )
+                if all_mask is None:
+                    all_mask = _VFX_MASK_CACHE.get(node_id)
             if all_mask is not None and all_mask.ndim == 3 and all_mask.shape[0] in (1, clip.shape[0]):
                 external = all_mask if all_mask.shape[0] == clip.shape[0] else all_mask.expand(clip.shape[0], -1, -1)
             else:
@@ -1140,6 +1247,8 @@ def _preview_colour(
     colour = _estimate_clip_colour(clip, external, alpha).detach().to(device="cpu", dtype=torch.float32)
     with _VFX_CACHE_LOCK:
         _VFX_COLOUR_CACHE[node_id] = colour
+        if source_token:
+            _VFX_COLOUR_CACHE_BY_TOKEN[source_token] = colour
     return colour, "#%02X%02X%02X" % tuple(int(round(float(v) * 255.0)) for v in colour)
 
 
@@ -1216,12 +1325,18 @@ async def _vfx_beauty_preview_route(request: web.Request) -> web.Response:
             if cache is None:
                 raise ValueError("The shared loader preview cache is unavailable.")
             frame = cache.decode_frame(source_token, frame_index)
+        elif source_token.startswith("wait_input:"):
+            package = __name__.rsplit(".", 1)[0]
+            module = sys.modules.get(f"{package}._py_preview_cache")
+            if module is None:
+                raise ValueError("The shared wait input preview cache is unavailable.")
+            frame = module.get_wait_input_cache_store().decode_frame(payload, frame_index)
         else:
             frame = _preview_cache_store().decode_frame(payload, frame_index)
         height, width = int(frame.shape[1]), int(frame.shape[2])
         mask_index = _preview_mask_frame_index(node_id, frame_index, str(payload.get("source_token") or ""))
-        mask = _preview_mask_for_node(node_id, mask_index, height, width)
-        colour, colour_label = _preview_colour(node_id, payload.get("colour", "auto"), frame, mask)
+        mask = _preview_mask_for_node(node_id, mask_index, height, width, source_token)
+        colour, colour_label = _preview_colour(node_id, payload.get("colour", "auto"), frame, mask, source_token)
         output = _run_beauty(
             frame,
             mask,
@@ -1279,6 +1394,13 @@ class CSVFXBeauty(io.ComfyNode):
                 io.Float.Input("o_amount", default=0.2, min=0.0, max=1.0, step=0.001, display_name="Shine Amount"),
                 io.Float.Input("sat_amount", default=100.0, min=0.0, max=300.0, step=0.1, display_name="Saturation"),
                 io.Float.Input("hue_amount", default=0.0, min=-360.0, max=360.0, step=0.01, display_name="Hue Shift"),
+                io.Boolean.Input(
+                    "wait_for_input_cache",
+                    display_name="wait for input cache",
+                    default=False,
+                    advanced=True,
+                    tooltip="Interrupt execution when this node is reached after caching its input.",
+                ),
             ],
             outputs=[
                 io.Image.Output("image", display_name="IMAGE"),
@@ -1306,6 +1428,7 @@ class CSVFXBeauty(io.ComfyNode):
         o_amount: float = 0.2,
         sat_amount: float = 100.0,
         hue_amount: float = 0.0,
+        wait_for_input_cache: bool = False,
     ) -> io.NodeOutput:
         node_id = getattr(cls, "hidden", None) and getattr(cls.hidden, "unique_id", "")
         prompt = getattr(cls, "hidden", None) and getattr(cls.hidden, "prompt", None)
@@ -1316,6 +1439,11 @@ class CSVFXBeauty(io.ComfyNode):
             progress.info("cache input", "storing frames and optional mask for VFX Preview")
             _cache_vfx_input(node_id, prompt, image, mask)
             progress.info("cache input complete")
+            if bool(wait_for_input_cache):
+                _cache_wait_input(node_id, prompt, image)
+                from comfy.model_management import InterruptProcessingException
+
+                raise InterruptProcessingException()
 
             colour_tensor = _parse_hex_colour(colour)
             weights_tensor = _parse_vec3(weights, (6.0, 0.0, 3.0), "weights")

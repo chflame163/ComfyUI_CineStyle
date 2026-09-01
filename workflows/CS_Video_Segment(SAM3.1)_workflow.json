@@ -49,6 +49,122 @@
       }
     },
     {
+      "id": 8,
+      "type": "MaskPreview",
+      "pos": [
+        2992.6306721984533,
+        7339.994824506777
+      ],
+      "size": [
+        353.9854423818797,
+        531.8453337318497
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 21
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MaskPreview"
+      }
+    },
+    {
+      "id": 2,
+      "type": "CS_Load_Video",
+      "pos": [
+        2152.3524285161557,
+        7405.430965928209
+      ],
+      "size": [
+        360,
+        562.2857142857142
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            20
+          ]
+        },
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "DICT",
+          "links": null
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CS_Load_Video"
+      },
+      "widgets_values": [
+        "ComfyUI_00010_.mp4",
+        true,
+        32,
+        48,
+        104,
+        1120,
+        640,
+        24,
+        2.1,
+        {
+          "hidden": false,
+          "filename": "ComfyUI_00010_.mp4"
+        }
+      ],
+      "widgets_values_named": {
+        "video": "ComfyUI_00010_.mp4",
+        "multiple": true,
+        "start_frame": 32,
+        "end_frame": 48,
+        "width": 104,
+        "height": 1120,
+        "fps": 640,
+        "choose file to upload": 24,
+        "Edit Timeline": 2.1,
+        "videopreview": {
+          "hidden": false,
+          "filename": "ComfyUI_00010_.mp4"
+        }
+      },
+      "color": "rgba(67, 105, 82, 0.85)"
+    },
+    {
       "id": 17,
       "type": "CS_Video_Segment_SAM3",
       "pos": [
@@ -57,7 +173,7 @@
       ],
       "size": [
         390,
-        360
+        248
       ],
       "flags": {},
       "order": 2,
@@ -107,125 +223,17 @@
         0,
         "both",
         16,
-        "{\"version\":2,\"objects\":[]}",
+        false,
+        "",
         ""
       ],
       "widgets_values_named": {
         "anchor_frame": 0,
         "propagation_direction": "both",
         "max_objects": 16,
-        "prompt_data": "{\"version\":2,\"objects\":[]}",
+        "wait_for_input_cache": false,
+        "prompt_data": "",
         "Open Selector": ""
-      },
-      "color": "rgba(67, 105, 82, 0.85)"
-    },
-    {
-      "id": 8,
-      "type": "MaskPreview",
-      "pos": [
-        2992.6306721984533,
-        7339.994824506777
-      ],
-      "size": [
-        353.9854423818797,
-        531.8453337318497
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "mask",
-          "type": "MASK",
-          "link": 21
-        }
-      ],
-      "outputs": [
-        {
-          "name": "mask",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "MaskPreview"
-      }
-    },
-    {
-      "id": 2,
-      "type": "CS_Load_Video",
-      "pos": [
-        2152.3524285161557,
-        7405.430965928209
-      ],
-      "size": [
-        360,
-        619.7142857142858
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "VIDEO",
-          "type": "VIDEO",
-          "links": [
-            20
-          ]
-        },
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": []
-        },
-        {
-          "name": "frame_count",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": null
-        },
-        {
-          "name": "video_info",
-          "type": "DICT",
-          "links": null
-        },
-        {
-          "name": "proxy_video",
-          "type": "*",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CS_Load_Video"
-      },
-      "widgets_values": [
-        "ComfyUI_00010_.mp4",
-        true,
-        32,
-        48,
-        104,
-        1120,
-        640,
-        24,
-        2.1,
-        0.8
-      ],
-      "widgets_values_named": {
-        "video": "ComfyUI_00010_.mp4",
-        "keep_aspect_ratio": true,
-        "multiple": 32,
-        "start_frame": 48,
-        "end_frame": 104,
-        "width": 1120,
-        "height": 640,
-        "fps": 24,
-        "upload": 2.1,
-        "Edit Timeline": 0.8
       },
       "color": "rgba(67, 105, 82, 0.85)"
     }
@@ -266,7 +274,11 @@
         -6903.95564068497
       ]
     },
-    "frontendVersion": "1.49.6"
+    "frontendVersion": "1.51.9",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
   },
   "version": 0.4
 }

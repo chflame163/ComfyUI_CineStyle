@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Color Match](#cs-color-match) 节点，使用参考图自动匹配 IMAGE 帧批次的整体色调，支持多种颜色传递方法。
 * 添加 [CS Compare Any](#cs-compare-any) 节点，对两个相同类型的输入进行媒体画面对比或文本差异比较。
 * 添加 [CS Preview Any](#cs-preview-any) 节点，自动识别并预览 ComfyUI 的常见图像、视频、音频和数据类型。
 * 添加 [CS Mask Grow](#cs-mask-grow) 节点，较官方Grow Mask节点运算速度大幅提升，并能更好的保持轮廓特征。
@@ -42,6 +43,44 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 
 ## 节点说明
+
+### CS Color Match
+
+将源 `IMAGE` 帧批次的整体色调、色相和色度匹配到参考图，保留明暗关系、对比度和纹理细节。
+
+![CS Color Match 节点](images/CS_Color_Match_node.jpg)
+
+#### 使用流程
+
+1. 将图片节点或 `CS Load Video` 的 `IMAGE` 输出连接到 `image`。
+2. 将色调参考图片连接到 `reference_image`。如果输入的是 batch ，只使用第一张图片。
+3. 选择颜色传递方法和颜色空间。默认组合为 `Optimal Transport` + `OKLab`，适合大部分视频色调匹配。
+4. 调整匹配强度、亮度/对比度/饱和度保护以及色相/色度强度，然后执行工作流。
+
+#### 节点输入
+
+- image`：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, 3 or 4]`。输出为 RGB 三通道，源帧尺寸和帧顺序保持不变。
+- reference_image`：标准 ComfyUI `IMAGE`。只使用第一张参考图；参考图最长边超过 `2048` 时，仅在统计阶段缩小到最长边 `2048`，不会影响源帧输出分辨率。
+- Method`：颜色传递方法。
+  - Optimal Transport：使用正则化的高斯最优传输映射，默认方法。
+  - Reinhard：匹配颜色通道的均值和标准差，效果保守、速度快。
+  - LHM：使用颜色协方差进行线性匹配，适合整体色彩风格迁移。
+  - PCCM：使用主成分轴和方差匹配，色彩变化更明显。
+  - PDF：使用多次投影的分布匹配，适合复杂或多峰色板，但计算时间更长。
+- Color Space：颜色空间，可选 `Lab` 或 `OKLab`。通常推荐 `OKLab`，其亮度、色相和色度控制更适合保持原视频结构。
+- Match Strength：整体匹配强度，范围 `0–1`，默认 `0.75`。`0` 返回原图，`1` 完整应用匹配后的亮度、色相和色度目标。
+- Preserve Luminance：亮度保护，范围 `0–1`，默认 `1`。`1` 保留源图的感知亮度，适合不希望改变视频明暗关系的场景。
+- Preserve Contrast：对比度保护，范围 `0–1`，默认 `1`。用于恢复源图的亮度对比度分布；节点不会对帧进行空间模糊或重采样。
+- Preserve Saturation：饱和度/色度保护，范围 `0–1`，默认 `0`。`1` 保留源图的色度大小，但不阻止色相匹配。
+- Hue Strength：色相匹配强度，范围 `0–1`，默认 `1`。低色度区域会自动降低色相变化，减少中性区域的色偏噪声。
+- Chroma Strength：色度匹配强度，范围 `0–1`，默认 `1`。
+
+
+#### 输出
+
+- `IMAGE`：完成颜色匹配的 RGB 图像。
+
+
 
 
 ### CS Compare Any
@@ -188,6 +227,7 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 - 曲线可分别调整 `RGB`、`R`、`G`、`B` 四个通道；`Reset` 重置当前曲线。在曲线编辑器单击空白处添加点，按住拖动控制点，右键删除点；端点不可删除。
 - `Reset All` 重置所有参数、RGB 数组、LUT 选择和曲线。
 - 点击 `Apply to Node` 把当前参数写回节点；点击 `Close` 关闭窗口并放弃未应用的修改。
+
 
 
 ### CS MOSS Audio Transcribe

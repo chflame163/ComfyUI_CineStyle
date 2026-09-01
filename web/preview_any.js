@@ -11,6 +11,7 @@ const LAYOUT_HOOK = Symbol("cinestyle-preview-any-layout-hook");
 const RESIZE_HOOK = Symbol("cinestyle-preview-any-resize-hook");
 const LAYOUT_FRAME = Symbol("cinestyle-preview-any-layout-frame");
 const TEXT_OUTER_SYNC = Symbol("cinestyle-preview-any-text-outer-sync");
+const OUTPUT_SIGNATURE = Symbol("cinestyle-preview-any-output-signature");
 const CANVAS_IMAGE_WIDGET = "$$canvas-image-preview";
 const TEXT_DEFAULT_HEIGHT = 150;
 const TEXT_MIN_HEIGHT = 90;
@@ -237,6 +238,11 @@ function drawWaveform(state) {
 }
 
 function addAudioViewport(node) {
+    // A serialized/stale widget can survive a graph reload. Keep this node's
+    // audio layout to one widget so hidden audio never accumulates rows.
+    for (const widget of [...(node.widgets || [])].filter((item) => item.name === "preview_audio")) {
+        removeLegacyWidget(node, widget.name, true);
+    }
     const container = document.createElement("div");
     container.className = "cs-preview-any-audio";
     container.hidden = true;
@@ -303,6 +309,37 @@ function latestPayload(output) {
     return payload && typeof payload === "object" ? payload : {};
 }
 
+function previewEntryKey(value) {
+    if (!value || typeof value !== "object") return String(value ?? "");
+    return [
+        value.filename,
+        value.subfolder,
+        value.type,
+        value.url,
+        value.video_url,
+        value.audio_url,
+    ].map((item) => String(item ?? "")).join("\u001f");
+}
+
+function samePreviewEntries(first, second) {
+    if (!Array.isArray(first) || !Array.isArray(second) || first.length !== second.length) return false;
+    return first.every((item, index) => previewEntryKey(item) === previewEntryKey(second[index]));
+}
+
+function outputSignature(output, payload) {
+    const text = output?.text;
+    const textKey = Array.isArray(text) ? text.map((item) => String(item ?? "")).join("\u001e") : String(text ?? "");
+    const images = Array.isArray(output?.images) ? output.images.map(previewEntryKey).join("\u001e") : "";
+    const audio = Array.isArray(output?.audio) ? output.audio.map(previewEntryKey).join("\u001e") : "";
+    let payloadKey;
+    try {
+        payloadKey = JSON.stringify(payload || {});
+    } catch {
+        payloadKey = String(payload?.kind || "none");
+    }
+    return [payloadKey, textKey, images, audio].join("\u001d");
+}
+
 function setNodeSize(node, width, height) {
     const currentWidth = Number(node.size?.[0]) || 420;
     const currentHeight = Number(node.size?.[1]) || 240;
@@ -318,17 +355,15 @@ function updateAutomaticSize(node, kind, force = false) {
     const computed = node.computeSize?.() || [420, 0];
     const mediaWidgetName = kind === "image" ? CANVAS_IMAGE_WIDGET : kind === "video" ? "video-preview" : null;
     const hasMediaWidget = mediaWidgetName && node.widgets?.some((widget) => widget.name === mediaWidgetName);
-    // Image and video widgets are created asynchronously by ComfyUI. Reserve
-    // their documented minimum until computeSize() can include the real widget.
-    const pendingMediaHeight = mediaWidgetName && !hasMediaWidget ? mediaMinimum + 4 : 0;
+    // Reserve space only for the first transition to a media type. Once the
+    // core preview widget exists, its own layout size is authoritative. This
+    // avoids adding a second padding estimate on every execution.
+    const pendingMediaHeight = force && mediaWidgetName && !hasMediaWidget ? mediaMinimum + 4 : 0;
     const targetWidth = Math.max(420, Number(node.size?.[0]) || 0, Number(computed[0]) || 0);
     const targetHeight = Math.max(240, (Number(computed[1]) || 0) + pendingMediaHeight);
     const currentHeight = Number(node.size?.[1]) || targetHeight;
-    const previous = node[AUTO_HEIGHT];
-    const manuallySized = previous != null && Math.abs(currentHeight - previous) >= 3;
-    const stillAutomatic = !manuallySized;
     const shouldResize = currentHeight < targetHeight ||
-        (stillAutomatic && (force || Math.abs(currentHeight - targetHeight) >= 3));
+        (force && Math.abs(currentHeight - targetHeight) >= 3);
     if (!shouldResize) return;
     if (setNodeSize(node, targetWidth, targetHeight)) {
         node[AUTO_HEIGHT] = targetHeight;
@@ -347,7 +382,7 @@ function hasLegacyPreview(node) {
 function clearImagePreview(node) {
     const legacyImages = Array.isArray(node.imgs) ? [...node.imgs] : [];
     for (const value of legacyImages) unloadLegacyMedia(value);
-    const removed = removeLegacyWidget(node, CANVAS_IMAGE_WIDGET);
+    const removed = removeLegacyWidget(node, CANVAS_IMAGE_WIDGET, true);
     const changed = Boolean(legacyImages.length || removed);
     node.imgs = [];
     node.imageIndex = 0;
@@ -357,7 +392,7 @@ function clearImagePreview(node) {
 function clearVideoPreview(node) {
     const hadVideo = Boolean(node.videoContainer || node.widgets?.some((widget) => widget.name === "video-preview"));
     unloadLegacyMedia(node.videoContainer);
-    removeLegacyWidget(node, "video-preview");
+    removeLegacyWidget(node, "video-preview", true);
     node.videoContainer = undefined;
     return hadVideo;
 }
@@ -444,16 +479,19 @@ function unloadLegacyMedia(value) {
     }
 }
 
-function removeLegacyWidget(node, widgetName) {
-    const widget = node.widgets?.find((item) => item.name === widgetName);
-    if (!widget) return false;
-    if (typeof node.removeWidget === "function") {
-        node.removeWidget(widget);
-        return true;
+function removeLegacyWidget(node, widgetName, all = false) {
+    const widgets = (node.widgets || []).filter((item) => item.name === widgetName);
+    if (!widgets.length) return false;
+    const targets = all ? widgets : widgets.slice(0, 1);
+    for (const widget of targets) {
+        if (typeof node.removeWidget === "function") {
+            node.removeWidget(widget);
+            continue;
+        }
+        const index = node.widgets.indexOf(widget);
+        if (index >= 0) node.widgets.splice(index, 1);
+        widget.onRemove?.();
     }
-    const index = node.widgets.indexOf(widget);
-    if (index >= 0) node.widgets.splice(index, 1);
-    widget.onRemove?.();
     return true;
 }
 
@@ -470,6 +508,17 @@ function updateNode(node, output, disposeLegacyMedia = true) {
     const payload = latestPayload(output);
     const kind = payload.kind || "none";
     const kindChanged = node[CURRENT_KIND] !== kind;
+    const signature = outputSignature(output, payload);
+    const duplicateOutput = !kindChanged && node[OUTPUT_SIGNATURE] === signature;
+    if (duplicateOutput) {
+        // onExecuted and onNodeOutputsUpdated can deliver the same UI payload.
+        // Keep the DOM content current, but do not run another size transition.
+        updateTextViewport(node, output);
+        updateAudioViewport(node, output, payload);
+        scheduleLayoutSync(node);
+        return;
+    }
+    node[OUTPUT_SIGNATURE] = signature;
     node[CURRENT_KIND] = kind;
     const textState = node[TEXT_WIDGET];
     if (kindChanged && textState && isTextOnlyKind(kind)) {
@@ -477,11 +526,14 @@ function updateNode(node, output, disposeLegacyMedia = true) {
         // media widget has been removed.
         textState.locked = false;
     }
-    if (disposeLegacyMedia) clearLegacyMedia(node);
+    // Removing a compatible preview before every output forces ComfyUI to
+    // recreate its media widget and re-run layout. Only clear on a type
+    // transition; stale incompatible media is handled by the draw hook.
+    if (disposeLegacyMedia && kindChanged) clearLegacyMedia(node);
     const images = kind === "image" || kind === "video"
         ? (Array.isArray(output.images) ? output.images : [])
         : [];
-    node.images = images.slice();
+    if (!samePreviewEntries(node.images, images)) node.images = images.slice();
     if (disposeLegacyMedia || (kind !== "image" && kind !== "video")) {
         node.imgs = [];
         node.imageIndex = 0;

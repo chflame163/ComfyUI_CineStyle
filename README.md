@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Compare Any](#cs-compare-any) 节点，对两个相同类型的输入进行媒体画面对比或文本差异比较。
 * 添加 [CS Preview Any](#cs-preview-any) 节点，自动识别并预览 ComfyUI 的常见图像、视频、音频和数据类型。
 * 添加 [CS Mask Grow](#cs-mask-grow) 节点，较官方Grow Mask节点运算速度大幅提升，并能更好的保持轮廓特征。
 * 添加 [CS Color Grade](#cs-color-grade) 节点，提供 HEX 白点、色温/色调、基础调色、RGB 通道控制、RGB多通道曲线和LUT加载，对视频进行专业级调色。
@@ -41,6 +42,45 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 
 ## 节点说明
+
+
+### CS Compare Any
+
+对 `source_a` 和 `source_b` 两个输入进行比较。两个输入必须是相同的 ComfyUI 类型；执行后在节点界面中显示比较结果。`view_port_layout` 用于选择 `horizontal` 或 `vertical` 布局。
+
+#### 使用流程
+
+1. 将两个相同类型的节点输出分别连接到 `source_a` 和 `source_b`。
+2. 选择 `view_port_layout`：`horizontal` 横向排列，`vertical` 纵向排列。
+3. 执行工作流，节点会根据输入类型自动选择 media 或 text 模式。
+
+#### 节点输入
+
+- `source_a`：任意类型输入。
+- `source_b`：第二个任意类型输入，必须与 `source_a` 类型相同。
+- `view_port_layout`：视口布局，可选 `horizontal` 或 `vertical`，默认 `horizontal`。
+
+#### Media 模式
+
+适用于 `VIDEO`、`IMAGE` 和 `MASK`。节点会根据两个输入的画幅比例设置视口；比例不一致时使用较宽的画幅比例，并在视口内部用黑色填充不足区域。
+
+![CS Compare Any media 模式](images/CS_Compare_Any_media_mode.jpg)
+
+- 一个视口单独显示 `source_a`，另一个视口显示 `source_b`，并叠加 `source_a` 作为对比层。
+- 拖动对比条可以查看 A/B 画面的差异；视频输入还支持同步播放、逐帧定位、时间线、音频选择、缩放和平移。
+- `horizontal` 时两个视口左右排列，`vertical` 时上下排列。
+
+#### Text 模式
+
+适用于 `STRING`、`BOOL`、`INT`、`FLOAT`、`LIST` 和 `DICT` 等文本/数据类型。节点在 A/B 对比视口中显示逐行和行内差异高亮。
+
+![CS Compare Any text 模式](images/CS_Compare_Any_text_mode.jpg)
+
+- `horizontal` 时 A、B 两个完整文本面板左右排列。
+- `vertical` 时 A 在上、B 在下。
+- 删除内容、插入内容和替换内容分别使用差异颜色标记；两个面板支持同步滚动。
+
+
 
 ### CS Preview Any
 

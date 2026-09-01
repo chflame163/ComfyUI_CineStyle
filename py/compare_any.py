@@ -112,6 +112,12 @@ def _safe_fps(value: Any) -> float:
     return result if math.isfinite(result) and result > 0 else 24.0
 
 
+def _normalise_view_port_layout(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else "horizontal"
+    return "vertical" if str(value or "").strip().lower() == "vertical" else "horizontal"
+
+
 def _safe_type_name(value: Any) -> str:
     value_type = type(value)
     module = str(getattr(value_type, "__module__", "") or "")
@@ -608,6 +614,12 @@ class CSCompareAny(io.ComfyNode):
             inputs=[
                 io.AnyType.Input("source_a", tooltip="First value to compare."),
                 io.AnyType.Input("source_b", tooltip="Second value to compare."),
+                io.Combo.Input(
+                    "view_port_layout",
+                    options=["horizontal", "vertical"],
+                    default="horizontal",
+                    tooltip="Arrange the source A and comparison viewports horizontally or vertically.",
+                ),
             ],
             hidden=[io.Hidden.unique_id, io.Hidden.prompt],
             outputs=[],
@@ -616,8 +628,9 @@ class CSCompareAny(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, source_a: Any, source_b: Any) -> io.NodeOutput:
+    def execute(cls, source_a: Any, source_b: Any, view_port_layout: Any = "horizontal") -> io.NodeOutput:
         node_id = str(getattr(getattr(cls, "hidden", None), "unique_id", "") or "compare")
+        layout = _normalise_view_port_layout(view_port_layout)
         declared_a = _upstream_output_is_list(cls, "source_a")
         declared_b = _upstream_output_is_list(cls, "source_b")
         value_a = _unwrap_input(source_a, declared_a)
@@ -625,7 +638,7 @@ class CSCompareAny(io.ComfyNode):
         kind_a = _classify(value_a)
         kind_b = _classify(value_b)
         payload: dict[str, Any]
-        _set_progress(node_id, 0, "Preparing comparison", {"type_a": kind_a, "type_b": kind_b})
+        _set_progress(node_id, 0, "Preparing comparison", {"type_a": kind_a, "type_b": kind_b, "view_port_layout": layout})
         try:
             if kind_a != kind_b or kind_a == "UNSUPPORTED":
                 detail = "source_a and source-b must be the same type"
@@ -636,11 +649,12 @@ class CSCompareAny(io.ComfyNode):
                     "mode": "error",
                     "type_a": kind_a,
                     "type_b": kind_b,
+                    "view_port_layout": layout,
                     "error": detail,
                 }
                 _set_progress(node_id, 100, "Comparison ready", {"mode": "error", "type_a": kind_a, "type_b": kind_b}, status="ready")
             elif kind_a in {"VIDEO", "IMAGE", "MASK"}:
-                _set_progress(node_id, 5, "Decoding source A", {"media_kind": kind_a})
+                _set_progress(node_id, 5, "Decoding source A", {"media_kind": kind_a, "view_port_layout": layout})
                 media_a = _media_value(value_a, kind_a)
                 _set_progress(node_id, 30, "Decoding source B", {"media_kind": kind_a, "source_a": _source_info(media_a)})
                 media_b = _media_value(value_b, kind_b)
@@ -675,6 +689,11 @@ class CSCompareAny(io.ComfyNode):
                     "version": 1,
                     "mode": "media",
                     "media_kind": kind_a,
+                    "view_port_layout": layout,
+                    "viewport_aspect": max(
+                        media_a.width / max(1, media_a.height),
+                        media_b.width / max(1, media_b.height),
+                    ),
                     "timeline": {"frames": total_frames, "fps": fps, "duration": total_frames / fps},
                     "sources": {
                         "a": {**info_a, "token": str(entry_a.get("token") or ""), "video_url": f"/cinestyle/compare-any-video?token={entry_a.get('token')}"},
@@ -692,6 +711,7 @@ class CSCompareAny(io.ComfyNode):
                     "diff_kind": kind_a,
                     "type_a": kind_a,
                     "type_b": kind_b,
+                    "view_port_layout": layout,
                     "a_text": text_a,
                     "b_text": text_b,
                     "rows": rows,
@@ -703,6 +723,7 @@ class CSCompareAny(io.ComfyNode):
                 "mode": "error",
                 "type_a": kind_a,
                 "type_b": kind_b,
+                "view_port_layout": layout,
                 "error": str(exc),
             }
             _set_progress(node_id, 100, str(exc), {"mode": "error", "type_a": kind_a, "type_b": kind_b, "error": str(exc)[:500]}, status="failed")

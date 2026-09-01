@@ -44,128 +44,68 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 节点说明
 
-### CS Color Match
 
-将源 `IMAGE` 帧批次的整体色调、色相和色度匹配到参考图，保留明暗关系、对比度和纹理细节。
+### CS VFX Beauty
+为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动使用 BiSeNet 估算目标肤色。
 
-![CS Color Match 节点](images/CS_Color_Match_node.jpg)
+#### 部署 BiSeNet 权重
+
+权重文件 `parsing_bisenet.pth`放置于：
+
+```text
+ComfyUI/models/facexlib/parsing_bisenet.pth
+```
+
+首次运行且本地不存在权重时，节点会自动从 FaceXLib 上游官方的 [GitHub Release 下载地址](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 或者 Hugging Face 上的 [parsing_bisenet.pth 镜像](https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth) 下载权重。
+也可以手动下载后放置到 `ComfyUI/models/facexlib/parsing_bisenet.pth`。
+
 
 #### 使用流程
 
-1. 将图片节点或 `CS Load Video` 的 `IMAGE` 输出连接到 `image`。
-2. 将色调参考图片连接到 `reference_image`。如果输入的是 batch ，只使用第一张图片。
-3. 选择颜色传递方法和颜色空间。默认组合为 `Optimal Transport` + `OKLab`，适合大部分视频色调匹配。
-4. 调整匹配强度、亮度/对比度/饱和度保护以及色相/色度强度，然后执行工作流。
+1. 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image` 节点；直连 `CS Load Video` 或 `Load Image` 时可直接回溯来源，其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存。
+2. 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
+3. 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
+4. 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 保存预览参数。
+5. 如果输入来自上游运行后才生成的图像或视频，首次打开 `VFX Preview` 前先设置`wait_for_input_cache` 为 `ture` 并运行一次工作流，建立 Preview cache。
 
-#### 节点输入
+#### 节点选项说明
+![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
+- image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。直连 `CS Load Video` 或 `Load Image` 时可直接回溯来源；其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存后使用。
+- mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域。
+- colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
+- weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时保存参数。
+- blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
+- sigma / Amount：边缘保持模糊强度，默认 `10.0`。
+- threshold / Preserve Edges：边缘保护阈值，默认 `15.0`。
+- r_spots_blend / Dark Spots：暗斑修复混合比例，默认 `0.8`。
+- r_h_blend / Highlights：高光修复混合比例，默认 `0.5`。
+- strength / Restore Detail：高频细节恢复强度，默认 `0.0`。
+- blur_h / Detail Soften：恢复细节的柔化半径，默认 `0.0`。
+- blur_s / Blur Shine：皮肤高光柔化半径，默认 `30.0`。
+- o_amount / Shine Amount：高光恢复量，默认 `0.2`。
+- sat_amount / Saturation：最终肤色饱和度缩放，范围 `0–300`，默认 `100.0`。
+- hue_amount / Hue Shift：最终肤色色相偏移，范围 `-360–360` 度，默认 `0.0`。
+- wait_for_input_cache：布尔开关，默认关闭。开启后执行节点时，将当前输入节点及其全部上游节点的链路指纹写入公共 Preview cache，然后中断本次 ComfyUI 执行。
 
-- image`：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, 3 or 4]`。输出为 RGB 三通道，源帧尺寸和帧顺序保持不变。
-- reference_image`：标准 ComfyUI `IMAGE`。只使用第一张参考图；参考图最长边超过 `2048` 时，仅在统计阶段缩小到最长边 `2048`，不会影响源帧输出分辨率。
-- Method`：颜色传递方法。
-  - Optimal Transport：使用正则化的高斯最优传输映射，默认方法。
-  - Reinhard：匹配颜色通道的均值和标准差，效果保守、速度快。
-  - LHM：使用颜色协方差进行线性匹配，适合整体色彩风格迁移。
-  - PCCM：使用主成分轴和方差匹配，色彩变化更明显。
-  - PDF：使用多次投影的分布匹配，适合复杂或多峰色板，但计算时间更长。
-- Color Space：颜色空间，可选 `Lab` 或 `OKLab`。通常推荐 `OKLab`，其亮度、色相和色度控制更适合保持原视频结构。
-- Match Strength：整体匹配强度，范围 `0–1`，默认 `0.75`。`0` 返回原图，`1` 完整应用匹配后的亮度、色相和色度目标。
-- Preserve Luminance：亮度保护，范围 `0–1`，默认 `1`。`1` 保留源图的感知亮度，适合不希望改变视频明暗关系的场景。
-- Preserve Contrast：对比度保护，范围 `0–1`，默认 `1`。用于恢复源图的亮度对比度分布；节点不会对帧进行空间模糊或重采样。
-- Preserve Saturation：饱和度/色度保护，范围 `0–1`，默认 `0`。`1` 保留源图的色度大小，但不阻止色相匹配。
-- Hue Strength：色相匹配强度，范围 `0–1`，默认 `1`。低色度区域会自动降低色相变化，减少中性区域的色偏噪声。
-- Chroma Strength：色度匹配强度，范围 `0–1`，默认 `1`。
+#### VFX Preview 界面
 
+![VFX Preview 界面](images/CS_VFX_Beauty_VFXPreview.jpg)
 
-#### 输出
+- **双视口**：左侧 `Original` 显示原始帧，右侧 `Result` 显示当前参数的处理结果。Result 中央的对比条默认在最左侧，因此打开窗口时完整显示 Result；左右拖动对比条可比较 Original 和 Result。
+- **缩放和平移**：点击 `50%`、`100%`、`200%` 或 `Fit` 调整显示比例，也可以在任一视口滚动鼠标滚轮缩放。缩放超过 Fit 后，在任一视口按住鼠标左键拖动，两个视口会同步平移。
+- **时间线**：拖动底部时间线快速定位帧，输入帧号可直接跳转，`|<` 和 `>|` 用于单帧步进。切换帧后只重新计算当前帧的预览结果。
+- **Colour**：输入 `auto` 使用自动肤色；预览首次计算出的颜色会显示在右侧色块和 Hex 数值中。点击色块可以打开标准 RGB 取色器，选择颜色后会切换为固定 `#RRGGBB`。
+- **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
+- **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
 
-- `IMAGE`：完成颜色匹配的 RGB 图像。
+#### 自动肤色估计
 
+当 `colour=auto` 时，节点将加载 BiSeNet并计算皮肤区域的目标颜色。在`colour`选项输入 Hex 颜色字符串`#RRGGBB`将跳过自动检测肤色流程。
 
+#### 输出说明
 
-
-### CS Compare Any
-
-对 `source_a` 和 `source_b` 两个输入进行比较。两个输入必须是相同的 ComfyUI 类型；执行后在节点界面中显示比较结果。`view_port_layout` 用于选择 `horizontal` 或 `vertical` 布局。
-
-#### 使用流程
-
-1. 将两个相同类型的节点输出分别连接到 `source_a` 和 `source_b`。
-2. 选择 `view_port_layout`：`horizontal` 横向排列，`vertical` 纵向排列。
-3. 执行工作流，节点会根据输入类型自动选择 media 或 text 模式。
-
-#### 节点输入
-
-- `source_a`：任意类型输入。
-- `source_b`：第二个任意类型输入，必须与 `source_a` 类型相同。
-- `view_port_layout`：视口布局，可选 `horizontal` 或 `vertical`，默认 `horizontal`。
-
-#### Media 模式
-
-适用于 `VIDEO`、`IMAGE` 和 `MASK`。节点会根据两个输入的画幅比例设置视口；比例不一致时使用较宽的画幅比例，并在视口内部用黑色填充不足区域。
-
-![CS Compare Any media 模式](images/CS_Compare_Any_media_mode.jpg)
-
-- 一个视口单独显示 `source_a`，另一个视口显示 `source_b`，并叠加 `source_a` 作为对比层。
-- 拖动对比条可以查看 A/B 画面的差异；视频输入还支持同步播放、逐帧定位、时间线、音频选择、缩放和平移。
-- `horizontal` 时两个视口左右排列，`vertical` 时上下排列。
-
-#### Text 模式
-
-适用于 `STRING`、`BOOL`、`INT`、`FLOAT`、`LIST` 和 `DICT` 等文本/数据类型。节点在 A/B 对比视口中显示逐行和行内差异高亮。
-
-![CS Compare Any text 模式](images/CS_Compare_Any_text_mode.jpg)
-
-- `horizontal` 时 A、B 两个完整文本面板左右排列。
-- `vertical` 时 A 在上、B 在下。
-- 删除内容、插入内容和替换内容分别使用差异颜色标记；两个面板支持同步滚动。
-
-
-
-### CS Preview Any
-
-自动识别输入数据类型并提供统一的多视口预览节点。节点包含画面视口和文本视口：画面视口用于显示图片、Mask、视频或音频波形，文本视口用于显示类型、尺寸、批次和调试信息。节点同时提供 `output` 输出，将接入 `source` 的原始值透传到下游节点。
-
-![CS Preview Any 节点](images/CS_Preview_Any.jpg)
-
-#### 使用流程
-
-1. 将任意 ComfyUI 节点的输出连接到 `source`。`source` 接受任意类型，不需要预先指定输入类型。
-2. 执行工作流，节点会根据实际输入自动选择预览方式。
-3. 将 `output` 连接到下游节点时，节点会返回与 `source` 相同的数据内容，不执行额外转换。
-
-
-#### 支持的类型
-
-- `VIDEO`：使用临时 Preview Cache 生成保持宽高比的预览视频，预览像素数上限为 1 Mpixels，预览帧率上限为 25 fps，并保留完整输入时长。注意预览视频的画面大小和质量经过处理，并非原始精度。保存原始精度的视频文件请使用 `CS Save Video` 节点。
-- `IMAGE`：按 ComfyUI 原生图片预览方式显示图片，可以在列表和单张显示之间切换。文本视口显示 Tensor 形状、图片尺寸、批次和通道模式。
-- `MASK`：按 ComfyUI 原生 mask 预览显示 Mask，并显示对应的形状、尺寸和批次信息。
-- `AUDIO`：画面视口显示音频波形；文本视口显示波形形状、采样率、声道、时长、峰值和 RMS 等信息。
-- `STRING`、`BOOL`、`INT`、`FLOAT`：在文本视口显示类型和值。
-- `LATENT`：在文本视口显示 latent 的形状、dtype、device、批次、通道、维度、统计值、keys、noise mask 和 batch index 等元数据。
-- `LIST`、`DICT`：在文本视口显示长度以及调试信息。数值 item 显示值，非数值对象只显示类型。
-
-其他无法预览的对象只显示数据类型；无法识别的数据会显示 `Unable to parse data type`。
-
-#### 输出
-
-- `output`：通配类型输出，返回接入 `source` 的原始值。
-
-
-### CS Mask Grow
-
-使用精确离散欧氏圆盘算法， 对`MASK` 进行精确欧氏距离的膨胀或收缩。较官方Grow Mask节点运算速度大幅提升，并避免了大 grow 值下产生菱形轮廓的曼哈顿距离问题，能更好的保持轮廓特征。
-
-![CS Mask Grow 节点](images/CS_Mask_Grow_node.jpg)
-
-#### 节点输入
-
-- `mask`：标准 ComfyUI `MASK`。
-- `grow`：以像素为单位；正值向外膨胀，负值向内收缩，`0` 不改变尺寸。
-- `Preserve Soft Edges`：默认关闭。关闭时先以灰度值 `128` 为阈值将输入二值化，输出仅包含 `0/1`；开启时保留输入 Mask 的灰度 alpha 过渡。
-
-#### 输出
-
-- `MASK`：与输入帧数和画面尺寸相同的标准 ComfyUI `MASK`。
+- `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
+- `MASK`：皮肤处理遮罩输出。
 
 
 
@@ -229,155 +169,42 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 - 点击 `Apply to Node` 把当前参数写回节点；点击 `Close` 关闭窗口并放弃未应用的修改。
 
 
+### CS Color Match
 
-### CS MOSS Audio Transcribe
+将源 `IMAGE` 帧批次的整体色调、色相和色度匹配到参考图，保留明暗关系、对比度和纹理细节。
 
-使用 [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。
-首次运行会自动下载模型。或者从[OpenMOSS-Team/MOSS-Transcribe-Diarize/](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/tree/main) 手动下载模型，然后放到`ComfyUI/models/moss`目录。
-
-![CS Transcribe-Subtitle 工作流](images/CS_Transcribe_Subtitle_workflow.jpg)
+![CS Color Match 节点](images/CS_Color_Match_node.jpg)
 
 #### 使用流程
 
-1. 将标准 ComfyUI `AUDIO` 输出连接到 `audio`。
-2. 选择语言模式和字幕分行长度。
-3. 执行节点，获得 SRT 文本，可直接连接到 `CS Video Subtitle` 的 `srt` 输入。
+1. 将图片节点或 `CS Load Video` 的 `IMAGE` 输出连接到 `image`。
+2. 将色调参考图片连接到 `reference_image`。如果输入的是 batch ，只使用第一张图片。
+3. 选择颜色传递方法和颜色空间。默认组合为 `Optimal Transport` + `OKLab`，适合大部分视频色调匹配。
+4. 调整匹配强度、亮度/对比度/饱和度保护以及色相/色度强度，然后执行工作流。
+
+#### 节点输入
+
+- image`：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, 3 or 4]`。输出为 RGB 三通道，源帧尺寸和帧顺序保持不变。
+- reference_image`：标准 ComfyUI `IMAGE`。只使用第一张参考图；参考图最长边超过 `2048` 时，仅在统计阶段缩小到最长边 `2048`，不会影响源帧输出分辨率。
+- Method`：颜色传递方法。
+  - Optimal Transport：使用正则化的高斯最优传输映射，默认方法。
+  - Reinhard：匹配颜色通道的均值和标准差，效果保守、速度快。
+  - LHM：使用颜色协方差进行线性匹配，适合整体色彩风格迁移。
+  - PCCM：使用主成分轴和方差匹配，色彩变化更明显。
+  - PDF：使用多次投影的分布匹配，适合复杂或多峰色板，但计算时间更长。
+- Color Space：颜色空间，可选 `Lab` 或 `OKLab`。通常推荐 `OKLab`，其亮度、色相和色度控制更适合保持原视频结构。
+- Match Strength：整体匹配强度，范围 `0–1`，默认 `0.75`。`0` 返回原图，`1` 完整应用匹配后的亮度、色相和色度目标。
+- Preserve Luminance：亮度保护，范围 `0–1`，默认 `1`。`1` 保留源图的感知亮度，适合不希望改变视频明暗关系的场景。
+- Preserve Contrast：对比度保护，范围 `0–1`，默认 `1`。用于恢复源图的亮度对比度分布；节点不会对帧进行空间模糊或重采样。
+- Preserve Saturation：饱和度/色度保护，范围 `0–1`，默认 `0`。`1` 保留源图的色度大小，但不阻止色相匹配。
+- Hue Strength：色相匹配强度，范围 `0–1`，默认 `1`。低色度区域会自动降低色相变化，减少中性区域的色偏噪声。
+- Chroma Strength：色度匹配强度，范围 `0–1`，默认 `1`。
 
 
-#### 节点选项说明
-![CS MOSS Audio Transcribe 节点](images/CS_MOSS_Audio_Transcribe_node.jpg)
-- `audio`：标准 ComfyUI `AUDIO` 输入，支持单声道或多声道音频。
-- `language`：语言模式，可选 `auto`、`中文` 或 `English`。
-- `max_chars_per_line`：每行最大字符数，`0` 表示不主动分行。
-- `auto_unload_model`：默认开启。执行完成后释放 MOSS 推理运行时和 CUDA 显存。
+#### 输出
 
-#### 输出说明
+- `IMAGE`：完成颜色匹配的 RGB 图像。
 
-- `srt`：标准 SRT 格式的 `STRING` 文本，包含序号、起止时间和字幕正文。
-
-
-### CS Video Subtitle
-
-将 SRT 字幕渲染到标准 ComfyUI `VIDEO`，并提供可交互的 Subtitle Timeline。字幕样式包括字体、字号、颜色、渐变、对齐、斜体、字距、位置、描边和阴影。
-节点从ComfyUI/models/fonts 目录扫描并加载字体。请提前将字体放置到此目录。
-
-#### 使用流程
-
-1. 将 CS Load Video 或其他兼容节点的 `VIDEO` 输出连接到 `video`。直连 `CS Load Video` 时可直接使用其预览缓存；其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存。
-2. 将 SRT 文本连接到 `srt`；如果不连接 `srt`，节点会自动使用 `edited_srt` 中保存的字幕。
-3. 点击 `Edit Timeline` 编辑字幕时间、样式和位置。
-4. 点击 `Apply` 保存字幕设置，再执行节点得到最终视频。
-5. 如果输入来自上游运行后才生成的图像或视频，首次打开 `Edit Timeline` 前先设置`wait_for_input_cache` 为 `ture` 并运行一次工作流，建立 Preview cache。
-
-#### 节点选项说明
-![CS Video Subtitle 节点](images/CS_Video_Subtitle_node.jpg)
-- video：兼容 ComfyUI `VIDEO` 类型的输入。直连 `CS Load Video` 时可直接回溯来源；其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存后使用。
-- srt：可选 `STRING`。只要该输入已连接，节点始终以 `srt` 为准。如果无法从上游节点回溯srt，则时间线为空。
-- edited_srt：经Timeline 编辑保存的 SRT 文本；可在 Timeline 中通过`Load Edited SRT`按钮加载到时间线，或在 `srt` 输入未连接时自动使用。
-- preview_in / `preview_out`：字幕 Timeline 的预览范围，分别表示起始帧和结束帧。
-- font：字幕字体。
-- font_size：字体大小，范围 `8–200`。
-- primary_color：字幕主色。
-- secondary_color：字幕渐变辅助色。
-- gradient：是否启用垂直渐变填充。
-- text_align：文本对齐方式，可选 `left`、`center`、`right`。
-- italic：是否使用斜体。
-- letter_spacing：字距，范围 `-10–50`。
-- position_x：字幕位置的X坐标，范围 `0–1`。
-- position_y：字幕位置的Y坐标，范围 `0–1`。
-- outline_size：描边大小。
-- outline_color：描边颜色。
-- shadow_size：阴影大小。
-- shadow_color：阴影颜色。
-- wait_for_input_cache`：布尔开关，默认关闭。开启后执行节点时，将当前输入节点及其全部上游节点的链路指纹写入公共 Preview cache，然后中断本次 ComfyUI 执行。
-
-
-#### 输出说明
-
-- `video`：渲染字幕后的标准 ComfyUI `VIDEO`，保留输入视频帧率、音频和时间范围。
-- `srt`：当前节点最终采用的 SRT 文本，可连接到其他字幕或文本节点。
-
-#### Edit Timeline 界面
-
-![Edit Timeline 界面](images/CS_Video_Subtitle_Timeline.jpg)
-
-Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑和位置调整区域组成。
-
-- 预览区域显示当前视频帧和字幕效果。可播放、暂停和拖动查看画面，预览中的字幕会随当前帧更新。
-- 时间线包含 `Subtitles` 和 `Audio` 两条轨道。字幕轨道显示每条字幕的时间范围，音频轨道显示声音波形；拖动当前帧指针或使用播放、前进、后退按钮可以定位画面。
-- `Load Edited SRT`：手动加载节点中保存的 `edited_srt`，用于在获得新的上游 SRT 后恢复之前的编辑结果；不会改变节点的 `srt` 输入优先级。
-- 使用 `Set In` 和 `Set Out` 设置字幕 Timeline 的预览起止帧。
-- 在字幕轨道中双击字幕片段，或使用右键菜单，可以编辑、复制、粘贴或删除字幕内容；字幕片段可在时间线上拖动调整时间范围。
-- `Text Style` 区域用于设置字体、字号、斜体、字距、主色、渐变色、描边和阴影。
-- `Position` 区域用于设置文字对齐方式以及规范化的 X/Y 位置。也可以直接在预览画面中拖动字幕，使用边角控制点调整文字区域大小。
-- 点击 `Apply` 将当前时间范围、字幕文本、样式和位置写回节点；点击 `Cancel` 放弃本次编辑。
-
-注意：如果想强制使用节点内已编辑的字幕时间线`edited_srt`，请断开`str`的输入，否则渲染时`edited_srt`不会生效，仍然使用`srt`输入的内容。
-
-
-
-
-### CS VFX Beauty
-为视频优化的皮肤磨皮美化处理节点。节点优先使用输入的 `MASK`；没有连接 `MASK` 时，自动使用 BiSeNet 估算目标肤色。
-
-#### 部署 BiSeNet 权重
-
-权重文件 `parsing_bisenet.pth`放置于：
-
-```text
-ComfyUI/models/facexlib/parsing_bisenet.pth
-```
-
-首次运行且本地不存在权重时，节点会自动从 FaceXLib 上游官方的 [GitHub Release 下载地址](https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth) 或者 Hugging Face 上的 [parsing_bisenet.pth 镜像](https://huggingface.co/jellyhe/parsing_bisenet.pth/resolve/main/parsing_bisenet.pth) 下载权重。
-也可以手动下载后放置到 `ComfyUI/models/facexlib/parsing_bisenet.pth`。
-
-
-#### 使用流程
-
-1. 将视频帧批次连接到 `image`。节点也支持接入官方或第三方 `Load Image` 节点；直连 `CS Load Video` 或 `Load Image` 时可直接回溯来源，其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存。
-2. 如果有现成的皮肤区域，将标准 ComfyUI `MASK` 连接到 `mask`；没有 `mask` 时，首次自动估色会使用 BiSeNet 临时生成皮肤区域。
-3. 保持 `colour=auto` 使用整段输入的自动肤色估计，或输入合法的 `#RRGGBB` 颜色跳过自动估色。
-4. 点击节点底部的 `VFX Preview`，在当前帧调整参数并实时预览；确认后点击 `Apply to Node` 保存预览参数。
-5. 如果输入来自上游运行后才生成的图像或视频，首次打开 `VFX Preview` 前先设置`wait_for_input_cache` 为 `ture` 并运行一次工作流，建立 Preview cache。
-
-#### 节点选项说明
-![CS VFX Beauty 节点](images/CS_VFX_Beauty_node.jpg)
-- image：标准 ComfyUI `IMAGE`，支持 `[batch, height, width, channels]` 的单张图片或视频帧批次。直连 `CS Load Video` 或 `Load Image` 时可直接回溯来源；其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存后使用。
-- mask：可选标准 ComfyUI `MASK`。连接后自动作为皮肤处理区域，也作为自动肤色估计区域。
-- colour：字符串，默认 `auto`。`auto` 使用自动估色；输入 `#RRGGBB` 时直接使用指定 RGB 颜色。
-- weights：HSV Key 权重字符串，默认 `6.0, 0.0, 3.0`。在 VFX Preview 中会拆分为 Hue、Saturation、Value 三个独立输入，Apply 时保存参数。
-- blur_m / Soften：皮肤 Matte 的柔化半径，默认 `10.0`。
-- sigma / Amount：边缘保持模糊强度，默认 `10.0`。
-- threshold / Preserve Edges：边缘保护阈值，默认 `15.0`。
-- r_spots_blend / Dark Spots：暗斑修复混合比例，默认 `0.8`。
-- r_h_blend / Highlights：高光修复混合比例，默认 `0.5`。
-- strength / Restore Detail：高频细节恢复强度，默认 `0.0`。
-- blur_h / Detail Soften：恢复细节的柔化半径，默认 `0.0`。
-- blur_s / Blur Shine：皮肤高光柔化半径，默认 `30.0`。
-- o_amount / Shine Amount：高光恢复量，默认 `0.2`。
-- sat_amount / Saturation：最终肤色饱和度缩放，范围 `0–300`，默认 `100.0`。
-- hue_amount / Hue Shift：最终肤色色相偏移，范围 `-360–360` 度，默认 `0.0`。
-- wait_for_input_cache：布尔开关，默认关闭。开启后执行节点时，将当前输入节点及其全部上游节点的链路指纹写入公共 Preview cache，然后中断本次 ComfyUI 执行。
-
-#### VFX Preview 界面
-
-![VFX Preview 界面](images/CS_VFX_Beauty_VFXPreview.jpg)
-
-- **双视口**：左侧 `Original` 显示原始帧，右侧 `Result` 显示当前参数的处理结果。Result 中央的对比条默认在最左侧，因此打开窗口时完整显示 Result；左右拖动对比条可比较 Original 和 Result。
-- **缩放和平移**：点击 `50%`、`100%`、`200%` 或 `Fit` 调整显示比例，也可以在任一视口滚动鼠标滚轮缩放。缩放超过 Fit 后，在任一视口按住鼠标左键拖动，两个视口会同步平移。
-- **时间线**：拖动底部时间线快速定位帧，输入帧号可直接跳转，`|<` 和 `>|` 用于单帧步进。切换帧后只重新计算当前帧的预览结果。
-- **Colour**：输入 `auto` 使用自动肤色；预览首次计算出的颜色会显示在右侧色块和 Hex 数值中。点击色块可以打开标准 RGB 取色器，选择颜色后会切换为固定 `#RRGGBB`。
-- **Weights**：Hue、Saturation、Value 分成三个数值栏，分别控制 HSV 色键对色相、饱和度和明度的敏感度。
-- **参数滑块**：每个滑块下方显示简短说明和默认值，右侧复位按钮可以单独恢复初始值。调整滑块后，Result 会实时重新处理当前帧。
-
-#### 自动肤色估计
-
-当 `colour=auto` 时，节点将加载 BiSeNet并计算皮肤区域的目标颜色。在`colour`选项输入 Hex 颜色字符串`#RRGGBB`将跳过自动检测肤色流程。
-
-#### 输出说明
-
-- `IMAGE`：RGB 处理结果，不包含 Alpha，可直接连接下游图像或视频节点。
-- `MASK`：皮肤处理遮罩输出。
 
 
 ### CS SeC-4B Model Loader
@@ -524,6 +351,183 @@ SAM3.1 和 SeC-4B 共用同一个 Selector 框架。两者都支持多对象；S
 - `Preview Current Frame` 只运行当前锚点帧的模型分割，结果用于检查提示是否合理，不会替代最终整段视频执行。
 - `Cancel` 关闭窗口并放弃本次未应用的修改。
 - `Apply to Node` 将提示数据和锚点帧写入节点。
+
+
+
+### CS MOSS Audio Transcribe
+
+使用 [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。
+首次运行会自动下载模型。或者从[OpenMOSS-Team/MOSS-Transcribe-Diarize/](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize/tree/main) 手动下载模型，然后放到`ComfyUI/models/moss`目录。
+
+![CS Transcribe-Subtitle 工作流](images/CS_Transcribe_Subtitle_workflow.jpg)
+
+#### 使用流程
+
+1. 将标准 ComfyUI `AUDIO` 输出连接到 `audio`。
+2. 选择语言模式和字幕分行长度。
+3. 执行节点，获得 SRT 文本，可直接连接到 `CS Video Subtitle` 的 `srt` 输入。
+
+
+#### 节点选项说明
+![CS MOSS Audio Transcribe 节点](images/CS_MOSS_Audio_Transcribe_node.jpg)
+- `audio`：标准 ComfyUI `AUDIO` 输入，支持单声道或多声道音频。
+- `language`：语言模式，可选 `auto`、`中文` 或 `English`。
+- `max_chars_per_line`：每行最大字符数，`0` 表示不主动分行。
+- `auto_unload_model`：默认开启。执行完成后释放 MOSS 推理运行时和 CUDA 显存。
+
+#### 输出说明
+
+- `srt`：标准 SRT 格式的 `STRING` 文本，包含序号、起止时间和字幕正文。
+
+
+### CS Video Subtitle
+
+将 SRT 字幕渲染到标准 ComfyUI `VIDEO`，并提供可交互的 Subtitle Timeline。字幕样式包括字体、字号、颜色、渐变、对齐、斜体、字距、位置、描边和阴影。
+节点从ComfyUI/models/fonts 目录扫描并加载字体。请提前将字体放置到此目录。
+
+#### 使用流程
+
+1. 将 CS Load Video 或其他兼容节点的 `VIDEO` 输出连接到 `video`。直连 `CS Load Video` 时可直接使用其预览缓存；其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存。
+2. 将 SRT 文本连接到 `srt`；如果不连接 `srt`，节点会自动使用 `edited_srt` 中保存的字幕。
+3. 点击 `Edit Timeline` 编辑字幕时间、样式和位置。
+4. 点击 `Apply` 保存字幕设置，再执行节点得到最终视频。
+5. 如果输入来自上游运行后才生成的图像或视频，首次打开 `Edit Timeline` 前先设置`wait_for_input_cache` 为 `ture` 并运行一次工作流，建立 Preview cache。
+
+#### 节点选项说明
+![CS Video Subtitle 节点](images/CS_Video_Subtitle_node.jpg)
+- video：兼容 ComfyUI `VIDEO` 类型的输入。直连 `CS Load Video` 时可直接回溯来源；其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存后使用。
+- srt：可选 `STRING`。只要该输入已连接，节点始终以 `srt` 为准。如果无法从上游节点回溯srt，则时间线为空。
+- edited_srt：经Timeline 编辑保存的 SRT 文本；可在 Timeline 中通过`Load Edited SRT`按钮加载到时间线，或在 `srt` 输入未连接时自动使用。
+- preview_in / `preview_out`：字幕 Timeline 的预览范围，分别表示起始帧和结束帧。
+- font：字幕字体。
+- font_size：字体大小，范围 `8–200`。
+- primary_color：字幕主色。
+- secondary_color：字幕渐变辅助色。
+- gradient：是否启用垂直渐变填充。
+- text_align：文本对齐方式，可选 `left`、`center`、`right`。
+- italic：是否使用斜体。
+- letter_spacing：字距，范围 `-10–50`。
+- position_x：字幕位置的X坐标，范围 `0–1`。
+- position_y：字幕位置的Y坐标，范围 `0–1`。
+- outline_size：描边大小。
+- outline_color：描边颜色。
+- shadow_size：阴影大小。
+- shadow_color：阴影颜色。
+- wait_for_input_cache`：布尔开关，默认关闭。开启后执行节点时，将当前输入节点及其全部上游节点的链路指纹写入公共 Preview cache，然后中断本次 ComfyUI 执行。
+
+
+#### 输出说明
+
+- `video`：渲染字幕后的标准 ComfyUI `VIDEO`，保留输入视频帧率、音频和时间范围。
+- `srt`：当前节点最终采用的 SRT 文本，可连接到其他字幕或文本节点。
+
+#### Edit Timeline 界面
+
+![Edit Timeline 界面](images/CS_Video_Subtitle_Timeline.jpg)
+
+Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑和位置调整区域组成。
+
+- 预览区域显示当前视频帧和字幕效果。可播放、暂停和拖动查看画面，预览中的字幕会随当前帧更新。
+- 时间线包含 `Subtitles` 和 `Audio` 两条轨道。字幕轨道显示每条字幕的时间范围，音频轨道显示声音波形；拖动当前帧指针或使用播放、前进、后退按钮可以定位画面。
+- `Load Edited SRT`：手动加载节点中保存的 `edited_srt`，用于在获得新的上游 SRT 后恢复之前的编辑结果；不会改变节点的 `srt` 输入优先级。
+- 使用 `Set In` 和 `Set Out` 设置字幕 Timeline 的预览起止帧。
+- 在字幕轨道中双击字幕片段，或使用右键菜单，可以编辑、复制、粘贴或删除字幕内容；字幕片段可在时间线上拖动调整时间范围。
+- `Text Style` 区域用于设置字体、字号、斜体、字距、主色、渐变色、描边和阴影。
+- `Position` 区域用于设置文字对齐方式以及规范化的 X/Y 位置。也可以直接在预览画面中拖动字幕，使用边角控制点调整文字区域大小。
+- 点击 `Apply` 将当前时间范围、字幕文本、样式和位置写回节点；点击 `Cancel` 放弃本次编辑。
+
+注意：如果想强制使用节点内已编辑的字幕时间线`edited_srt`，请断开`str`的输入，否则渲染时`edited_srt`不会生效，仍然使用`srt`输入的内容。
+
+
+
+
+
+### CS Compare Any
+
+对 `source_a` 和 `source_b` 两个输入进行比较。两个输入必须是相同的 ComfyUI 类型；执行后在节点界面中显示比较结果。`view_port_layout` 用于选择 `horizontal` 或 `vertical` 布局。
+
+#### 使用流程
+
+1. 将两个相同类型的节点输出分别连接到 `source_a` 和 `source_b`。
+2. 选择 `view_port_layout`：`horizontal` 横向排列，`vertical` 纵向排列。
+3. 执行工作流，节点会根据输入类型自动选择 media 或 text 模式。
+
+#### 节点输入
+
+- `source_a`：任意类型输入。
+- `source_b`：第二个任意类型输入，必须与 `source_a` 类型相同。
+- `view_port_layout`：视口布局，可选 `horizontal` 或 `vertical`，默认 `horizontal`。
+
+#### Media 模式
+
+适用于 `VIDEO`、`IMAGE` 和 `MASK`。节点会根据两个输入的画幅比例设置视口；比例不一致时使用较宽的画幅比例，并在视口内部用黑色填充不足区域。
+
+![CS Compare Any media 模式](images/CS_Compare_Any_media_mode.jpg)
+
+- 一个视口单独显示 `source_a`，另一个视口显示 `source_b`，并叠加 `source_a` 作为对比层。
+- 拖动对比条可以查看 A/B 画面的差异；视频输入还支持同步播放、逐帧定位、时间线、音频选择、缩放和平移。
+- `horizontal` 时两个视口左右排列，`vertical` 时上下排列。
+
+#### Text 模式
+
+适用于 `STRING`、`BOOL`、`INT`、`FLOAT`、`LIST` 和 `DICT` 等文本/数据类型。节点在 A/B 对比视口中显示逐行和行内差异高亮。
+
+![CS Compare Any text 模式](images/CS_Compare_Any_text_mode.jpg)
+
+- `horizontal` 时 A、B 两个完整文本面板左右排列。
+- `vertical` 时 A 在上、B 在下。
+- 删除内容、插入内容和替换内容分别使用差异颜色标记；两个面板支持同步滚动。
+
+
+
+### CS Preview Any
+
+自动识别输入数据类型并提供统一的多视口预览节点。节点包含画面视口和文本视口：画面视口用于显示图片、Mask、视频或音频波形，文本视口用于显示类型、尺寸、批次和调试信息。节点同时提供 `output` 输出，将接入 `source` 的原始值透传到下游节点。
+
+![CS Preview Any 节点](images/CS_Preview_Any.jpg)
+
+#### 使用流程
+
+1. 将任意 ComfyUI 节点的输出连接到 `source`。`source` 接受任意类型，不需要预先指定输入类型。
+2. 执行工作流，节点会根据实际输入自动选择预览方式。
+3. 将 `output` 连接到下游节点时，节点会返回与 `source` 相同的数据内容，不执行额外转换。
+
+
+#### 支持的类型
+
+- `VIDEO`：使用临时 Preview Cache 生成保持宽高比的预览视频，预览像素数上限为 1 Mpixels，预览帧率上限为 25 fps，并保留完整输入时长。注意预览视频的画面大小和质量经过处理，并非原始精度。保存原始精度的视频文件请使用 `CS Save Video` 节点。
+- `IMAGE`：按 ComfyUI 原生图片预览方式显示图片，可以在列表和单张显示之间切换。文本视口显示 Tensor 形状、图片尺寸、批次和通道模式。
+- `MASK`：按 ComfyUI 原生 mask 预览显示 Mask，并显示对应的形状、尺寸和批次信息。
+- `AUDIO`：画面视口显示音频波形；文本视口显示波形形状、采样率、声道、时长、峰值和 RMS 等信息。
+- `STRING`、`BOOL`、`INT`、`FLOAT`：在文本视口显示类型和值。
+- `LATENT`：在文本视口显示 latent 的形状、dtype、device、批次、通道、维度、统计值、keys、noise mask 和 batch index 等元数据。
+- `LIST`、`DICT`：在文本视口显示长度以及调试信息。数值 item 显示值，非数值对象只显示类型。
+
+其他无法预览的对象只显示数据类型；无法识别的数据会显示 `Unable to parse data type`。
+
+#### 输出
+
+- `output`：通配类型输出，返回接入 `source` 的原始值。
+
+
+### CS Mask Grow
+
+使用精确离散欧氏圆盘算法， 对`MASK` 进行精确欧氏距离的膨胀或收缩。较官方Grow Mask节点运算速度大幅提升，并避免了大 grow 值下产生菱形轮廓的曼哈顿距离问题，能更好的保持轮廓特征。
+
+![CS Mask Grow 节点](images/CS_Mask_Grow_node.jpg)
+
+#### 节点输入
+
+- `mask`：标准 ComfyUI `MASK`。
+- `grow`：以像素为单位；正值向外膨胀，负值向内收缩，`0` 不改变尺寸。
+- `Preserve Soft Edges`：默认关闭。关闭时先以灰度值 `128` 为阈值将输入二值化，输出仅包含 `0/1`；开启时保留输入 Mask 的灰度 alpha 过渡。
+
+#### 输出
+
+- `MASK`：与输入帧数和画面尺寸相同的标准 ComfyUI `MASK`。
+
+
+
 
 ### CS Load Video
 把视频文件加载到 ComfyUI，并提供一个可交互的时间线编辑窗口。节点执行时会读取视频帧、音频和帧率，根据工作流中保存的设置截取和调整内容，然后输出给下游节点。

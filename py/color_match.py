@@ -8,14 +8,24 @@ and the fitted transform is then applied in GPU-sized chunks.
 
 from __future__ import annotations
 
+import base64
+import io as py_io
+import json
 import logging
 import math
+import sys
 import time
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import av
+import numpy as np
 import torch
 import torch.nn.functional as F
+from aiohttp import web
+from PIL import Image
 from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, io
@@ -28,6 +38,8 @@ except ImportError:  # pragma: no cover - ComfyUI normally provides tqdm
 
 _LOGGER = logging.getLogger("CineStyleColorMatch")
 _CATEGORY = "😺dzNodes/CineStyle"
+_PREVIEW_CACHE_STORE = None
+_ROUTES_REGISTERED = False
 _ANSI_GREEN = "\033[32m"
 _ANSI_RESET = "\033[0m"
 _EPS = 1.0e-6
@@ -163,6 +175,285 @@ def _preferred_device(fallback: torch.device) -> torch.device:
         return fallback
 
 
+def _preview_cache_store():
+    global _PREVIEW_CACHE_STORE
+    if _PREVIEW_CACHE_STORE is None:
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        if module is None:
+            raise RuntimeError("CineStyle preview cache module is unavailable.")
+        _PREVIEW_CACHE_STORE = module.PreviewCacheStore("color_match")
+    return _PREVIEW_CACHE_STORE
+
+
+def _loader_preview_cache():
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_loader_preview_cache")
+    return module.get_loader_preview_cache() if module is not None else None
+
+
+def _input_chain(prompt: Any, node_id: Any, input_name: str) -> dict[str, Any] | None:
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    return module.build_input_chain(prompt, node_id, (input_name,)) if module is not None else None
+
+
+def _cache_wait_input(
+    node_id: Any,
+    prompt: Any,
+    input_name: str,
+    image: torch.Tensor,
+    fps: float,
+) -> dict[str, Any] | None:
+    package = __name__.rsplit(".", 1)[0]
+    module = sys.modules.get(f"{package}._py_preview_cache")
+    chain = _input_chain(prompt, node_id, input_name)
+    if module is None or chain is None:
+        return None
+    try:
+        return module.get_wait_input_cache_store().put_chain(
+            chain,
+            image[..., :3],
+            fps,
+            info={
+                "producer_node_id": str(node_id or ""),
+                "producer_node_type": "CS_Color_Match",
+                "producer_input_name": input_name,
+            },
+            force=True,
+        )
+    except Exception as exc:
+        _LOGGER.warning("[CS Color Match] wait input cache failed for %s: %s", input_name, exc)
+        return None
+
+
+def _loader_id_from_prompt(prompt: Any, node_id: Any, input_name: str = "image") -> str:
+    """Find a CS Load Video upstream from one selected node input."""
+    if not isinstance(prompt, dict):
+        return ""
+    node = prompt.get(str(node_id)) or prompt.get(node_id)
+    if not isinstance(node, dict):
+        return ""
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    pending = [inputs.get(input_name)]
+    visited: set[str] = set()
+    while pending:
+        link = pending.pop(0)
+        if not isinstance(link, (list, tuple)) or len(link) < 2:
+            continue
+        upstream_id = str(link[0])
+        if upstream_id in visited:
+            continue
+        visited.add(upstream_id)
+        upstream = prompt.get(upstream_id) or prompt.get(link[0])
+        if not isinstance(upstream, dict):
+            continue
+        class_type = str(upstream.get("class_type") or "")
+        if class_type == "CS_Load_Video" or class_type.endswith("::CS_Load_Video"):
+            return upstream_id
+        upstream_inputs = upstream.get("inputs") if isinstance(upstream.get("inputs"), dict) else {}
+        pending.extend(
+            value
+            for value in upstream_inputs.values()
+            if isinstance(value, (list, tuple)) and len(value) >= 2
+        )
+    return ""
+
+
+def _source_fps_from_prompt(prompt: Any, node_id: Any, input_name: str = "image") -> float:
+    if not isinstance(prompt, dict):
+        return 24.0
+    node = prompt.get(str(node_id)) or prompt.get(node_id)
+    inputs = node.get("inputs") if isinstance(node, dict) and isinstance(node.get("inputs"), dict) else {}
+    pending = [inputs.get(input_name)]
+    visited: set[str] = set()
+    while pending:
+        link = pending.pop(0)
+        if not isinstance(link, (list, tuple)) or len(link) < 2:
+            continue
+        upstream_id = str(link[0])
+        if upstream_id in visited:
+            continue
+        visited.add(upstream_id)
+        current = prompt.get(upstream_id) or prompt.get(link[0])
+        if not isinstance(current, dict):
+            continue
+        current_inputs = current.get("inputs") if isinstance(current.get("inputs"), dict) else {}
+        for name in ("fps", "frame_rate", "target_fps"):
+            try:
+                candidate = float(current_inputs.get(name))
+                if math.isfinite(candidate) and candidate > 0:
+                    return candidate
+            except (TypeError, ValueError, OverflowError):
+                pass
+        pending.extend(
+            value
+            for value in current_inputs.values()
+            if isinstance(value, (list, tuple)) and len(value) >= 2
+        )
+    return 24.0
+
+
+def _cache_preview_inputs(
+    node_id: Any,
+    prompt: Any,
+    image: torch.Tensor,
+    reference_image: torch.Tensor,
+) -> None:
+    key = str(node_id or "").strip()
+    if not key:
+        return
+    source_loader = _loader_id_from_prompt(prompt, node_id, "image")
+    source_fps = _source_fps_from_prompt(prompt, node_id, "image")
+    try:
+        _preview_cache_store().put_preview(
+            key,
+            image[..., :3],
+            source_fps,
+            encode_video=not source_loader,
+            info={"input_name": "image"},
+        )
+    except Exception as exc:
+        _LOGGER.warning("[CS Color Match] source preview cache failed: %s", exc)
+    try:
+        reference = _first_image(reference_image, "reference_image")
+        _preview_cache_store().put_preview(
+            f"{key}:reference",
+            reference[..., :3],
+            1.0,
+            encode_video=True,
+            info={"input_name": "reference_image"},
+        )
+    except Exception as exc:
+        _LOGGER.warning("[CS Color Match] reference preview cache failed: %s", exc)
+
+
+def _preview_entry_response(entry: dict[str, Any] | None, label: str) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    info = dict(entry.get("info") or {})
+    token = str(entry.get("token") or "")
+    return {
+        "token": token,
+        "label": label,
+        "kind": "video" if int(info.get("frames") or 1) > 1 else "image",
+        "video_url": f"/cinestyle/color-match-cache-video?token={token}" if token else "",
+        "info": info,
+    }
+
+
+async def _cache_info_route(request: web.Request) -> web.Response:
+    node_id = str(request.query.get("node_id") or "").strip()
+    if not node_id:
+        return web.json_response({"error": "node_id is required."}, status=400)
+    source_entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
+    reference_entry = _preview_cache_store().get_preview_variant(f"{node_id}:reference", proxy=False)
+    if source_entry is None and reference_entry is None:
+        return web.json_response(
+            {"error": "Run CS Color Match once to cache its connected inputs."},
+            status=404,
+        )
+    return web.json_response(
+        {
+            "source": _preview_entry_response(source_entry, "Cached CS Color Match source input"),
+            "reference": _preview_entry_response(reference_entry, "Cached CS Color Match reference image"),
+        }
+    )
+
+
+async def _cache_video_route(request: web.Request) -> web.StreamResponse:
+    entry = _entry_for_preview_token(request.query.get("token", ""))
+    path = Path(str((entry or {}).get("video_path") or (entry or {}).get("path") or "")) if entry else None
+    if entry is None or path is None or not path.is_file():
+        return web.json_response({"error": "CS Color Match preview cache not found."}, status=404)
+    return web.FileResponse(path=path, headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"})
+
+
+def _preview_source_samples(token: str, max_pixels: int) -> torch.Tensor:
+    return _sample_preview_token(str(token or ""), max_pixels)
+
+
+def _preview_samples_or_frame(token: str, frame: torch.Tensor, max_pixels: int) -> torch.Tensor:
+    if str(token or "").strip():
+        return _preview_source_samples(token, max_pixels)
+    return _sample_pixels(frame, max_pixels).to(device="cpu", dtype=torch.float32)
+
+
+def _encode_preview_png(image: torch.Tensor) -> str:
+    frame = image[0] if image.ndim == 4 else image
+    array = (
+        frame[..., :3]
+        .detach()
+        .to(device="cpu", dtype=torch.float32)
+        .clamp(0.0, 1.0)
+        .mul(255.0)
+        .round()
+        .to(torch.uint8)
+        .numpy()
+    )
+    buffer = py_io.BytesIO()
+    Image.fromarray(array, mode="RGB").save(buffer, format="PNG", optimize=False)
+    return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+
+
+async def _preview_route(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Preview payload must be an object.")
+        node_id = str(payload.get("node_id") or "").strip()
+        if not node_id:
+            raise ValueError("node_id is required.")
+        method = str(payload.get("method") or "Optimal Transport")
+        color_space = str(payload.get("color_space") or "OKLab")
+        if method not in _METHODS:
+            raise ValueError(f"method must be one of: {', '.join(_METHODS)}")
+        if color_space not in _COLOR_SPACES:
+            raise ValueError(f"color_space must be one of: {', '.join(_COLOR_SPACES)}")
+        frame_index = max(0, int(payload.get("frame", 0)))
+        source_frame = _decode_preview_input(payload, "source", frame_index)
+        reference_frame = _decode_preview_input(payload, "reference", 0)
+        source_info = payload.get("source_info") if isinstance(payload.get("source_info"), dict) else {}
+        source_count = max(1, int(source_info.get("frames") or 1))
+        sample_limit = _PDF_SAMPLE_PIXELS if method == "PDF" else _STAT_SAMPLE_PIXELS
+        source_token = str(payload.get("source_token") or "")
+        source_sample = _preview_samples_or_frame(source_token, source_frame, sample_limit)
+        reference_stats = _resize_reference_for_stats(reference_frame)
+        reference_sample = _sample_pixels(reference_stats, sample_limit).to(device="cpu", dtype=torch.float32)
+        source_device = source_frame.device
+        source_space = _to_space(source_sample.to(source_device), color_space).reshape(-1, 3)
+        reference_space = _to_space(reference_sample.to(source_device), color_space).reshape(-1, 3)
+        model = _fit_model(source_space, reference_space, method)
+        source_space_frame = _to_space(source_frame, color_space)
+        mapped_space = _apply_model(source_space_frame, model)
+        controls = {
+            "match_strength": _parameter(payload.get("match_strength", 0.75), "match_strength"),
+            "preserve_luminance": _parameter(payload.get("preserve_luminance", 1.0), "preserve_luminance"),
+            "preserve_contrast": _parameter(payload.get("preserve_contrast", 1.0), "preserve_contrast"),
+            "preserve_saturation": _parameter(payload.get("preserve_saturation", 0.0), "preserve_saturation"),
+            "hue_strength": _parameter(payload.get("hue_strength", 1.0), "hue_strength"),
+            "chroma_strength": _parameter(payload.get("chroma_strength", 1.0), "chroma_strength"),
+        }
+        result_space = _apply_controls(
+            source_space_frame,
+            mapped_space,
+            model,
+            2.0 if color_space == "Lab" else 0.02,
+            **controls,
+        )
+        result = _gamut_map(result_space, color_space)
+        return web.json_response(
+            {
+                "frame": int(payload.get("local_frame", frame_index)),
+                "original": _encode_preview_png(source_frame),
+                "preview": _encode_preview_png(result),
+                "frames": source_count,
+            }
+        )
+    except (OSError, ValueError, TypeError, KeyError, IndexError, RuntimeError, json.JSONDecodeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
 def _batch_size(image: torch.Tensor, device: torch.device, method: str) -> int:
     total = int(image.shape[0])
     if total <= 1:
@@ -275,6 +566,89 @@ def _sample_pixels(image: torch.Tensor, max_pixels: int) -> torch.Tensor:
         indices = torch.linspace(0, points.shape[0] - 1, max_pixels, device=points.device).round().long()
         points = points.index_select(0, indices)
     return points.contiguous()
+
+
+def _entry_for_preview_token(token: str) -> dict[str, Any] | None:
+    value = str(token or "").strip()
+    if value.startswith("loader_preview:"):
+        cache = _loader_preview_cache()
+        return cache.entry_for_token(value) if cache is not None else None
+    if value.startswith("wait_input:"):
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        return module.get_wait_input_cache_store().get_token(value) if module is not None else None
+    return _preview_cache_store().get_token(value)
+
+
+def _sample_arrays_for_stats(arrays: list[np.ndarray], max_pixels: int) -> torch.Tensor:
+    if not arrays:
+        raise ValueError("Preview source contains no usable frames for color statistics.")
+    frame_count = len(arrays)
+    height, width = map(int, arrays[0].shape[:2])
+    stride = max(1, int(math.ceil(math.sqrt((frame_count * height * width) / max_pixels))))
+    sampled = [np.asarray(array)[::stride, ::stride, :3].reshape(-1, 3) for array in arrays]
+    points = np.concatenate(sampled, axis=0)
+    if points.shape[0] > max_pixels:
+        indices = np.linspace(0, points.shape[0] - 1, max_pixels).round().astype(np.int64)
+        points = points[indices]
+    tensor = torch.from_numpy(np.ascontiguousarray(points))
+    if tensor.dtype == torch.uint8:
+        return tensor.to(torch.float32).div_(255.0)
+    return tensor.to(torch.float32).clamp_(0.0, 1.0)
+
+
+@lru_cache(maxsize=32)
+def _sample_preview_token(token: str, max_pixels: int) -> torch.Tensor:
+    entry = _entry_for_preview_token(token)
+    if entry is None:
+        raise ValueError("Preview cache token is unavailable.")
+    frames_path = Path(str(entry.get("frames_path") or ""))
+    if frames_path.is_file():
+        frames = np.load(str(frames_path), mmap_mode="r", allow_pickle=False)
+        count = int(frames.shape[0])
+        indices = np.linspace(0, count - 1, min(count, 24)).round().astype(np.int64)
+        return _sample_arrays_for_stats([frames[int(index)] for index in indices], max_pixels)
+
+    video_path = Path(str(entry.get("video_path") or entry.get("path") or ""))
+    if not video_path.is_file():
+        raise ValueError("Cached preview media is unavailable.")
+    info = dict(entry.get("info") or {})
+    frame_count = max(1, int(info.get("frames") or info.get("loaded_frame_count") or 1))
+    wanted = set(int(value) for value in np.linspace(0, frame_count - 1, min(frame_count, 24)).round())
+    arrays: list[np.ndarray] = []
+    with av.open(str(video_path), mode="r") as container:
+        if not container.streams.video:
+            raise ValueError("Cached preview contains no video stream.")
+        for index, decoded in enumerate(container.decode(container.streams.video[0])):
+            if index in wanted:
+                arrays.append(decoded.to_ndarray(format="rgb24"))
+            if index >= max(wanted):
+                break
+    return _sample_arrays_for_stats(arrays, max_pixels)
+
+
+def _decode_preview_input(payload: dict[str, Any], prefix: str, frame_index: int) -> torch.Tensor:
+    token = str(payload.get(f"{prefix}_token") or "").strip()
+    if token.startswith("loader_preview:"):
+        cache = _loader_preview_cache()
+        if cache is None:
+            raise ValueError("The shared loader preview cache is unavailable.")
+        return cache.decode_frame(token, frame_index)
+    if token.startswith("wait_input:"):
+        package = __name__.rsplit(".", 1)[0]
+        module = sys.modules.get(f"{package}._py_preview_cache")
+        if module is None:
+            raise ValueError("The shared wait input preview cache is unavailable.")
+        return module.get_wait_input_cache_store().decode_frame({"source_token": token}, frame_index)
+    if token:
+        return _preview_cache_store().decode_frame({"source_token": token}, frame_index)
+    return _preview_cache_store().decode_frame(
+        {
+            "video": str(payload.get(f"{prefix}_file") or ""),
+            "source_kind": str(payload.get(f"{prefix}_kind") or "image"),
+        },
+        frame_index,
+    )
 
 
 def _resize_reference_for_stats(image: torch.Tensor) -> torch.Tensor:
@@ -687,6 +1061,13 @@ class CSColorMatch(io.ComfyNode):
                 io.Float.Input("preserve_saturation", display_name="Preserve Saturation", default=0.0, min=0.0, max=1.0, step=0.01, tooltip="0 to 1, where 1 keeps source chroma."),
                 io.Float.Input("hue_strength", display_name="Hue Strength", default=1.0, min=0.0, max=1.0, step=0.01),
                 io.Float.Input("chroma_strength", display_name="Chroma Strength", default=1.0, min=0.0, max=1.0, step=0.01),
+                io.Boolean.Input(
+                    "wait_for_input_cache",
+                    display_name="wait for input cache",
+                    default=False,
+                    advanced=True,
+                    tooltip="Cache both connected input chains, then interrupt this execution for Match Preview.",
+                ),
             ],
             outputs=[io.Image.Output("image", display_name="IMAGE")],
             hidden=[io.Hidden.prompt, io.Hidden.unique_id],
@@ -706,6 +1087,7 @@ class CSColorMatch(io.ComfyNode):
         preserve_saturation: float = 0.0,
         hue_strength: float = 1.0,
         chroma_strength: float = 1.0,
+        wait_for_input_cache: bool = False,
     ) -> io.NodeOutput:
         started_at = time.perf_counter()
         if method not in _METHODS:
@@ -721,6 +1103,22 @@ class CSColorMatch(io.ComfyNode):
             "chroma_strength": _parameter(chroma_strength, "chroma_strength"),
         }
         _match_info("start: method=%s; color_space=%s", method, color_space)
+        node_id = getattr(getattr(cls, "hidden", None), "unique_id", "")
+        prompt = getattr(getattr(cls, "hidden", None), "prompt", None)
+        _match_info("caching source and reference preview inputs")
+        _cache_preview_inputs(node_id, prompt, image, reference_image)
+        if bool(wait_for_input_cache):
+            _cache_wait_input(
+                node_id,
+                prompt,
+                "image",
+                image,
+                _source_fps_from_prompt(prompt, node_id, "image"),
+            )
+            _cache_wait_input(node_id, prompt, "reference_image", _first_image(reference_image, "reference_image"), 1.0)
+            from comfy.model_management import InterruptProcessingException
+
+            raise InterruptProcessingException()
         progress_total = int(image.shape[0]) if isinstance(image, torch.Tensor) and image.ndim >= 1 else 1
         progress = _MatchProgress(progress_total)
         try:
@@ -732,6 +1130,20 @@ class CSColorMatch(io.ComfyNode):
 
 
 class ColorMatchExtension(ComfyExtension):
+    @override
+    async def on_load(self) -> None:
+        global _ROUTES_REGISTERED
+        if _ROUTES_REGISTERED:
+            return
+        from server import PromptServer
+
+        server_instance = getattr(PromptServer, "instance", None)
+        if server_instance is not None:
+            server_instance.routes.get("/cinestyle/color-match-cache")(_cache_info_route)
+            server_instance.routes.get("/cinestyle/color-match-cache-video")(_cache_video_route)
+            server_instance.routes.post("/cinestyle/color-match-preview")(_preview_route)
+            _ROUTES_REGISTERED = True
+
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [CSColorMatch]

@@ -180,7 +180,9 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 1. 将图片节点或 `CS Load Video` 的 `IMAGE` 输出连接到 `image`。
 2. 将色调参考图片连接到 `reference_image`。如果输入的是 batch ，只使用第一张图片。
 3. 选择颜色传递方法和颜色空间。默认组合为 `Optimal Transport` + `OKLab`，适合大部分视频色调匹配。
-4. 调整匹配强度、亮度/对比度/饱和度保护以及色相/色度强度，然后执行工作流。
+4. 调整匹配强度、亮度/对比度/饱和度保护以及色相/色度强度，然后直接执行工作流，或点击 `Match Preview` 预览当前帧的匹配效果。
+5. 在预览窗口中调整参数后，点击 `Apply to Node` 将参数写回节点，再执行工作流得到完整输出。
+6. 如果输入来自上游运行后才生成的图像或视频，首次打开 `Match Preview` 前先开启 `wait_for_input_cache` 并运行一次工作流，建立 Preview cache。
 
 #### 节点输入
 
@@ -199,11 +201,26 @@ Preview 窗口包含当前帧预览、对比层、缩放、时间线和调色参
 - Preserve Saturation：饱和度/色度保护，范围 `0–1`，默认 `0`。`1` 保留源图的色度大小，但不阻止色相匹配。
 - Hue Strength：色相匹配强度，范围 `0–1`，默认 `1`。低色度区域会自动降低色相变化，减少中性区域的色偏噪声。
 - Chroma Strength：色度匹配强度，范围 `0–1`，默认 `1`。
+- wait_for_input_cache：布尔开关，默认关闭。开启后执行节点时，将 `image` 和 `reference_image` 的输入链路写入共享 Preview cache，然后中断本次 ComfyUI 执行，供 `Match Preview` 使用。
 
 
 #### 输出
 
 - `IMAGE`：完成颜色匹配的 RGB 图像。
+
+#### Match Preview
+
+![CS Color Match Preview](images/CS_Color_Match_Preview.jpg)
+
+Preview 窗口上半部分为当前帧的匹配对比视口，下半部分为颜色匹配参数：
+
+- 预览视口显示 `Result / Original`。拖动中间的对比条可以在原图和匹配结果之间进行左右比较。
+- `50%`、`100%`、`200%` 和 `Fit` 用于设置缩放；放大后按住鼠标左键拖动可以平移画面，鼠标滚轮也可以调整缩放比例。
+- 时间线支持拖动定位、帧号输入，以及 `|<` / `>|` 单帧前进和后退。输入为视频帧批次时会显示总帧数。
+- `Method` 和 `Color Space` 可以在预览窗口中切换颜色传递方法与颜色空间，初始值与节点当前参数一致。
+- `Match Strength`、`Preserve Luminance`、`Preserve Contrast`、`Preserve Saturation`、`Hue Strength` 和 `Chroma Strength` 均提供滑块、数值输入框和单项重置按钮；调整后会重新渲染当前帧预览。
+- `Reset All` 将预览参数恢复为节点默认值：`Optimal Transport`、`OKLab`、`Match Strength 0.75` 以及其余参数的默认值。
+- 点击 `Apply to Node` 将当前预览参数写回节点；点击 `Close` 关闭窗口并放弃未应用的修改。
 
 
 

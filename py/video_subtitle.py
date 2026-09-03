@@ -56,12 +56,12 @@ def _subtitle_info(message: str, *args: Any) -> None:
 
 
 def _subtitle_runtime_state_dir() -> Path | None:
-    """Return a restart-safe directory for the last executed VIDEO shape."""
+    """Return a ComfyUI-temp directory for the last executed VIDEO shape."""
     try:
-        user_dir = Path(folder_paths.get_user_directory())
+        temp_dir = Path(folder_paths.get_temp_directory())
     except (AttributeError, OSError, TypeError):
         return None
-    path = user_dir / "cinestyle" / "subtitle_preview_state"
+    path = temp_dir / "cinestyle" / "subtitle_preview_state"
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:

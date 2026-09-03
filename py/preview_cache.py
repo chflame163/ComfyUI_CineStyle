@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 import threading
 import time
 import uuid
@@ -24,6 +23,8 @@ import av
 import numpy as np
 import torch
 from PIL import Image
+
+import folder_paths
 
 
 _WAIT_INPUT_CACHE_VERSION = 1
@@ -175,7 +176,7 @@ def build_input_chain(prompt: Any, node_id: Any, input_names: tuple[str, ...] | 
 class PreviewCacheStore:
     def __init__(self, namespace: str, root: str | os.PathLike | None = None, max_entries: int = 8, max_bytes: int = 4 * 1024**3):
         self.namespace = str(namespace).strip() or "preview"
-        base = Path(root) if root is not None else Path(tempfile.gettempdir()) / "cinestyle_preview_cache"
+        base = Path(root) if root is not None else Path(folder_paths.get_temp_directory()) / "cinestyle_preview_cache"
         self.root = base / self.namespace
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_entries = max(1, int(max_entries))

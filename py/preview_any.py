@@ -649,7 +649,11 @@ def _encode_stream_video(video: Input.Video, path: Path) -> dict[str, Any]:
     }
 
 
-def _create_video_preview(video: Input.Video, node_id: str, item_index: int) -> tuple[list[dict[str, Any]], list[str]]:
+def _create_video_preview(
+    video: Input.Video,
+    node_id: str,
+    item_index: int,
+) -> tuple[list[dict[str, Any]], list[str], tuple[int, int]]:
     cache = _video_cache()
     temporary_path, final_path = cache.new_paths(node_id)
     try:
@@ -664,7 +668,11 @@ def _create_video_preview(video: Input.Video, node_id: str, item_index: int) -> 
         final_path.unlink(missing_ok=True)
         raise
     saved = ui.SavedResult(final_path.name, _VIDEO_CACHE_SUBFOLDER, io.FolderType.temp)
-    return ui.PreviewVideo([saved]).as_dict()["images"], _video_info_lines(info)
+    return (
+        ui.PreviewVideo([saved]).as_dict()["images"],
+        _video_info_lines(info),
+        (int(info["preview_width"]), int(info["preview_height"])),
+    )
 
 
 def _audio_info_lines(audio: dict[str, Any]) -> list[str]:
@@ -784,6 +792,8 @@ class _ItemPreview:
     images: list[dict[str, Any]] = field(default_factory=list)
     audio: list[dict[str, Any]] = field(default_factory=list)
     waveform: list[float] = field(default_factory=list)
+    media_width: int = 0
+    media_height: int = 0
 
 
 class _PreviewContext:
@@ -796,8 +806,8 @@ class _PreviewContext:
             if not allow_video:
                 return _ItemPreview("video", ["Type: VIDEO", "Preview omitted: only the first VIDEO item is displayed."])
             try:
-                images, lines = _create_video_preview(value, self.node_id, item_index)
-                return _ItemPreview("video", lines, images=images)
+                images, lines, (width, height) = _create_video_preview(value, self.node_id, item_index)
+                return _ItemPreview("video", lines, images=images, media_width=width, media_height=height)
             except Exception as exc:
                 return _ItemPreview("error", ["Unable to parse data type", "Type: VIDEO", f"Error: {exc}"])
 
@@ -806,10 +816,22 @@ class _PreviewContext:
                 if value.ndim == 4 and int(value.shape[-1]) in {1, 3, 4}:
                     display = value.expand(*value.shape[:-1], 3) if int(value.shape[-1]) == 1 else value
                     images = ui.PreviewImage(display, cls=self.node_cls).as_dict()["images"]
-                    return _ItemPreview("image", _image_info_lines(value, "IMAGE"), images=images)
+                    return _ItemPreview(
+                        "image",
+                        _image_info_lines(value, "IMAGE"),
+                        images=images,
+                        media_width=int(value.shape[2]),
+                        media_height=int(value.shape[1]),
+                    )
                 if value.ndim == 3:
                     images = ui.PreviewMask(value, cls=self.node_cls).as_dict()["images"]
-                    return _ItemPreview("image", _image_info_lines(value, "MASK"), images=images)
+                    return _ItemPreview(
+                        "image",
+                        _image_info_lines(value, "MASK"),
+                        images=images,
+                        media_width=int(value.shape[2]),
+                        media_height=int(value.shape[1]),
+                    )
             except Exception as exc:
                 return _ItemPreview("error", ["Unable to parse data type", f"Python type: {_safe_type_name(value)}", f"Error: {exc}"])
             return _ItemPreview(
@@ -953,12 +975,18 @@ class CSPreviewAny(io.ComfyNode):
             audios = []
             waveform = []
 
+        media_preview = video_preview or next(
+            (item for item in previews if item.kind == "image" and item.images),
+            None,
+        )
         text = _truncate_text("\n".join(text_lines))
         payload = {
             "kind": kind,
             "is_list": is_output_list,
             "item_count": len(values),
             "waveform": waveform,
+            "media_width": int(media_preview.media_width if media_preview else 0),
+            "media_height": int(media_preview.media_height if media_preview else 0),
         }
         ui_payload: dict[str, Any] = {
             "images": images,

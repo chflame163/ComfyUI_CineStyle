@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Spatial Stabilize](#cs-spatial-stabilize) 和 [CS Spatial Restore](#cs-spatial-restore) 节点，从视频 Mask 稳定并裁切局部区域，处理后可恢复到源视频位置。
 * 添加 [CS Color Match](#cs-color-match) 节点，使用参考图自动匹配 IMAGE 帧批次的整体色调，支持多种颜色传递方法。
 * 添加 [CS Compare Any](#cs-compare-any) 节点，对两个相同类型的输入进行媒体画面对比或文本差异比较。
 * 添加 [CS Preview Any](#cs-preview-any) 节点，自动识别并预览 ComfyUI 的常见图像、视频、音频和数据类型。
@@ -544,6 +545,56 @@ Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑�
 - `MASK`：与输入帧数和画面尺寸相同的标准 ComfyUI `MASK`。
 
 
+### CS Spatial Stabilize
+
+根据 `MASK` 稳定目标区域的位置和面积，并裁切为统一尺寸的 `IMAGE` 和 `MASK` 批次。稳定后的局部帧可连接修复或特效节点进行处理，再通过 `CS Spatial Restore` 恢复到源视频位置。
+
+![CS Spatial Stabilize 和 CS Spatial Restore 工作流](images/Spatial_Stabilize_Restore_workflow.jpg)
+
+#### 使用流程
+
+1. 将源视频帧批次连接到 `image`，将与视频帧对应的 Mask 批次连接到 `mask`。
+2. 节点自动选择 Mask 面积最大的一帧作为锚点；其他帧与其对齐，并缩放稳定目标大小。
+3. 将输出的 `IMAGE` 送入局部处理流程，同时将 `STABLE_DATA` 连接到 `CS Spatial Restore`；需要按目标 Mask 回贴时，再将输出的 `MASK` 连接到恢复节点。
+
+![CS Spatial Stabilize 节点](images/Spatial_Stabilize_node.jpg)
+
+#### 节点选项说明
+
+- image：标准 ComfyUI `IMAGE`，通常为按时间顺序排列的视频帧批次。
+- mask：与 `image` 空间尺寸一致的标准 ComfyUI `MASK` 批次。
+- multiple：整数，默认 `32`。输出裁切画面的宽度和高度向上取整为该数值的整数倍。
+- Crop Margin Per Side (%)：浮点数，默认 `30.0`。在基础扩展之外，按锚点帧遮罩区域最大宽度和高度分别为每一侧增加百分比边距。
+- Average Frames：整数，默认 `8`。对补全后的 X、Y 和 Scale 做连续端点约束的滑动平均，以减少逐帧抖动；首尾帧保持原始值。`1` 表示关闭平均。
+- Mask Blur Sigma：浮点数，默认 `6.0`。预模糊高斯模糊 Sigma，可过滤远离主体的少量 Mask 漏点；`0` 表示关闭预模糊。
+
+#### 输出说明
+
+- `IMAGE`：位置和大小稳定后、统一裁切尺寸的视频帧批次。
+- `STABLE_DATA`：用于 `CS Spatial Restore` 节点恢复裁切画面的数据。
+- `MASK`：与输出 `IMAGE` 对应的裁切后 Mask 批次。
+
+
+### CS Spatial Restore
+
+使用 `CS Spatial Stabilize` 输出的 `STABLE_DATA`，把处理后的局部视频帧逆变换并合成回源视频。恢复结果保持源视频的批次数和画面尺寸。
+
+![CS Spatial Restore 节点](images/Spatial_Restore_node.jpg)
+
+#### 使用流程
+
+1. 将与 `CS Spatial Stabilize` 输入相同的源视频帧连接到 `source_image`。
+2. 将经过局部处理的稳定帧连接到 `stabilized_image`。处理过程必须保持帧数、宽度和高度不变。
+3. 将对应的 `STABLE_DATA` 连接到 `stable_data`。
+4. 需要只恢复 Mask 区域时，将与 `stabilized_image` 对应的 Mask 连接到可选的 `mask`；不连接 Mask 时，节点恢复整个 crop，并使用 `Soft Border` 在 crop 四边创建羽化过渡。
+
+#### 节点选项说明
+
+- source_image：原始标准 ComfyUI `IMAGE` 批次，必须与 `CS Spatial Stabilize` 使用的源视频帧尺寸和批次数一致。
+- stabilized_image：经过局部处理的稳定帧，尺寸和批次数必须与 `CS Spatial Stabilize` 的 `IMAGE` 输出一致。
+- stable_data：匹配的 `CS Spatial Stabilize` 输出数据。
+- mask：可选标准 ComfyUI `MASK`。连接后按 Mask 合成局部结果，并忽略 `Soft Border`；Mask 的尺寸和批次数必须与 `stabilized_image` 一致。
+- Soft Border (crop px)：整数，默认 `32`。未连接 Mask 时，在稳定 crop 四边使用的羽化宽度，单位为 crop 空间像素；`0` 表示不羽化。
 
 
 ### CS Load Video

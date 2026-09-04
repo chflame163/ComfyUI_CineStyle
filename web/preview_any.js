@@ -5,19 +5,55 @@ const NODE_ID = "CS_Preview_Any";
 const STYLE_ID = "cinestyle-preview-any-style";
 const AUDIO_WIDGET = Symbol("cinestyle-preview-any-audio");
 const TEXT_WIDGET = Symbol("cinestyle-preview-any-text");
-const AUTO_HEIGHT = Symbol("cinestyle-preview-any-auto-height");
 const CURRENT_KIND = Symbol("cinestyle-preview-any-current-kind");
 const LAYOUT_HOOK = Symbol("cinestyle-preview-any-layout-hook");
 const RESIZE_HOOK = Symbol("cinestyle-preview-any-resize-hook");
 const LAYOUT_FRAME = Symbol("cinestyle-preview-any-layout-frame");
 const TEXT_OUTER_SYNC = Symbol("cinestyle-preview-any-text-outer-sync");
 const OUTPUT_SIGNATURE = Symbol("cinestyle-preview-any-output-signature");
+const MEDIA_SIZE = Symbol("cinestyle-preview-any-media-size");
 const CANVAS_IMAGE_WIDGET = "$$canvas-image-preview";
 const TEXT_DEFAULT_HEIGHT = 150;
 const TEXT_MIN_HEIGHT = 90;
 const TEXT_MAX_HEIGHT = Number.POSITIVE_INFINITY;
 const TEXT_WIDGET_MARGIN = 8;
-const NODE_BOTTOM_PADDING = 6;
+const NODE_MIN_WIDTH = 420;
+const NODE_MIN_HEIGHT = 240;
+// 58px waveform + 36px controls + 8px gap + 16px padding + 2px border.
+const AUDIO_VIEWPORT_HEIGHT = 120;
+const AUDIO_WIDGET_HEIGHT = AUDIO_VIEWPORT_HEIGHT + TEXT_WIDGET_MARGIN;
+
+function positiveNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function mediaAspect(node) {
+    const size = node?.[MEDIA_SIZE];
+    const width = positiveNumber(size?.width);
+    const height = positiveNumber(size?.height);
+    return width && height ? width / height : 0;
+}
+
+function mediaContentWidth(node) {
+    // ComfyUI's image/video preview widgets use the node content width for
+    // their aspect calculation; keep the same reference so the viewport and
+    // the encoded media do not accumulate an extra margin error.
+    return Math.max(1, Number(node?.size?.[0]) || NODE_MIN_WIDTH);
+}
+
+function mediaMinimumHeight(node, kind) {
+    if (kind === "audio") return AUDIO_WIDGET_HEIGHT;
+    const aspect = mediaAspect(node);
+    if (!aspect) return kind === "image" || kind === "video" ? 220 : 0;
+    return Math.max(1, Math.round(mediaContentWidth(node) / aspect));
+}
+
+function outerResizeZone(event, element) {
+    const rect = element?.getBoundingClientRect?.();
+    if (!rect) return false;
+    return event.clientX >= rect.right - 24 && event.clientY >= rect.bottom - 22;
+}
 
 function isTextOnlyKind(kind) {
     return kind !== "image" && kind !== "video" && kind !== "audio";
@@ -28,13 +64,13 @@ function addStyles() {
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      .cs-preview-any-audio { display:grid; box-sizing:border-box; width:100%; min-height:112px; gap:8px; padding:8px; border:1px solid var(--border-color,#454b55); border-radius:6px; background:var(--comfy-input-bg,#17191e); }
+      .cs-preview-any-audio { display:grid; box-sizing:border-box; width:100%; height:${AUDIO_VIEWPORT_HEIGHT}px; min-height:${AUDIO_VIEWPORT_HEIGHT}px; max-height:${AUDIO_VIEWPORT_HEIGHT}px; gap:8px; padding:8px; border:1px solid var(--border-color,#454b55); border-radius:6px; background:var(--comfy-input-bg,#17191e); }
       .cs-preview-any-audio[hidden] { display:none; }
       .cs-preview-any-wave { display:block; width:100%; height:58px; border-radius:4px; background:var(--comfy-menu-bg,#111318); }
       .cs-preview-any-audio audio { display:block; width:100%; height:36px; }
       .cs-preview-any-text { position:relative; box-sizing:border-box; width:100%; height:var(--cs-preview-any-text-height,150px); min-height:var(--cs-preview-any-text-height,150px); max-height:none; overflow:auto; border:1px solid var(--border-color,#454b55); border-radius:6px; padding:9px 10px 18px; background:var(--comfy-input-bg,#17191e); color:var(--input-text,#e6e9ef); }
       .cs-preview-any-text pre { min-width:100%; width:max-content; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:0; }
-      .cs-preview-any-text-resize { position:absolute; right:6px; bottom:2px; left:6px; z-index:2; height:10px; cursor:ns-resize; touch-action:none; }
+      .cs-preview-any-text-resize { position:absolute; right:28px; bottom:2px; left:6px; z-index:2; height:10px; cursor:ns-resize; touch-action:none; }
       .cs-preview-any-text-resize::after { content:""; position:absolute; top:4px; left:50%; width:34px; height:2px; border-radius:2px; transform:translateX(-50%); background:var(--descrip-text,#7f8794); opacity:.75; }
     `;
     document.head.appendChild(style);
@@ -52,7 +88,10 @@ function addTextViewport(node) {
     resizeHandle.setAttribute("aria-label", "Resize text viewport");
     container.append(pre, resizeHandle);
     for (const event of ["pointerdown", "click", "dblclick"]) {
-        container.addEventListener(event, (value) => value.stopPropagation());
+        container.addEventListener(event, (value) => {
+            if (event === "pointerdown" && outerResizeZone(value, container)) return;
+            value.stopPropagation();
+        });
     }
     const state = {
         container,
@@ -74,13 +113,10 @@ function addTextViewport(node) {
         margin: TEXT_WIDGET_MARGIN / 2,
         serialize: false,
         canvasOnly: false,
-        getMinHeight: () => isTextOnlyKind(node[CURRENT_KIND])
-            ? TEXT_MIN_HEIGHT + TEXT_WIDGET_MARGIN
-            : state.height + TEXT_WIDGET_MARGIN,
-        getMaxHeight: () => {
-            if (isTextOnlyKind(node[CURRENT_KIND]) && !state.locked) return undefined;
-            return state.height + TEXT_WIDGET_MARGIN;
-        },
+        getMinHeight: () => TEXT_MIN_HEIGHT + TEXT_WIDGET_MARGIN,
+        // Text consumes the remaining space after the media widget. The CSS
+        // height is synchronized from computedHeight after every outer resize.
+        getMaxHeight: () => undefined,
     };
 
     const finishResize = (event) => {
@@ -113,51 +149,24 @@ function addTextViewport(node) {
 }
 
 function setTextViewportHeight(node, state, requestedHeight) {
-    const textOnly = isTextOnlyKind(node[CURRENT_KIND]);
-    if (textOnly) {
-        node.arrange?.();
-    }
-    const maximum = textOnly ? textViewportCapacity(node, state) : TEXT_MAX_HEIGHT;
-    const nextHeight = Math.max(TEXT_MIN_HEIGHT, Math.min(TEXT_MAX_HEIGHT, maximum, Math.round(requestedHeight)));
+    const nextHeight = Math.max(TEXT_MIN_HEIGHT, Math.min(TEXT_MAX_HEIGHT, Math.round(requestedHeight)));
     if (nextHeight === state.height) return;
     const delta = nextHeight - state.height;
     state.height = nextHeight;
     state.container.style.setProperty("--cs-preview-any-text-height", `${nextHeight}px`);
 
-    if (textOnly) {
-        state.locked = true;
-        node.arrange?.();
-        node.graph?.setDirtyCanvas?.(true, true);
-        return;
-    }
-
     const currentWidth = Number(node.size?.[0]) || 420;
     const currentHeight = Number(node.size?.[1]) || 250;
-    const wasAutomatic = node[AUTO_HEIGHT] == null || Math.abs(currentHeight - node[AUTO_HEIGHT]) < 3;
-    const computedHeight = Number(node.computeSize?.()?.[1]) || 0;
-    const nextNodeHeight = Math.max(computedHeight, currentHeight + delta);
-    node.setSize?.([currentWidth, nextNodeHeight]);
-    if (wasAutomatic) node[AUTO_HEIGHT] = nextNodeHeight;
+    node.setSize?.([currentWidth, Math.max(NODE_MIN_HEIGHT, currentHeight + delta)]);
+    node.arrange?.();
+    ensureMinimumNodeHeight(node);
     scheduleLayoutSync(node);
     node.graph?.setDirtyCanvas?.(true, true);
 }
 
-function textViewportCapacity(node, state) {
-    const widget = state?.widget;
-    const nodeHeight = Number(node.size?.[1]);
-    const widgetY = Number(widget?.y);
-    const widgetHeight = Number(widget?.computedHeight);
-    if (!Number.isFinite(nodeHeight) || !Number.isFinite(widgetY) || !Number.isFinite(widgetHeight)) {
-        return state?.height || TEXT_DEFAULT_HEIGHT;
-    }
-    const remaining = nodeHeight - widgetY - widgetHeight - NODE_BOTTOM_PADDING;
-    return Math.max(TEXT_MIN_HEIGHT, state.height + remaining);
-}
-
 function syncTextViewportToOuter(node) {
     const state = node?.[TEXT_WIDGET];
-    if (!state || !isTextOnlyKind(node[CURRENT_KIND])) return;
-    state.locked = false;
+    if (!state) return;
     node.arrange?.();
     const computedHeight = Number(state.widget?.computedHeight);
     if (Number.isFinite(computedHeight)) {
@@ -168,14 +177,12 @@ function syncTextViewportToOuter(node) {
         state.height = nextHeight;
         state.container.style.setProperty("--cs-preview-any-text-height", `${nextHeight}px`);
     }
-    state.locked = true;
-    node.arrange?.();
     node.graph?.setDirtyCanvas?.(true, true);
 }
 
 function scheduleTextOuterSync(node) {
     const state = node?.[TEXT_WIDGET];
-    if (!state || !isTextOnlyKind(node[CURRENT_KIND]) || state[TEXT_OUTER_SYNC] != null) return;
+    if (!state || state[TEXT_OUTER_SYNC] != null) return;
     state[TEXT_OUTER_SYNC] = requestAnimationFrame(() => {
         state[TEXT_OUTER_SYNC] = null;
         if (!state.drag) syncTextViewportToOuter(node);
@@ -256,17 +263,24 @@ function addAudioViewport(node) {
     audio.setAttribute("name", "media");
     container.append(canvas, audio);
     for (const event of ["pointerdown", "click", "dblclick"]) {
-        container.addEventListener(event, (value) => value.stopPropagation());
+        container.addEventListener(event, (value) => {
+            if (event === "pointerdown" && outerResizeZone(value, container)) return;
+            value.stopPropagation();
+        });
     }
 
-    const widget = node.addDOMWidget("preview_audio", "preview_audio", container);
+    const widget = node.addDOMWidget("preview_audio", "preview_audio", container, {
+        margin: TEXT_WIDGET_MARGIN / 2,
+    });
     widget.serialize = false;
+    widget.hidden = true;
     widget.options = {
         ...(widget.options || {}),
+        margin: TEXT_WIDGET_MARGIN / 2,
         serialize: false,
         canvasOnly: false,
-        getMinHeight: () => container.hidden ? 0 : 112,
-        getMaxHeight: () => container.hidden ? 0 : 112,
+        getMinHeight: () => container.hidden ? 0 : AUDIO_WIDGET_HEIGHT,
+        getMaxHeight: () => container.hidden ? 0 : AUDIO_WIDGET_HEIGHT,
     };
     const state = { container, canvas, audio, widget, bars: [] };
     const repaint = () => drawWaveform(state);
@@ -284,6 +298,7 @@ function updateAudioViewport(node, output, payload) {
         const state = node[AUDIO_WIDGET];
         if (!state) return;
         state.container.hidden = true;
+        state.widget.hidden = true;
         state.audio.pause();
         state.audio.removeAttribute("src");
         state.audio.load();
@@ -293,6 +308,7 @@ function updateAudioViewport(node, output, payload) {
     }
     const state = node[AUDIO_WIDGET] || addAudioViewport(node);
     state.container.hidden = false;
+    state.widget.hidden = false;
     const url = audioUrl(output.audio[0]);
     if (state.audio.src !== url) {
         state.audio.src = url;
@@ -340,35 +356,57 @@ function outputSignature(output, payload) {
     return [payloadKey, textKey, images, audio].join("\u001d");
 }
 
-function setNodeSize(node, width, height) {
-    const currentWidth = Number(node.size?.[0]) || 420;
-    const currentHeight = Number(node.size?.[1]) || 240;
-    const nextWidth = Math.max(420, Math.round(Number(width) || currentWidth));
-    const nextHeight = Math.max(240, Math.round(Number(height) || currentHeight));
-    if (Math.abs(currentWidth - nextWidth) < 2 && Math.abs(currentHeight - nextHeight) < 2) return false;
-    node.setSize?.([nextWidth, nextHeight]);
+function mediaWidget(node, kind) {
+    const name = kind === "image" ? CANVAS_IMAGE_WIDGET : kind === "video" ? "video-preview" : null;
+    return name ? node.widgets?.find((widget) => widget.name === name) : null;
+}
+
+function syncMediaWidgetLayout(node, kind) {
+    const widget = mediaWidget(node, kind);
+    if (!widget) return false;
+    if (kind === "image" || kind === "video") {
+        // Keep the source aspect ratio as the minimum media height used for
+        // the initial node expansion. Do not set maxHeight: the user-owned
+        // outer node height must be allowed to grow the viewport freely. Read
+        // the current node width on every layout pass so a width drag cannot
+        // briefly use a stale aspect-derived height.
+        widget.computeLayoutSize = () => ({
+            minHeight: mediaMinimumHeight(node, kind),
+            minWidth: 1,
+        });
+    }
     return true;
 }
 
-function updateAutomaticSize(node, kind, force = false) {
-    const mediaMinimum = kind === "image" || kind === "video" ? 220 : kind === "audio" ? 112 : 0;
-    const computed = node.computeSize?.() || [420, 0];
-    const mediaWidgetName = kind === "image" ? CANVAS_IMAGE_WIDGET : kind === "video" ? "video-preview" : null;
-    const hasMediaWidget = mediaWidgetName && node.widgets?.some((widget) => widget.name === mediaWidgetName);
-    // Reserve space only for the first transition to a media type. Once the
-    // core preview widget exists, its own layout size is authoritative. This
-    // avoids adding a second padding estimate on every execution.
-    const pendingMediaHeight = force && mediaWidgetName && !hasMediaWidget ? mediaMinimum + 4 : 0;
-    const targetWidth = Math.max(420, Number(node.size?.[0]) || 0, Number(computed[0]) || 0);
-    const targetHeight = Math.max(240, (Number(computed[1]) || 0) + pendingMediaHeight);
-    const currentHeight = Number(node.size?.[1]) || targetHeight;
-    const shouldResize = currentHeight < targetHeight ||
-        (force && Math.abs(currentHeight - targetHeight) >= 3);
-    if (!shouldResize) return;
-    if (setNodeSize(node, targetWidth, targetHeight)) {
-        node[AUTO_HEIGHT] = targetHeight;
-        node.graph?.setDirtyCanvas?.(true, true);
-    }
+function minimumNodeHeight(node, kind) {
+    const computed = Number(node.computeSize?.()?.[1]) || NODE_MIN_HEIGHT;
+    const mediaWidgetPresent = kind === "image" || kind === "video"
+        ? Boolean(mediaWidget(node, kind))
+        : kind === "audio"
+            ? Boolean(node[AUDIO_WIDGET]?.widget && !node[AUDIO_WIDGET].widget.hidden)
+            : false;
+    const pendingMedia = !mediaWidgetPresent && (kind === "image" || kind === "video")
+        ? mediaMinimumHeight(node, kind) + 4
+        : 0;
+    return Math.max(NODE_MIN_HEIGHT, computed + pendingMedia);
+}
+
+function ensureMinimumNodeHeight(node) {
+    const kind = node?.[CURRENT_KIND] || "none";
+    const minimum = minimumNodeHeight(node, kind);
+    const width = Math.round(Number(node?.size?.[0]) || NODE_MIN_WIDTH);
+    const currentHeight = Math.round(Number(node?.size?.[1]) || NODE_MIN_HEIGHT);
+    if (currentHeight >= minimum) return false;
+    node.setSize?.([width, minimum]);
+    node.graph?.setDirtyCanvas?.(true, true);
+    return true;
+}
+
+function updateAutomaticSize(node, kind) {
+    syncMediaWidgetLayout(node, kind);
+    ensureMinimumNodeHeight(node);
+    node.arrange?.();
+    syncTextViewportToOuter(node);
 }
 
 function hasLegacyPreview(node) {
@@ -435,6 +473,7 @@ function installLayoutHook(node) {
         node.onResize = function () {
             const result = onResize?.apply(this, arguments);
             scheduleTextOuterSync(this);
+            scheduleLayoutSync(this);
             return result;
         };
         node[RESIZE_HOOK] = true;
@@ -451,6 +490,8 @@ function installLayoutHook(node) {
         if (kind !== undefined) {
             const cleared = clearIncompatibleMedia(this, kind);
             syncPreviewMetadata(this, kind);
+            syncMediaWidgetLayout(this, kind);
+            ensureMinimumNodeHeight(this);
             if (cleared) this.graph?.setDirtyCanvas?.(true, true);
         }
         scheduleLayoutSync(this);
@@ -520,6 +561,9 @@ function updateNode(node, output, disposeLegacyMedia = true) {
     }
     node[OUTPUT_SIGNATURE] = signature;
     node[CURRENT_KIND] = kind;
+    const mediaWidth = positiveNumber(payload.media_width);
+    const mediaHeight = positiveNumber(payload.media_height);
+    node[MEDIA_SIZE] = mediaWidth && mediaHeight ? { width: mediaWidth, height: mediaHeight } : null;
     const textState = node[TEXT_WIDGET];
     if (kindChanged && textState && isTextOnlyKind(kind)) {
         // Let the outer-node resize determine the text allocation after a
@@ -574,8 +618,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             onNodeCreated?.apply(this, arguments);
             addTextViewport(this);
-            this.setSize?.([420, 250]);
-            this[AUTO_HEIGHT] = 250;
+            this.setSize?.([NODE_MIN_WIDTH, 250]);
             installLayoutHook(this);
             scheduleTextOuterSync(this);
         };
@@ -592,8 +635,12 @@ app.registerExtension({
     loadedGraphNode(node) {
         if (node?.type !== NODE_ID && node?.comfyClass !== NODE_ID) return;
         installLayoutHook(node);
-        const computed = node.computeSize?.() || [420, 240];
-        node.setSize?.([Math.max(420, node.size?.[0] || computed[0] || 0), Math.max(240, computed[1] || 0)]);
+        // Preserve the saved outer size. The first output/layout pass will
+        // only raise the height when the current content cannot fit.
+        node.setSize?.([
+            Math.round(Number(node.size?.[0]) || NODE_MIN_WIDTH),
+            Math.max(NODE_MIN_HEIGHT, Number(node.size?.[1]) || NODE_MIN_HEIGHT),
+        ]);
         scheduleLayoutSync(node);
     },
     onNodeOutputsUpdated(outputs) {

@@ -1,9 +1,4 @@
-"""Minimal facexlib-compatible BiSeNet face parsing model.
 
-The bundled ``parsing_bisenet.pth`` weights use the original facexlib module
-names.  Keeping the small network definition here avoids making facexlib a
-runtime dependency of CineStyle.
-"""
 
 from __future__ import annotations
 

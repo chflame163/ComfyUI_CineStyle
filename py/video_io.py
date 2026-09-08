@@ -451,6 +451,42 @@ def _write_h264(
                 container.mux(packet)
 
 
+def _video_from_tensor_inputs(
+    image: torch.Tensor | None,
+    mask: torch.Tensor | None,
+    audio: dict[str, Any] | None,
+    fps: float,
+) -> Input.Video:
+    """Create a standard ComfyUI VIDEO from an IMAGE or MASK batch."""
+    if image is not None:
+        images = image
+        if images.ndim == 3:
+            images = images.unsqueeze(0)
+        if images.ndim != 4 or images.shape[-1] not in (3, 4):
+            raise ValueError("IMAGE input must have shape [frames, height, width, 3 or 4]")
+        images = images.float().clamp(0.0, 1.0)
+    elif mask is not None:
+        masks = mask
+        if masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        if masks.ndim == 4 and masks.shape[1] == 1:
+            masks = masks[:, 0]
+        if masks.ndim != 3:
+            raise ValueError("MASK input must have shape [frames, height, width]")
+        images = masks.float().clamp(0.0, 1.0).unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
+    else:
+        raise ValueError("Connect video, image, or mask to CS Save Video")
+    return InputImpl.VideoFromComponents(
+        Types.VideoComponents(
+            images=images,
+            audio=audio,
+            frame_rate=Fraction(max(1.0, float(fps))).limit_denominator(1000),
+        ),
+        bit_depth=8,
+        color_space="sRGB",
+    )
+
+
 class CSSaveVideo(io.ComfyNode):
     """Save a ComfyUI VIDEO with optional metadata and H.264 bitrate control."""
 
@@ -462,9 +498,21 @@ class CSSaveVideo(io.ComfyNode):
             display_name="CS Save Video",
             category="😺dzNodes/CineStyle",
             essentials_category="Video Tools",
-            description="Save a VIDEO with an optional metadata flag and explicit H.264 bitrate.",
+            description="Save VIDEO, IMAGE, or MASK input with an optional metadata flag and explicit H.264 bitrate.",
             inputs=[
-                io.Video.Input("video", tooltip="The video to save."),
+                io.Video.Input("video", optional=True, tooltip="Primary video source. When connected, image, mask, audio, and FPS are ignored."),
+                io.Image.Input("image", optional=True, tooltip="Optional IMAGE batch used when video is not connected."),
+                io.Mask.Input("mask", optional=True, tooltip="Optional MASK batch converted to grayscale video when video and image are not connected."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional audio used with image or mask input when video is not connected."),
+                io.Float.Input(
+                    "fps",
+                    display_name="FPS",
+                    default=30.0,
+                    min=1.0,
+                    max=240.0,
+                    step=0.01,
+                    tooltip="Frame rate used when saving IMAGE or MASK input. VIDEO input keeps its embedded frame rate.",
+                ),
                 io.String.Input(
                     "filename_prefix",
                     default="video/ComfyUI",
@@ -512,12 +560,18 @@ class CSSaveVideo(io.ComfyNode):
     @classmethod
     def execute(
         cls,
-        video: Input.Video,
-        filename_prefix: str,
-        format: str,
-        codec: io.DynamicCombo.Type,
-        save_metadata: bool,
+        video: Input.Video | None = None,
+        image: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        audio: dict[str, Any] | None = None,
+        fps: float = 30.0,
+        filename_prefix: str = "video/ComfyUI",
+        format: str = "auto",
+        codec: io.DynamicCombo.Type = "h264",
+        save_metadata: bool = False,
     ) -> io.NodeOutput:
+        if video is None:
+            video = _video_from_tensor_inputs(image, mask, audio, fps)
         codec_name = codec.get("codec", "h264") if isinstance(codec, dict) else str(codec or "h264")
         bitrate_mbps = float(codec.get("bitrate", 8.0)) if isinstance(codec, dict) else 8.0
         width, height = video.get_dimensions()

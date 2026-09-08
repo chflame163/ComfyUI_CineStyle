@@ -61,12 +61,12 @@ _DEFAULT_CURVES_JSON = json.dumps(_DEFAULT_CURVES, separators=(",", ":"))
 
 
 def _grade_info(message: str, *args: Any) -> None:
-    """Keep status lines consistent with the other CineStyle video nodes."""
+
     _LOGGER.info("[CS Color Grade] " + message, *args)
 
 
 class _GradeProgress:
-    """Emit a single throttled tqdm-style frame progress bar when available."""
+
 
     def __init__(self, total: int, description: str = "frame processing"):
         self.bar = None
@@ -1092,7 +1092,7 @@ async def _preview_route(request: web.Request) -> web.Response:
 
 
 class CSColorGrade(io.ComfyNode):
-    """Torch port of AFX Grade with RGB white balance and channel curves."""
+
 
     @classmethod
     def define_schema(cls) -> io.Schema:

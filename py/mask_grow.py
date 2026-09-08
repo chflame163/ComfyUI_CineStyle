@@ -1,4 +1,4 @@
-"""Exact Euclidean mask growth for image and video mask batches."""
+
 
 from __future__ import annotations
 
@@ -53,8 +53,6 @@ def _compute_device(source_device: torch.device) -> torch.device:
 
 
 def _estimated_bytes_per_frame(height: int, width: int, preserve_soft_edges: bool) -> int:
-    # Includes the uploaded float mask, output, prefix sums or pooling workspace,
-    # and temporary row results. OOM retry handles backend-specific workspaces.
     bytes_per_pixel = 56 if preserve_soft_edges else 36
     return max(1, height * width * bytes_per_pixel)
 
@@ -88,7 +86,7 @@ def _row_slices(height: int, offset: int) -> tuple[int, int, int, int] | None:
 
 
 def _binary_disk_dilate(mask: torch.Tensor, radius: int) -> torch.Tensor:
-    """Dilate a Bx1xHxW binary mask by an exact discrete Euclidean disk."""
+
     if radius <= 0:
         return mask.clone()
     batch, channels, height, width = map(int, mask.shape)
@@ -124,7 +122,7 @@ def _binary_disk_dilate(mask: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 def _soft_disk_dilate(mask: torch.Tensor, radius: int) -> torch.Tensor:
-    """Apply grayscale dilation with the same exact Euclidean disk."""
+
     if radius <= 0:
         return mask.clone()
     batch, channels, height, width = map(int, mask.shape)
@@ -176,7 +174,7 @@ def _is_cuda_oom(exc: RuntimeError) -> bool:
 
 @torch.inference_mode()
 def grow_mask_batch(mask: torch.Tensor, grow: int, preserve_soft_edges: bool) -> torch.Tensor:
-    """Grow a standard MASK tensor in VRAM-bounded frame batches."""
+
     normalised = _normalise_mask(mask)
     total, height, width = map(int, normalised.shape)
     device = _compute_device(normalised.device)
@@ -224,7 +222,7 @@ def grow_mask_batch(mask: torch.Tensor, grow: int, preserve_soft_edges: bool) ->
 
 
 class CSMaskGrow(io.ComfyNode):
-    """Grow or shrink mask batches with an isotropic Euclidean contour."""
+
 
     @classmethod
     def define_schema(cls) -> io.Schema:

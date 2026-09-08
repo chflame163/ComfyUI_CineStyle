@@ -1,4 +1,4 @@
-"""Subtitle timeline and burn-in node for standard ComfyUI VIDEO values."""
+
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _subtitle_info(message: str, *args: Any) -> None:
 
 
 def _subtitle_runtime_state_dir() -> Path | None:
-    """Return a ComfyUI-temp directory for the last executed VIDEO shape."""
+
     try:
         temp_dir = Path(folder_paths.get_temp_directory())
     except (AttributeError, OSError, TypeError):
@@ -206,7 +206,7 @@ def _cache_wait_input(
 
 
 class _SubtitleProgress:
-    """Emit the same console-friendly progress style as the video nodes."""
+
 
     def __init__(self, total: int, description: str = "frame processing"):
         self.bar = None
@@ -270,7 +270,7 @@ def _parse_time(value: str) -> float:
 
 
 def parse_srt(text: str) -> list[dict[str, Any]]:
-    """Parse SRT cues while tolerating BOM, blank lines and cue settings."""
+
     source = str(text or "").replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
     blocks = re.split(r"\n\s*\n", source.strip()) if source.strip() else []
     cues: list[dict[str, Any]] = []
@@ -334,7 +334,7 @@ def _prompt_input_connected(prompt: Any, node_id: Any, input_name: str) -> bool:
 
 
 def _select_srt_text(srt: Any, edited_srt: Any, srt_connected: bool = False) -> str:
-    """Use srt only when its input is linked; otherwise use the persisted edit."""
+
     source_text = _coerce_srt_input(srt).strip()
     if srt_connected:
         if parse_srt(source_text):
@@ -379,7 +379,7 @@ def _output_style_matching_preview(
     output_width: int,
     output_height: int,
 ) -> dict[str, Any]:
-    """Keep logical style values unchanged across preview and final output."""
+
     return dict(style)
 
 
@@ -412,7 +412,7 @@ def _subtitle_overlay_crop(
     style: dict[str, Any],
     fonts_root: Path,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int, int]] | None:
-    """Rasterize one subtitle layer on CPU and keep only its visible crop."""
+
     from io import BytesIO
 
     from PIL import Image
@@ -623,7 +623,7 @@ def _preview_input_signature(
     actual_width: Any = 0,
     actual_height: Any = 0,
 ) -> str:
-    """Hash the effective media input, independent of subtitle styling."""
+
     values = dict(metadata or {})
     payload = {
         "version": _SUBTITLE_CACHE_SIGNATURE_VERSION,
@@ -693,7 +693,7 @@ def _mark_video_cache_versions(
     node_id: Any,
     main_signature: str,
 ) -> None:
-    """Mark old variants stale without deleting them before replacement succeeds."""
+
     key = str(node_id or "").strip()
     if not key:
         return
@@ -705,7 +705,7 @@ def _mark_video_cache_versions(
 
 
 def _ensure_preview_video(entry: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Encode a trusted frame cache only when a browser video is requested."""
+
     if not entry:
         return None
     path = _preview_entry_video_path(entry)
@@ -755,8 +755,7 @@ def _extract_video_frames(
         "loaded_height": actual_height,
         "loaded_fps": safe_fps,
     }
-    # Preserve source/trim metadata so a downstream timeline can distinguish a
-    # trimmed VIDEO from the original source file when it builds a preview.
+
     metadata: dict[str, Any] = {}
     attached_metadata = getattr(video, "_cinestyle_runtime_metadata", None)
     if isinstance(attached_metadata, dict):
@@ -772,9 +771,7 @@ def _extract_video_frames(
         ):
             if key in metadata:
                 info[key] = metadata[key]
-    # The tensor is authoritative for the value that this subtitle node will
-    # actually render.  Upstream metadata can be stale after ComfyUI reuses a
-    # cached VIDEO, so never let it replace the observed shape/frame count.
+
     info.update(
         {
             "frames": int(frames.shape[0]),
@@ -800,7 +797,7 @@ def _runtime_descriptor_from_input(
     images: torch.Tensor,
     frame_rate: float,
 ) -> dict[str, Any]:
-    """Build a descriptor from the actual VIDEO tensor, not optional metadata."""
+
     descriptor = dict(source_metadata or {})
     loaded_width = int(images.shape[2])
     loaded_height = int(images.shape[1])
@@ -864,15 +861,7 @@ def _source_validation_frame(source_path: str, frame_index: int) -> np.ndarray |
 
 
 def _preview_endpoints_match_source(entry: dict[str, Any], descriptor: dict[str, Any], source: str) -> bool | None:
-    """Compare low-resolution first/last frames when a source file is known.
 
-    ``None`` means the source could not be decoded, so dimension/fingerprint
-    checks remain authoritative instead of rejecting a usable cache.
-    """
-    # Only compare against a file that the executed VIDEO explicitly declared
-    # as its source.  A graph may expose an upstream filename even when an
-    # intermediate node has transformed the frames, in which case decoding
-    # that file would produce a false mismatch.
     source_filename = str(descriptor.get("source_filename") or "").strip()
     if not source_filename:
         return None
@@ -930,9 +919,7 @@ def _preview_entry_matches_runtime(entry: dict[str, Any], descriptor: dict[str, 
         return True
     if actual_signature and actual_signature != expected_signature:
         return False
-    # Entries written from the current VIDEO tensor (including deferred
-    # frame-only entries) already carry the effective-input signature.  Do not
-    # decode the source video's endpoints again for those trusted entries.
+
     if bool(info.get("trusted")) and actual_signature:
         entry["_subtitle_runtime_validation_key"] = validation_key
         return True
@@ -984,7 +971,7 @@ def _cache_video_source(
     wait_for_input_cache: bool = False,
     prompt: Any = None,
 ) -> bool:
-    """Write an independent frame/video cache for one subtitle node source."""
+
     if video is None or not node_id:
         return False
     if input_signature and not wait_for_input_cache:
@@ -1104,7 +1091,7 @@ def _cache_main_video(
 
 
 def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
-    """Return a readable preview cache, falling back to the node's main cache."""
+
     entry = _preview_cache_store().get_preview_variant(node_id, proxy=False)
     if _preview_entry_frames_readable(entry):
         return entry
@@ -1161,7 +1148,7 @@ def _preview_entry_for_request(
 
 
 def _audio_from_video_file(source_path: str, start_seconds: float, duration: float) -> dict[str, Any] | None:
-    """Decode only the audio samples that belong to a lazy preview range."""
+
     try:
         start_seconds = max(0.0, float(start_seconds))
         duration = max(0.0, float(duration))
@@ -1218,7 +1205,7 @@ def _round_dimension(value: float, multiple: int) -> int:
 
 
 def _infer_loaded_dimensions(source_width: int, source_height: int, metadata: dict[str, Any]) -> tuple[int, int] | None:
-    """Reproduce CS Load Video's dimension rounding for a lazy cache request."""
+
     if not any(name in metadata for name in ("output_width", "output_height", "multiple")):
         return None
     try:
@@ -1242,7 +1229,7 @@ def _lazy_cache_trimmed_preview(
     video_filename: str,
     requested_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Build a lightweight trimmed preview when no executed frame cache exists."""
+
     key = str(node_id or "").strip()
     source = str(video_filename or "").strip()
     if not key or not source:
@@ -1266,9 +1253,7 @@ def _lazy_cache_trimmed_preview(
                 and metadata.get("source_fingerprint") != current_source_fingerprint
             )
             if source_changed:
-                # The file changed after the last execution.  Re-probe source
-                # geometry/rate and recompute dimensions from saved CS Load
-                # Video settings instead of reusing stale source metadata.
+
                 metadata["source_fingerprint"] = current_source_fingerprint
                 for name in (
                     "source_fps", "source_frame_count", "source_width", "source_height",
@@ -1304,10 +1289,7 @@ def _lazy_cache_trimmed_preview(
                 inferred = _infer_loaded_dimensions(source_width, source_height, metadata)
                 if inferred is not None:
                     loaded_width, loaded_height = inferred
-            # A trim request without an executed descriptor is commonly a CS
-            # Load Video output.  Falling back to source dimensions here would
-            # silently produce a cache with the wrong canvas, so ask the user
-            # to execute once when no target shape can be inferred.
+
             if (loaded_width <= 0 or loaded_height <= 0) and requested_metadata:
                 _set_preview_warning(
                     key,
@@ -1791,7 +1773,7 @@ async def _subtitle_timeline_state_route(request):
 
 
 def _trim_metadata_from_values(values) -> dict[str, Any]:
-    """Read optional upstream CS Load Video range hints from request values."""
+
     metadata: dict[str, Any] = {}
     for name in ("start_frame", "end_frame"):
         value = values.get(name)

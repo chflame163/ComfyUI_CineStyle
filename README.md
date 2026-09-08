@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS MatAnyone2](#cs-matanyone2) 节点，将 Mask 转换为单目标人物或 union 前景的时序 alpha matte，支持单帧或连续mask，支持在任意位置定义锚定帧，支持多个锚点帧。
 * 添加 [CS Spatial Stabilize](#cs-spatial-stabilize) 和 [CS Spatial Restore](#cs-spatial-restore) 节点，从视频 Mask 稳定并裁切局部区域，处理后可恢复到源视频位置。
 * 添加 [CS Color Match](#cs-color-match) 节点，使用参考图自动匹配 IMAGE 帧批次的整体色调，支持多种颜色传递方法。
 * 添加 [CS Compare Any](#cs-compare-any) 节点，对两个相同类型的输入进行媒体画面对比或文本差异比较。
@@ -372,6 +373,76 @@ SAM3.1 和 SeC-4B 共用同一个 Selector 框架。两者都支持多对象；S
 
 
 
+### CS MatAnyone2
+
+将与视频逐帧匹配的 `MASK` 转换为 MatAnyone2 的浮点 alpha matte。节点面向单目标人物或单个 union 前景。
+#### 工作流程与注意事项
+
+1. 将 IMAGE 和 MASK 连接到 `CS MatAnyone2`。
+2. 如果是单帧 mask 输入，则在`Anchor frames`中填入该帧对应的序号，首帧为0。例如 mask 是第10帧，则填入`[9]`。
+3. 如需手动选择锚点帧，先启用 `wait for input cache` 执行一次，再打开 Matte Preview 编辑锚点帧，可定义多个锚点帧。
+4. Apply 后关闭 `wait for input cache`，再次执行得到整段 alpha matte。
+
+锚点帧最小间距、滞回和上限只影响候选分析：
+最小间距过小会产生过多候选并增加推理开销，过大会漏掉运动或镜头变化；
+滞回过小会对 mask 噪声敏感，过大会抹平真实变化；
+上限过小可能遗漏关键变化，过大会增加显存和处理时间。
+overlap 过小可能使 Anchor 接缝更明显，过大则会增加重复计算；
+节点会在必要时自动缩小 overlap。
+锚点帧过密仍然可以执行，但可能显著增加耗时和显存使用。
+
+节点按锚点帧切分区间，执行双向传播，并在 overlap 区域使用距离启发式余弦权重融合。反向传播和多锚点拼接是节点层工程扩展，不同方向的结果可能存在差异。
+
+#### 权重与运行
+
+权重目录为 `ComfyUI/models/matanyone/matanyone2.pth`。首次执行时如果文件不存在，节点会从官方 Release 自动下载并校验 MD5。MatAnyone2 使用 NTU S-Lab License 1.0，商业使用或再分发前请确认上游许可。
+
+
+![CS MatAnyone2 节点](images/CS_MatAnyone2_node.jpg)
+
+
+#### 输入与输出
+
+- image：标准 ComfyUI `IMAGE` 帧批次。
+- mask：标准 ComfyUI `MASK` 帧批次，支持单帧 mask 和多帧 mask 输入；单帧 mask 可以是任意一帧的遮罩，多帧 mask 应与image大小和数量完全对应。
+- 输出 mask：标准 ComfyUI `MASK`。
+- 输出 info：运行状态字典，包含帧数、源/推理尺寸、Anchor、实际 overlap 等信息。
+
+#### Matte Preview
+
+![CS MatAnyone2 Matte Preview](images/CS_MatAnyone2_Matte_Preview.jpg)
+
+点击节点底部的 `Matte Preview` 打开时间线窗口。预览画面将 IMAGE 与 mask 叠加显示，时间线可以逐帧浏览并添加、删除锚点帧。
+
+首次打开窗口时：
+
+1. 读取节点已经缓存的 IMAGE/MASK。
+2. 对 mask 做稀疏/逐帧变化分析，显示候选锚点帧。
+
+点击 `Apply to Node` 后，Anchor 和预览参数会写回节点并关闭窗口。以后再次打开窗口只读取节点已保存的 Anchor，不会重复自动改写；如需重新分析，可手动点击 `Re-analyse`。如果手动删除全部锚点帧，Apply 时会自动恢复第 0 帧作为唯一 Anchor。不打开预览时，节点默认使用第 0 帧。
+
+#### 参数说明
+
+- `Max inference size (MPixels)`：推理像素上限，默认 `2.1`（即1920 x 1080）。超过上限时缩小推理，完成后恢复到源尺寸。
+- `Anchor frames`：锚点帧列表，支持 JSON（例如 `[0,48,96]`）或逗号分隔文本。用户可以手动输入任意帧；越界值会自动裁剪到有效范围。
+- `Anchor minimum spacing`：候选锚点帧的最小间距，默认 `48`。只影响自动候选稀疏分析，不限制手动设置锚定帧。
+- `Anchor hysteresis`：候选分数平滑滞回，默认 `3`。只影响自动候选分析，运行时会自动限制到安全范围。
+- `Anchor limit`：自动候选锚点帧数量上限，默认 `12`。只影响自动候选分析，不限制手动设置锚定帧数量。
+- `overlap`：相邻锚点帧区间的重叠帧数，默认 `12`。如果大于最小锚定帧间隔允许的安全范围，会自动缩小。
+- `Analysis stride`：自动分析采样步长，默认 `1`；数值越大分析越快，但可能漏掉短暂变化。
+- `Anchor sensitivity`：自动候选阈值，默认 `0.35`。
+- `Mask threshold`：粗 mask 二值化阈值，默认 `0.5`。
+- `Seed morphology`：锚点帧种子形态学调整；正值膨胀，负值腐蚀，默认 `0`。
+- `Warmup iterations`：锚点帧初始化 warm-up 次数，默认 `10`。
+- `Memory interval` / `Memory frames`：MatAnyone2 工作记忆参数，默认分别为 `5` 和 `5`。
+- `Use long-term memory`：启用长时记忆，适合较长或变化较大的片段，但会增加显存和推理时间。
+- `Device`：`auto`、`cpu` 或可用 GPU。
+- `Model file`：从 `models/matanyone` 中选择 checkpoint。
+- `Auto unload model`：执行完成后将模型移出显存，默认开启。
+- `wait for input cache`：先缓存输入并暂停执行，使 Matte Preview 前端可以预览视频。
+
+
+
 ### CS MOSS Audio Transcribe
 
 使用 [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) 模型，将 `AUDIO` 转写为带时间戳的 SRT 文本。
@@ -455,8 +526,6 @@ Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑�
 - 点击 `Apply` 将当前时间范围、字幕文本、样式和位置写回节点；点击 `Cancel` 放弃本次编辑。
 
 注意：如果想强制使用节点内已编辑的字幕时间线`edited_srt`，请断开`str`的输入，否则渲染时`edited_srt`不会生效，仍然使用`srt`输入的内容。
-
-
 
 
 
@@ -667,10 +736,16 @@ Preview Cache 只用于前端窗口播放、预览和波形显示。
 
 
 ### CS Save Video
-基于 ComfyUI 官方 `Save Video` 节点，增加 save metadata 和符合行业惯例的 H.264 目标码率控制选项。
+基于 ComfyUI 官方 `Save Video` 节点，增加 save metadata 和符合行业惯例的 H.264 目标码率控制选项。`video` 为可选输入，也可以只连接 `image` 或 `mask` 生成视频。    
+画面输入优先级：`video > image > mask`。至少需要连接一个画面输入。
+
 ![CS Save Video 节点](images/CS_Save_Video_node.jpg)
 
-- video：标准 ComfyUI `VIDEO` 输入。
+- video：可选的标准 ComfyUI `VIDEO` 输入。如果存在其他输入时，优先使用 `video`，并保留视频自身的内置帧率。
+- image：可选的标准 ComfyUI `IMAGE` 批次输入。没有连接 `video` 时可单独使用。
+- mask：可选的标准 ComfyUI `MASK` 批次输入。仅在没有连接 `video` 和 `image` 时使用。
+- audio：可选的标准 ComfyUI `AUDIO` 输入。使用 `image` 或 `mask` 生成视频时写入音频；使用 `video` 时忽略此输入。
+- FPS：使用 `image` 或 `mask` 生成视频时的帧率，默认 `30.0`。使用 `video` 时忽略此参数并使用视频内置帧率。
 - filename_prefix：输出文件名前缀，支持官方的日期和节点控件格式化语法。
 - format：输出容器格式，默认 `auto`。
 - codec：视频编码方式，默认 `h264`。选择 H.264 时显示码率控件。

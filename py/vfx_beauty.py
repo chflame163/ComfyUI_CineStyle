@@ -24,11 +24,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 
 
-# 1920x1080 is a typical source size for this node.  The expensive blur passes
-# run at this long-side limit; the final grain and colour pass run at source
-# resolution so the input detail is not permanently softened.  Keeping this
-# below 1024 is important for video batches: all expensive kernels scale with
-# proxy pixel count, not with the final output size.
+
 _PROXY_LONG_SIDE = 640
 _COLOUR_LONG_SIDE = 512
 _COLOUR_SAMPLE_FRAMES = 16
@@ -122,7 +118,7 @@ def _source_fps_from_prompt(prompt: Any, node_id: Any) -> float:
 
 
 def _loader_id_from_prompt(prompt: Any, node_id: Any) -> str:
-    """Find CS Load Video when VFX receives only the loader's IMAGE output."""
+
     if not isinstance(prompt, dict):
         return ""
     node = prompt.get(str(node_id)) or prompt.get(node_id)
@@ -157,7 +153,7 @@ def _console_info(node_id: Any, stage: str, detail: str = "") -> None:
 
 
 class _BeautyProgress:
-    """Console stage logger for the bounded Beauty batch pipeline."""
+
 
     def __init__(self, node_id: Any, frame_total: int):
         self.node_id = node_id
@@ -173,7 +169,7 @@ class _BeautyProgress:
 
 
 def _parse_hex_colour(value: Any, name: str = "colour") -> torch.Tensor | None:
-    """Parse ``auto`` or a strict six-digit ``#RRGGBB`` colour."""
+
     if not isinstance(value, str):
         raise ValueError(f"{name} must be 'auto' or a Hex colour in the form #RRGGBB.")
     text = value.strip()
@@ -189,7 +185,7 @@ def _parse_hex_colour(value: Any, name: str = "colour") -> torch.Tensor | None:
 
 
 def _parse_vec3(value: Any, default: tuple[float, float, float], name: str) -> torch.Tensor:
-    """Parse a vec3 widget value from a string, sequence, or scalar."""
+
     if value is None:
         values = default
     elif isinstance(value, torch.Tensor):
@@ -278,7 +274,7 @@ def _load_state_dict(path: Path) -> dict[str, torch.Tensor]:
 
 @torch.no_grad()
 def _bisenet_skin_mask(images: torch.Tensor, progress: _BeautyProgress | None = None) -> torch.Tensor:
-    """Generate a temporary full-frame skin mask at the colour proxy size."""
+
     model = None
     try:
         if progress is not None:
@@ -314,7 +310,7 @@ def _as_rgb(images: torch.Tensor) -> torch.Tensor:
 
 
 def _preferred_device(fallback: torch.device) -> torch.device:
-    """Use ComfyUI's active compute device when IMAGE arrived on the CPU."""
+
     try:
         import comfy.model_management as model_management
 
@@ -338,12 +334,7 @@ def _resize_bhwc(images: torch.Tensor, height: int, width: int, mode: str = "bil
 
 
 def _axis_kernel(image: torch.Tensor, kernel: torch.Tensor, axis: str, edge: str) -> torch.Tensor:
-    """Apply a separable kernel with one grouped CUDA convolution.
 
-    The previous implementation launched one tensor-indexing operation for
-    every radius offset.  Grouped convolution keeps the same batched BHWC
-    contract while letting cuDNN process all channels and frames together.
-    """
     if kernel.numel() <= 1:
         return image
     channels = int(image.shape[-1])
@@ -359,7 +350,7 @@ def _axis_kernel(image: torch.Tensor, kernel: torch.Tensor, axis: str, edge: str
 
 
 def _pad_axis_bchw(image: torch.Tensor, radius: int, axis: str, edge: str) -> torch.Tensor:
-    """Pad one BCHW axis, including circular padding larger than the image."""
+
     if radius <= 0:
         return image
     if axis == "x":
@@ -420,13 +411,13 @@ def _prepare_matte(matte: torch.Tensor | None, batch: int, height: int, width: i
 
 
 def _triangular_blur(image: torch.Tensor, radius: float, axis: str, edge: str) -> torch.Tensor:
-    """Match the XML shader's linear triangular blur kernel."""
+
     kernel = _triangular_kernel(radius, image.device, image.dtype)
     return _axis_kernel(image, kernel, axis, edge)
 
 
 def _edge_preserving_blur(image: torch.Tensor, sigma: float, threshold: float, axis: str) -> torch.Tensor:
-    """Port the adaptive Gaussian blur used by CROK Beauty passes 6/7/16/17."""
+
     sigma = max(0.0, float(sigma))
     if sigma <= _EPS:
         return image
@@ -434,10 +425,7 @@ def _edge_preserving_blur(image: torch.Tensor, sigma: float, threshold: float, a
     if support <= 0:
         return image
 
-    # A 601-tap window at the XML maximum would be needlessly large for a
-    # video batch.  Use a Gaussian convolution plus a local edge gate in that
-    # regime; this keeps the control responsive without allocating a huge
-    # [B,H,W,K,C] temporary tensor.
+
     batch, height, width, channels = map(int, image.shape)
     chunk_size = 2 if image.device.type == "cuda" else 1
     estimated_elements = min(batch, chunk_size) * height * width * (2 * support + 1) * channels
@@ -447,17 +435,14 @@ def _edge_preserving_blur(image: torch.Tensor, sigma: float, threshold: float, a
         gate = torch.exp(-distance * max(0.0, float(threshold)))
         return image + (blurred - image) * gate
 
-    # The shader forces neighbour alpha to 1 and computes colour distance in
-    # RGB, so keeping this helper RGB-only reproduces the effective operation.
+
     pi = math.pi
     gaussian0 = 1.0 / (math.sqrt(2.0 * pi) * sigma)
     gaussian_step = math.exp(-0.5 / (sigma * sigma))
     rgb_hyp = math.sqrt(3.0)
     threshold = max(0.0, float(threshold))
 
-    # Build all integer neighbours in one unfold operation instead of issuing
-    # two index_select calls for every radius value.  The batch is chunked to
-    # keep the temporary [B,H,W,2*support,C] tensor bounded for video batches.
+
     x = image.movedim(-1, 1)
     batch = int(x.shape[0])
     chunk_size = 2 if x.device.type == "cuda" else 1
@@ -482,9 +467,7 @@ def _edge_preserving_blur(image: torch.Tensor, sigma: float, threshold: float, a
         coefficients = coefficients.view(1, 1, 1, -1, 1)
 
         distance = (neighbours - center.unsqueeze(-2)).square().sum(dim=-1, keepdim=True).sqrt() / rgb_hyp
-        # The source calls pow() before clamp().  Clamping the base first
-        # avoids NaNs for non-integer threshold values while preserving the
-        # intended 0.001 minimum contribution.
+
         factor = (1.0 - distance).clamp(0.0, 1.0).pow(threshold).clamp(0.001, 1.0)
         weighted = coefficients * factor
         result = center * float(gaussian0) + (neighbours * weighted).sum(dim=-2)
@@ -551,7 +534,7 @@ def _estimate_colour_from_mask(
     alpha: torch.Tensor,
     fallback: torch.Tensor,
 ) -> torch.Tensor:
-    """Estimate one clip-stable RGB colour from masked, valid skin pixels."""
+
     batch = int(image.shape[0])
     sample_count = min(batch, _COLOUR_SAMPLE_FRAMES)
     indices = torch.linspace(0, batch - 1, sample_count).round().to(torch.int64).unique().to(image.device)
@@ -570,9 +553,7 @@ def _estimate_colour_from_mask(
             & (frame[..., 2] < 0.90)
             & (frame[..., 1] > 0.05)
         )
-        # Histogram/quantile support is inconsistent on older MPS builds and
-        # some non-CUDA backends.  The candidate set is small enough that
-        # doing these statistics on CPU does not affect the GPU-heavy path.
+
         pixels = frame[valid].detach().to(device="cpu", dtype=torch.float32)
         if pixels.shape[0] < 32:
             continue
@@ -589,8 +570,7 @@ def _estimate_colour_from_mask(
     hues = torch.stack([item[0] for item in frame_stats])
     saturations = torch.stack([item[1] for item in frame_stats])
     values = torch.stack([item[2] for item in frame_stats])
-    # Unwrap hue around the first sample, smooth it across sampled frames, and
-    # take a median so one lighting change cannot move the whole clip's key.
+
     unwrapped = [hues[0]]
     for current in hues[1:]:
         delta = torch.remainder(current - unwrapped[-1] + 0.5, 1.0) - 0.5
@@ -612,7 +592,7 @@ def _estimate_clip_colour(
     alpha: torch.Tensor,
     progress: _BeautyProgress | None = None,
 ) -> torch.Tensor:
-    """Estimate a clip-stable key colour using an optional mask or BiSeNet."""
+
     _, height, width, _ = source.shape
     colour_height, colour_width = height, width
     if max(height, width) > _COLOUR_LONG_SIDE:
@@ -660,8 +640,7 @@ def _overlay(source: torch.Tensor, destination: torch.Tensor) -> torch.Tensor:
 
 
 def _rgb_to_yuv(rgb: torch.Tensor) -> torch.Tensor:
-    # Rec.601-style full-range YUV.  Matchbox provides this as an API call;
-    # keeping it local makes the Torch port deterministic and self-contained.
+
     r, g, b = rgb.unbind(dim=-1)
     y = 0.29900 * r + 0.58700 * g + 0.11400 * b
     u = -0.14713 * r - 0.28886 * g + 0.43600 * b
@@ -722,21 +701,20 @@ def _compute_proxy(
     blur_s: float,
     o_amount: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Evaluate passes 1-17 and return cleaned skin, matte, and degrained RGB."""
-    # Pass 3: chroma key or external matte.
+
     matte = _skin_matte(original, colour, weights, external_matte)
 
-    # Passes 4-5: triangular matte softening, clamp-to-edge sampling.
+
     matte_image = matte.unsqueeze(-1)
     matte_image = _triangular_blur(matte_image, blur_m, "y", "clamp")
     matte_image = _triangular_blur(matte_image, blur_m, "x", "clamp")
     matte = matte_image[..., 0].clamp(0.0, 1.0)
 
-    # Passes 6-7: edge-preserving skin blur.
+
     dollface = _edge_preserving_blur(original, sigma, threshold, "x")
     dollface = _edge_preserving_blur(dollface, sigma, threshold, "y")
 
-    # Pass 8: remove dark spots and highlights.
+
     c = _lighten(dollface, original)
     c = original + (c - original) * float(r_spots_blend)
     c = matte.unsqueeze(-1) * c + (1.0 - matte.unsqueeze(-1)) * original
@@ -751,25 +729,25 @@ def _compute_proxy(
 
     cleaned_rgba = torch.cat((cleaned, matte.unsqueeze(-1)), dim=-1)
 
-    # Passes 9-11: high-pass extraction and triangular softening.
+
     highpass = _highpass(original, cleaned_rgba, strength)
     highpass = _triangular_blur(highpass, blur_h, "y", "repeat")
     highpass = _triangular_blur(highpass, blur_h, "x", "repeat")
 
-    # Pass 12: overlay softened high-frequency detail.
+
     beauty = _overlay(cleaned, highpass[..., :3])
     beauty_rgba = torch.cat((beauty, matte.unsqueeze(-1)), dim=-1)
 
-    # Passes 13-14: shine blur.
+
     shine = _triangular_blur(beauty_rgba, blur_s, "y", "repeat")
     shine = _triangular_blur(shine, blur_s, "x", "repeat")
 
-    # Pass 15: restore shine.
+
     shine_comp = _overlay(beauty, shine[..., :3])
     shine_comp = beauty + (shine_comp - beauty) * (float(o_amount) * matte.unsqueeze(-1))
     cleaned_skin = torch.cat((shine_comp, matte.unsqueeze(-1)), dim=-1)
 
-    # Passes 16-17: fixed degrain blur.
+
     degrain = _edge_preserving_blur(original, 2.0, 100.0, "x")
     degrain = _edge_preserving_blur(degrain, 2.0, 100.0, "y")
     return cleaned_skin, matte, degrain
@@ -806,9 +784,7 @@ def _run_beauty(
     external = _prepare_matte(matte_input, batch, height, width, device) if matte_input is not None else None
 
     if colour is None:
-        # Colour estimation is deliberately independent from the beauty proxy.
-        # It uses a 512-long-side clip sample and is therefore stable across
-        # all frames without allocating a full-resolution histogram.
+
         if progress is not None:
             progress.info("estimate colour", "auto mode; using mask" if external is not None else "auto mode; running BiSeNet")
         colour = _estimate_clip_colour(source, external, alpha, progress=progress)
@@ -828,8 +804,7 @@ def _run_beauty(
     proxy_external = None if external is None else _resize_bhwc(external.unsqueeze(-1), proxy_height, proxy_width)[..., 0]
     scale_x = proxy_width / float(width)
     scale_y = proxy_height / float(height)
-    # Shader radii are pixel distances.  Scale them with the proxy so their
-    # physical size remains consistent after the proxy result is upsampled.
+
     proxy_blur_m = float(blur_m) * (scale_x + scale_y) * 0.5
     proxy_sigma = float(sigma) * (scale_x + scale_y) * 0.5
     proxy_blur_h = float(blur_h) * (scale_x + scale_y) * 0.5
@@ -862,13 +837,12 @@ def _run_beauty(
     degrain = _resize_bhwc(degrain_proxy, height, width)
     matte = cleaned[..., 3:4].clamp(0.0, 1.0)
 
-    # Pass 18: regrain at source resolution.  This keeps high-frequency input
-    # detail even when the beauty and blur stages used a proxy resolution.
+
     grain = source - degrain
     result = grain + cleaned[..., :3]
     result = matte * result + (1.0 - matte) * cleaned[..., :3]
 
-    # Pass 19: Matchbox's YUV-plane hue/saturation transform, masked to skin.
+
     shifted = _hueshift(result, hue_amount, sat_amount)
     result = matte * shifted + (1.0 - matte) * result
     result = torch.nan_to_num(result, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
@@ -876,9 +850,7 @@ def _run_beauty(
     if progress is not None:
         progress.info("final colour pass", "regrain and YUV hue/saturation adjustment complete")
         progress.info("complete", f"frames={batch}")
-    # The caller may immediately release the GPU batch after this function
-    # returns.  Use a blocking transfer for CPU outputs so the host tensor is
-    # fully materialized before it can be copied, reused, or handed downstream.
+
     return output.to(device=source_device, non_blocking=False)
 
 
@@ -892,7 +864,7 @@ def _slice_matte_input(
     indices: torch.Tensor,
     total_batch: int,
 ) -> torch.Tensor | None:
-    """Select only the frames needed by a batch without moving the full mask."""
+
     if matte is None:
         return None
     if not isinstance(matte, torch.Tensor):
@@ -911,7 +883,7 @@ def _estimate_video_colour(
     matte_input: torch.Tensor | None,
     progress: _BeautyProgress | None = None,
 ) -> torch.Tensor:
-    """Estimate one clip colour while transferring only sampled frames to the compute device."""
+
     if not isinstance(image, torch.Tensor) or image.ndim != 4 or image.shape[-1] < 3:
         raise ValueError("front must be an IMAGE tensor with shape [batch, height, width, 3 or 4].")
     batch, height, width = map(int, image.shape[:3])
@@ -955,7 +927,7 @@ def _estimate_video_colour(
 
 
 def _beauty_batch_size(image: torch.Tensor, total_batch: int, progress: _BeautyProgress | None = None) -> int:
-    """Choose a conservative frame batch from current free GPU memory."""
+
     if total_batch <= 1:
         return 1
     source_device = image.device if isinstance(image, torch.Tensor) else torch.device("cpu")
@@ -969,9 +941,7 @@ def _beauty_batch_size(image: torch.Tensor, total_batch: int, progress: _BeautyP
     else:
         proxy_height, proxy_width = height, width
 
-    # Account for the source frame, resized proxy, convolution workspaces and
-    # several same-size intermediates.  This is intentionally conservative;
-    # the OOM retry below adapts to drivers with unusually large workspaces.
+
     source_bytes = height * width * 3 * 4
     proxy_bytes = proxy_height * proxy_width * 4 * 4
     estimated_per_frame = max(source_bytes * 3, proxy_bytes * 24)
@@ -1015,7 +985,7 @@ def _run_beauty_batched(
     hue_amount: float,
     progress: _BeautyProgress | None = None,
 ) -> torch.Tensor:
-    """Run the unchanged Beauty pipeline in bounded frame batches."""
+
     total_batch = int(image.shape[0])
     batch_size = _beauty_batch_size(image, total_batch, progress=progress)
     output_store = torch.empty(
@@ -1061,9 +1031,7 @@ def _run_beauty_batched(
             if progress is not None:
                 progress.info("reduce batch", f"CUDA OOM; retrying with batch={batch_size}")
             continue
-        # Keep this host-side merge synchronous.  A non-blocking copy from a
-        # temporary pinned tensor can outlive ``output_chunk`` and overwrite a
-        # later frame batch, producing reordered or black frames.
+
         output_cpu = output_chunk.to(device="cpu", dtype=torch.float32, non_blocking=False).contiguous()
         output_store[start:end].copy_(output_cpu, non_blocking=False)
         del output_cpu
@@ -1080,7 +1048,7 @@ def _cache_vfx_input(
     image: torch.Tensor,
     mask: torch.Tensor | None,
 ) -> None:
-    """Make the last node input available to the browser preview dialog."""
+
     key = str(node_id or "").strip()
     if not key or not isinstance(image, torch.Tensor) or image.ndim != 4:
         return
@@ -1113,8 +1081,7 @@ def _cache_vfx_input(
                     if isinstance(value, (list, tuple)) and len(value) >= 2 and str(value[0]) not in visited:
                         visited.add(str(value[0]))
                         pending.append(prompt.get(str(value[0])) or prompt.get(value[0]))
-        # CS Load Video owns the shared preview MP4. Keep a frame-only local
-        # entry for optional colour estimation, but avoid encoding it again.
+
         cache_fingerprint = ""
         if cached_mask is not None:
             cache_fingerprint = f"mask:{_preview_cache_store().fingerprint_value(cached_mask)}"
@@ -1150,7 +1117,7 @@ def _preview_cache_entry(node_id: str) -> dict[str, Any] | None:
 
 
 def _preview_mask_frame_index(node_id: str, frame_index: int, source_token: str) -> int:
-    """Map a proxy frame to the corresponding original mask frame."""
+
     try:
         wait_cache_module = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
         source_entry = (
@@ -1367,7 +1334,7 @@ async def _vfx_beauty_preview_route(request: web.Request) -> web.Response:
 
 
 class CSVFXBeauty(io.ComfyNode):
-    """Torch port of the 19-pass Matchbox ``crok_beauty`` shader."""
+
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -1376,8 +1343,8 @@ class CSVFXBeauty(io.ComfyNode):
             display_name="CS VFX Beauty",
             category="😺dzNodes/CineStyle",
             essentials_category="Image Effects",
-            search_aliases=["crok beauty", "skin beauty", "dollface", "matchbox beauty"],
-            description="Torch port of the Matchbox CROK Beauty skin cleanup pipeline.",
+            search_aliases=["skin beauty", "dollface"],
+            description="Torch port of the Beauty skin cleanup pipeline.",
             inputs=[
                 io.Image.Input("image", tooltip="Original foreground image."),
                 io.Mask.Input("mask", optional=True, tooltip="Optional skin mask. When connected, it is used automatically for the beauty region and colour estimation."),

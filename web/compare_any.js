@@ -54,8 +54,11 @@ function applyComparePosition(state) {
     state?.compareViewport?.style.setProperty("--compare-position", `${Number(state.comparePosition) || 0}%`);
 }
 
-function mediaUrl(source) {
-    const value = String(source?.video_url || "");
+function mediaUrl(source, frame = null) {
+    let value = String(source?.video_url || source?.image_url || "");
+    if (!source?.video_url && Number.isFinite(Number(frame))) {
+        value += `${value.includes("?") ? "&" : "?"}frame=${Math.max(0, Math.round(Number(frame)))}`;
+    }
     return value ? api.apiURL(`${value}${value.includes("?") ? "&" : "?"}t=${Date.now()}`) : "";
 }
 
@@ -144,10 +147,12 @@ function addStyles() {
 }
 
 function containedRect(source, width, height, zoom = 1, panX = 0, panY = 0) {
-    if (!source || !source.videoWidth || !source.videoHeight) return;
-    const scale = Math.min(width / source.videoWidth, height / source.videoHeight);
-    const drawWidth = source.videoWidth * scale * zoom;
-    const drawHeight = source.videoHeight * scale * zoom;
+    const sourceWidth = Number(source?.videoWidth || source?.naturalWidth || 0);
+    const sourceHeight = Number(source?.videoHeight || source?.naturalHeight || 0);
+    if (!source || !sourceWidth || !sourceHeight) return;
+    const scale = Math.min(width / sourceWidth, height / sourceHeight);
+    const drawWidth = sourceWidth * scale * zoom;
+    const drawHeight = sourceHeight * scale * zoom;
     return {
         x: (width - drawWidth) * 0.5 + panX,
         y: (height - drawHeight) * 0.5 + panY,
@@ -168,8 +173,10 @@ function clampComparePan(state, width, height) {
         state.comparePanY = 0;
         return;
     }
-    const rectA = containedRect(state.videoA, width, height, state.compareZoom);
-    const rectB = containedRect(state.videoB, width, height, state.compareZoom);
+    const sourceA = state.kind === "VIDEO" ? state.videoA : state.imageA;
+    const sourceB = state.kind === "VIDEO" ? state.videoB : state.imageB;
+    const rectA = containedRect(sourceA, width, height, state.compareZoom);
+    const rectB = containedRect(sourceB, width, height, state.compareZoom);
     const maxWidth = Math.max(rectA?.width || 0, rectB?.width || 0);
     const maxHeight = Math.max(rectA?.height || 0, rectB?.height || 0);
     const maxX = Math.max(0, (maxWidth - width) * 0.5);
@@ -190,6 +197,8 @@ function setupCanvas(canvas) {
     }
     const context = canvas.getContext("2d");
     if (!context) return null;
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     return { context, width, height };
 }
@@ -199,6 +208,8 @@ function drawMedia(state) {
     const canvasSource = setupCanvas(state.canvasA);
     const canvasCompare = setupCanvas(state.canvasCompare);
     if (!canvasSource || !canvasCompare) return;
+    const sourceA = state.kind === "VIDEO" ? state.videoA : state.imageA;
+    const sourceB = state.kind === "VIDEO" ? state.videoB : state.imageB;
     const source = canvasSource;
     source.context.save();
     source.context.beginPath();
@@ -206,7 +217,7 @@ function drawMedia(state) {
     source.context.clip();
     source.context.fillStyle = "#08090b";
     source.context.fillRect(0, 0, source.width, source.height);
-    drawContained(source.context, state.videoA, source.width, source.height, state.compareZoom, state.comparePanX, state.comparePanY);
+    drawContained(source.context, sourceA, source.width, source.height, state.compareZoom, state.comparePanX, state.comparePanY);
     source.context.restore();
     const { context, width, height } = canvasCompare;
     clampComparePan(state, width, height);
@@ -216,7 +227,7 @@ function drawMedia(state) {
     context.clip();
     context.fillStyle = "#08090b";
     context.fillRect(0, 0, width, height);
-    drawContained(context, state.videoB, width, height, state.compareZoom, state.comparePanX, state.comparePanY);
+    drawContained(context, sourceB, width, height, state.compareZoom, state.comparePanX, state.comparePanY);
     const requestedPosition = Number(state.comparePosition);
     const position = clamp(Number.isFinite(requestedPosition) ? requestedPosition : 0, 0, 100) / 100;
     context.save();
@@ -225,7 +236,7 @@ function drawMedia(state) {
     context.clip();
     context.fillStyle = "#08090b";
     context.fillRect(0, 0, width, height);
-    drawContained(context, state.videoA, width, height, state.compareZoom, state.comparePanX, state.comparePanY);
+    drawContained(context, sourceA, width, height, state.compareZoom, state.comparePanX, state.comparePanY);
     context.restore();
     context.restore();
 }
@@ -794,8 +805,8 @@ function bindComparePanZoom(state) {
 function animationTick(state) {
     if (!state || state.disposed) return;
     if (state.mode === "media") {
-        const master = !state.videoA.ended && state.videoA.readyState >= 2 ? state.videoA : state.videoB;
-        if (state.playing && master.readyState >= 2) {
+        if (state.playing && state.kind === "VIDEO") {
+            const master = !state.videoA.ended && state.videoA.readyState >= 2 ? state.videoA : state.videoB;
             const maxFrame = Math.max(0, state.frames - 1);
             const maxSeconds = maxFrame / Math.max(0.001, state.fps);
             const frame = clamp(Math.round(master.currentTime * state.fps), 0, maxFrame);
@@ -810,7 +821,7 @@ function animationTick(state) {
             // cannot leave one side on a different last frame.
             if (frame >= maxFrame && (master.ended || master.currentTime >= maxSeconds)) stopPlayback(state);
         }
-        drawMedia(state);
+        if (state.kind === "VIDEO") drawMedia(state);
     }
     state.animationFrame = requestAnimationFrame(() => animationTick(state));
 }
@@ -837,11 +848,25 @@ function seekFrame(state, frame, pause = true) {
         state.playButton.classList.remove("playing");
         state.playButton.textContent = ">";
     }
-    const seconds = next / Math.max(0.001, state.fps);
-    state.videoA.currentTime = seconds;
-    state.videoB.currentTime = seconds;
+    if (state.kind === "VIDEO") {
+        const seconds = next / Math.max(0.001, state.fps);
+        state.videoA.currentTime = seconds;
+        state.videoB.currentTime = seconds;
+    } else if (state.kind === "IMAGE" || state.kind === "MASK") {
+        loadImageFrames(state, next);
+    }
     updateFrameControls(state);
     drawMedia(state);
+}
+
+function loadImageFrames(state, frame = state.frame) {
+    if (!state || (state.kind !== "IMAGE" && state.kind !== "MASK")) return;
+    const urlA = mediaUrl(state.imageSourceA, frame);
+    const urlB = mediaUrl(state.imageSourceB, frame);
+    state.imageA.dataset.frame = String(Math.max(0, Math.round(Number(frame) || 0)));
+    state.imageB.dataset.frame = state.imageA.dataset.frame;
+    if (state.imageA.src !== urlA) state.imageA.src = urlA;
+    if (state.imageB.src !== urlB) state.imageB.src = urlB;
 }
 
 function stopPlayback(state) {
@@ -913,17 +938,33 @@ function setMediaSources(state, payload) {
     state.fps = Math.max(0.001, Number(timeline.fps || 24));
     state.frame = clamp(state.frame, 0, state.frames - 1);
     state.timeline.max = String(Math.max(0, state.frames - 1));
-    const urlA = mediaUrl(sources.a);
-    const urlB = mediaUrl(sources.b);
-    state.videoA.onloadedmetadata = () => seekFrame(state, state.frame, false);
-    state.videoB.onloadedmetadata = () => seekFrame(state, state.frame, false);
+    state.imageSourceA = sources.a || null;
+    state.imageSourceB = sources.b || null;
+    const isVideo = state.kind === "VIDEO";
+    state.videoA.onloadedmetadata = isVideo ? () => seekFrame(state, state.frame, false) : null;
+    state.videoB.onloadedmetadata = isVideo ? () => seekFrame(state, state.frame, false) : null;
     const onVideoEnded = () => {
         if (state.playing && state.videoA.ended && state.videoB.ended) stopPlayback(state);
     };
-    state.videoA.onended = onVideoEnded;
-    state.videoB.onended = onVideoEnded;
-    if (state.videoA.src !== urlA) { state.videoA.src = urlA; state.videoA.load(); }
-    if (state.videoB.src !== urlB) { state.videoB.src = urlB; state.videoB.load(); }
+    state.videoA.onended = isVideo ? onVideoEnded : null;
+    state.videoB.onended = isVideo ? onVideoEnded : null;
+    state.imageA.onload = () => { if (state.mode === "media" && state.imageA.dataset.frame === String(state.frame)) drawMedia(state); };
+    state.imageB.onload = () => { if (state.mode === "media" && state.imageB.dataset.frame === String(state.frame)) drawMedia(state); };
+    state.imageA.onerror = () => { if (state.mode === "media") state.status.textContent = "Unable to load source A image"; };
+    state.imageB.onerror = () => { if (state.mode === "media") state.status.textContent = "Unable to load source B image"; };
+    if (isVideo) {
+        state.imageA.removeAttribute("src");
+        state.imageB.removeAttribute("src");
+        const urlA = mediaUrl(sources.a);
+        const urlB = mediaUrl(sources.b);
+        if (state.videoA.src !== urlA) { state.videoA.src = urlA; state.videoA.load(); }
+        if (state.videoB.src !== urlB) { state.videoB.src = urlB; state.videoB.load(); }
+    } else {
+        stopPlayback(state);
+        state.videoA.removeAttribute("src");
+        state.videoB.removeAttribute("src");
+        loadImageFrames(state, state.frame);
+    }
     state.status.textContent = `${state.kind} · ${state.frames} frames · ${state.fps.toFixed(3)} fps`;
     state.playButton.disabled = false;
     state.prevButton.disabled = false;
@@ -1102,6 +1143,12 @@ function addViewport(node) {
     for (const event of ["pointerdown", "click", "dblclick", "wheel"]) shell.addEventListener(event, (value) => value.stopPropagation(), { passive: false });
     const videoA = document.createElement("video");
     const videoB = document.createElement("video");
+    const imageA = new Image();
+    const imageB = new Image();
+    for (const image of [imageA, imageB]) {
+        image.decoding = "async";
+        image.setAttribute("aria-hidden", "true");
+    }
     for (const video of [videoA, videoB]) {
         video.preload = "auto";
         video.muted = true;
@@ -1144,6 +1191,10 @@ function addViewport(node) {
         nextButton: shell.querySelector(".cs-compare-any-next"),
         videoA,
         videoB,
+        imageA,
+        imageB,
+        imageSourceA: null,
+        imageSourceB: null,
         mode: "none",
         kind: "",
         viewportAspect: UNKNOWN_VIEWPORT_ASPECT,
@@ -1244,7 +1295,7 @@ function addViewport(node) {
         drawMedia(state);
     });
     resizeObserver.observe(state.grid);
-    state.dispose = () => { state.disposed = true; stopCacheProgress(state); cancelAnimationFrame(state.animationFrame); cancelAnimationFrame(state.compareRefreshFrame); cancelAnimationFrame(state.outerResizeFrame); cancelAnimationFrame(state.outputFitFrame); cancelAnimationFrame(state.mediaFitRetryFrame); resizeObserver.disconnect(); videoA.pause(); videoB.pause(); videoA.removeAttribute("src"); videoB.removeAttribute("src"); };
+    state.dispose = () => { state.disposed = true; stopCacheProgress(state); cancelAnimationFrame(state.animationFrame); cancelAnimationFrame(state.compareRefreshFrame); cancelAnimationFrame(state.outerResizeFrame); cancelAnimationFrame(state.outputFitFrame); cancelAnimationFrame(state.mediaFitRetryFrame); resizeObserver.disconnect(); videoA.pause(); videoB.pause(); videoA.removeAttribute("src"); videoB.removeAttribute("src"); imageA.onload = null; imageB.onload = null; imageA.removeAttribute("src"); imageB.removeAttribute("src"); };
     node[STATE] = state;
     node[WIDGET] = widget;
     scheduleOutputFit(state);

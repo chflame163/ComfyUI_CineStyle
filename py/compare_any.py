@@ -27,7 +27,10 @@ from comfy_api.latest import ComfyExtension, Input, InputImpl, io
 
 _CATEGORY = "😺dzNodes/CineStyle"
 _CACHE_NAMESPACE = "compare_any"
-_MAX_PREVIEW_PIXELS = 1_000_000
+_VIDEO_MAX_PREVIEW_PIXELS = 4_000_000
+_VIDEO_MIN_PREVIEW_PIXELS = 1_000_000
+_VIDEO_FRAME_PIXEL_BUDGET = 96_000_000
+_VIDEO_ENCODING_OPTIONS = {"preset": "medium", "crf": "16"}
 _MAX_PREVIEW_FPS = 25.0
 _MAX_TEXT_CHARS = 200_000
 _MAX_JSON_DEPTH = 32
@@ -139,25 +142,33 @@ def _stream_rotation(stream: av.VideoStream) -> int:
         return 0
 
 
-def _preview_dimensions(width: int, height: int) -> tuple[int, int]:
+def _preview_dimensions(width: int, height: int, max_pixels: int | None = _VIDEO_MAX_PREVIEW_PIXELS) -> tuple[int, int]:
     width = max(1, int(width))
     height = max(1, int(height))
-    scale = min(1.0, math.sqrt(_MAX_PREVIEW_PIXELS / float(width * height)))
+    if max_pixels is None:
+        return width, height
+    scale = min(1.0, math.sqrt(max(1, int(max_pixels)) / float(width * height)))
     result_width = max(2, int(math.floor(width * scale)))
     result_height = max(2, int(math.floor(height * scale)))
     return result_width, result_height
 
 
-def _resize_rgb_array(array: np.ndarray) -> np.ndarray:
+def _adaptive_video_pixels(frame_count: int) -> int:
+    frame_count = max(1, int(frame_count or 1))
+    budget_limit = int(_VIDEO_FRAME_PIXEL_BUDGET // frame_count)
+    return max(_VIDEO_MIN_PREVIEW_PIXELS, min(_VIDEO_MAX_PREVIEW_PIXELS, budget_limit))
+
+
+def _resize_rgb_array(array: np.ndarray, max_pixels: int | None = _VIDEO_MAX_PREVIEW_PIXELS) -> np.ndarray:
     height, width = int(array.shape[0]), int(array.shape[1])
-    target_width, target_height = _preview_dimensions(width, height)
+    target_width, target_height = _preview_dimensions(width, height, max_pixels)
     if (target_width, target_height) == (width, height):
         return np.ascontiguousarray(array, dtype=np.uint8)
     image = Image.fromarray(np.asarray(array, dtype=np.uint8), mode="RGB")
-    return np.ascontiguousarray(np.asarray(image.resize((target_width, target_height), Image.Resampling.BILINEAR), dtype=np.uint8))
+    return np.ascontiguousarray(np.asarray(image.resize((target_width, target_height), Image.Resampling.LANCZOS), dtype=np.uint8))
 
 
-def _to_uint8(array: Any) -> np.ndarray:
+def _to_uint8(array: Any, max_pixels: int | None = _VIDEO_MAX_PREVIEW_PIXELS) -> np.ndarray:
     """Convert ComfyUI tensor-like image data to contiguous RGB uint8 frames."""
     if isinstance(array, torch.Tensor):
         value = array.detach()
@@ -170,13 +181,14 @@ def _to_uint8(array: Any) -> np.ndarray:
             raise ValueError("IMAGE data must have one, three, or four channels.")
         else:
             value = value[..., :3]
-        target_width, target_height = _preview_dimensions(int(value.shape[2]), int(value.shape[1]))
+        target_width, target_height = _preview_dimensions(int(value.shape[2]), int(value.shape[1]), max_pixels)
         if (target_width, target_height) != (int(value.shape[2]), int(value.shape[1])):
             value = F.interpolate(
                 value.to(dtype=torch.float32).movedim(-1, 1),
                 size=(target_height, target_width),
                 mode="bilinear",
                 align_corners=False,
+                antialias=True,
             ).movedim(1, -1)
         value = value.to(device="cpu").numpy()
     else:
@@ -197,19 +209,19 @@ def _to_uint8(array: Any) -> np.ndarray:
         value = np.clip(value, 0, 255)
     result = np.ascontiguousarray(np.rint(value), dtype=np.uint8)
     if not isinstance(array, torch.Tensor):
-        target_width, target_height = _preview_dimensions(int(result.shape[2]), int(result.shape[1]))
+        target_width, target_height = _preview_dimensions(int(result.shape[2]), int(result.shape[1]), max_pixels)
         if (target_width, target_height) != (int(result.shape[2]), int(result.shape[1])):
-            result = np.stack([_resize_rgb_array(frame) for frame in result], axis=0)
+            result = np.stack([_resize_rgb_array(frame, max_pixels) for frame in result], axis=0)
     return result
 
 
-def _mask_to_uint8(value: torch.Tensor) -> np.ndarray:
+def _mask_to_uint8(value: torch.Tensor, max_pixels: int | None = _VIDEO_MAX_PREVIEW_PIXELS) -> np.ndarray:
     if value.ndim != 3:
         raise ValueError("MASK data must have shape [batch, height, width].")
     if value.shape[0] == 0 or value.shape[1] <= 0 or value.shape[2] <= 0:
         raise ValueError("MASK data contains no frames.")
     tensor = value.detach().to(dtype=torch.float32)
-    target_width, target_height = _preview_dimensions(int(tensor.shape[2]), int(tensor.shape[1]))
+    target_width, target_height = _preview_dimensions(int(tensor.shape[2]), int(tensor.shape[1]), max_pixels)
     if (target_width, target_height) != (int(tensor.shape[2]), int(tensor.shape[1])):
         tensor = F.interpolate(tensor.unsqueeze(1), size=(target_height, target_width), mode="nearest").squeeze(1)
     array = tensor.to(device="cpu").numpy()
@@ -301,7 +313,8 @@ def _decode_video(value: Input.Video) -> _Media:
         images = components.images
         if not isinstance(images, torch.Tensor):
             raise ValueError("VIDEO components contain no image tensor.")
-        frames = _to_uint8(images)
+        video_pixels = _adaptive_video_pixels(int(images.shape[0]))
+        frames = _to_uint8(images, max_pixels=video_pixels)
         return _Media("VIDEO", frames, _safe_fps(components.frame_rate), _normalise_audio(components.audio))
 
     source = value.get_stream_source()
@@ -314,6 +327,10 @@ def _decode_video(value: Input.Video) -> _Media:
             raise ValueError("VIDEO contains no decodable video stream.")
         stream = container.streams.video[0]
         fps = _safe_fps(stream.average_rate)
+        estimated_frames = int(math.ceil(requested_duration * fps)) if requested_duration else int(getattr(stream, "frames", 0) or 0)
+        if estimated_frames <= 0:
+            estimated_frames = 120
+        video_pixels = _adaptive_video_pixels(estimated_frames)
         interval = 1.0 / fps
         end_time = start_time + requested_duration if requested_duration else None
         if start_time > 0:
@@ -338,7 +355,7 @@ def _decode_video(value: Input.Video) -> _Media:
                 rotation = _stream_rotation(stream)
             if rotation:
                 array = np.rot90(array, k=rotation, axes=(0, 1)).copy()
-            decoded_frames.append(_resize_rgb_array(array[..., :3]))
+            decoded_frames.append(_resize_rgb_array(array[..., :3], video_pixels))
     if not decoded_frames:
         raise ValueError("VIDEO contains no frames in the active trim window.")
     try:
@@ -551,9 +568,9 @@ def _media_value(value: Any, kind: str) -> _Media:
     if kind == "VIDEO":
         return _decode_video(value)
     if kind == "IMAGE":
-        return _Media(kind, _to_uint8(value), 1.0)
+        return _Media(kind, _to_uint8(value, max_pixels=None), 1.0)
     if kind == "MASK":
-        return _Media(kind, _mask_to_uint8(value), 1.0)
+        return _Media(kind, _mask_to_uint8(value, max_pixels=None), 1.0)
     raise ValueError(f"Unsupported media type: {kind}")
 
 
@@ -665,27 +682,60 @@ class CSCompareAny(io.ComfyNode):
                 store.clear_node(node_id)
                 info_a = {**_source_info(media_a), "timeline_frames": total_frames, "timeline_fps": fps}
                 info_b = {**_source_info(media_b), "timeline_frames": total_frames, "timeline_fps": fps}
+                encode_video = kind_a == "VIDEO"
+                cache_progress_a = _CacheProgress(
+                    node_id,
+                    55,
+                    20,
+                    total_frames,
+                    "Encoding source A preview",
+                    info_a,
+                ) if encode_video else None
+                cache_progress_b = _CacheProgress(
+                    node_id,
+                    76,
+                    20,
+                    total_frames,
+                    "Encoding source B preview",
+                    info_b,
+                ) if encode_video else None
                 entry_a = store.put(
                     node_id,
                     frames_a,
                     fps,
                     variant="a",
-                    encode_video=True,
+                    encode_video=encode_video,
+                    video_options=_VIDEO_ENCODING_OPTIONS if encode_video else None,
                     info=info_a,
                     audio=media_a.audio,
-                    progress=_CacheProgress(node_id, 55, 20, total_frames, "Encoding source A preview", info_a),
+                    progress=cache_progress_a,
                 )
-                _set_progress(node_id, 76, "Encoding source B preview", {"source_a": info_a, "source_b": info_b})
+                _set_progress(
+                    node_id,
+                    76,
+                    "Encoding source B preview" if encode_video else "Writing lossless image cache",
+                    {"source_a": info_a, "source_b": info_b},
+                )
                 entry_b = store.put(
                     node_id,
                     frames_b,
                     fps,
                     variant="b",
-                    encode_video=True,
+                    encode_video=encode_video,
+                    video_options=_VIDEO_ENCODING_OPTIONS if encode_video else None,
                     info=info_b,
                     audio=media_b.audio,
-                    progress=_CacheProgress(node_id, 76, 20, total_frames, "Encoding source B preview", info_b),
+                    progress=cache_progress_b,
                 )
+                def source_payload(info: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+                    token = str(entry.get("token") or "")
+                    payload_source = {**info, "token": token}
+                    if encode_video:
+                        payload_source["video_url"] = f"/cinestyle/compare-any-video?token={token}"
+                    else:
+                        payload_source["image_url"] = f"/cinestyle/compare-any-frame?token={token}"
+                    return payload_source
+
                 payload = {
                     "version": 1,
                     "mode": "media",
@@ -697,8 +747,8 @@ class CSCompareAny(io.ComfyNode):
                     ),
                     "timeline": {"frames": total_frames, "fps": fps, "duration": total_frames / fps},
                     "sources": {
-                        "a": {**info_a, "token": str(entry_a.get("token") or ""), "video_url": f"/cinestyle/compare-any-video?token={entry_a.get('token')}"},
-                        "b": {**info_b, "token": str(entry_b.get("token") or ""), "video_url": f"/cinestyle/compare-any-video?token={entry_b.get('token')}"},
+                        "a": source_payload(info_a, entry_a),
+                        "b": source_payload(info_b, entry_b),
                     },
                 }
                 _set_progress(node_id, 100, "Comparison cache ready", {"mode": "media", "media_kind": kind_a, "timeline_frames": total_frames}, status="ready")

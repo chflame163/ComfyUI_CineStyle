@@ -306,7 +306,15 @@ class PreviewCacheStore:
             return None
         return {"waveform": waveform.detach().to(device="cpu", dtype=torch.float32).contiguous(), "sample_rate": sample_rate}
 
-    def _encode_video(self, path: Path, frames: np.ndarray, fps: float, audio: Any = None, progress: Any = None) -> None:
+    def _encode_video(
+        self,
+        path: Path,
+        frames: np.ndarray,
+        fps: float,
+        audio: Any = None,
+        progress: Any = None,
+        video_options: dict[str, str] | None = None,
+    ) -> None:
         height, width = map(int, frames.shape[1:3])
         encoded_width = width + (width % 2)
         encoded_height = height + (height % 2)
@@ -314,7 +322,7 @@ class PreviewCacheStore:
         with av.open(str(path), mode="w", format="mp4") as container:
             try:
                 stream = container.add_stream("libx264", rate=rate)
-                stream.options = {"preset": "ultrafast", "crf": "20"}
+                stream.options = dict(video_options or {"preset": "ultrafast", "crf": "20"})
             except (av.error.FFmpegError, ValueError):
                 stream = container.add_stream("mpeg4", rate=rate)
             stream.width = encoded_width
@@ -370,6 +378,7 @@ class PreviewCacheStore:
         variant: str = "",
         cache_fingerprint: str = "",
         encode_video: bool = True,
+        video_options: dict[str, str] | None = None,
         info: dict[str, Any] | None = None,
         audio: Any = None,
         progress: Any = None,
@@ -397,7 +406,8 @@ class PreviewCacheStore:
             if existing is not None and not force:
                 frames_ready = Path(str(existing.get("frames_path") or "")).is_file()
                 video_path = Path(str(existing.get("video_path") or existing.get("path") or ""))
-                video_ready = not encode_video or video_path.is_file()
+                options_match = dict(existing.get("video_options") or {}) == dict(video_options or {})
+                video_ready = not encode_video or (options_match and video_path.is_file())
                 if frames_ready and video_ready:
                     self.latest[base_key] = key
                     return existing
@@ -407,7 +417,14 @@ class PreviewCacheStore:
         np.save(frames_path, array, allow_pickle=False)
         try:
             if video_path is not None:
-                self._encode_video(video_path, array, safe_fps, audio=audio, progress=progress)
+                self._encode_video(
+                    video_path,
+                    array,
+                    safe_fps,
+                    audio=audio,
+                    progress=progress,
+                    video_options=video_options,
+                )
         except Exception:
             frames_path.unlink(missing_ok=True)
             if video_path is not None:
@@ -434,6 +451,7 @@ class PreviewCacheStore:
             "fingerprint": fingerprint,
             "path": str(video_path) if video_path is not None else "",
             "video_path": str(video_path) if video_path is not None else "",
+            "video_options": dict(video_options or {}),
             "frames_path": str(frames_path),
             "created": time.time(),
             "size_bytes": int(frames_path.stat().st_size + (video_path.stat().st_size if video_path is not None else 0)),
@@ -457,6 +475,7 @@ class PreviewCacheStore:
         proxy: bool = False,
         cache_fingerprint: str = "",
         encode_video: bool = True,
+        video_options: dict[str, str] | None = None,
         info: dict[str, Any] | None = None,
         audio: Any = None,
         progress: Any = None,
@@ -470,6 +489,7 @@ class PreviewCacheStore:
             variant="proxy" if proxy else "main",
             cache_fingerprint=cache_fingerprint,
             encode_video=encode_video,
+            video_options=video_options,
             info=info,
             audio=audio,
             progress=progress,
@@ -564,7 +584,14 @@ class PreviewCacheStore:
             if frames.ndim != 4 or frames.shape[0] == 0:
                 return None
             video_path = self.root / f"{uuid.uuid4().hex}.mp4"
-            self._encode_video(video_path, np.asarray(frames), float(entry.get("info", {}).get("fps", 24.0) or 24.0), audio=entry.get("audio"), progress=progress)
+            self._encode_video(
+                video_path,
+                np.asarray(frames),
+                float(entry.get("info", {}).get("fps", 24.0) or 24.0),
+                audio=entry.get("audio"),
+                progress=progress,
+                video_options=entry.get("video_options"),
+            )
             entry["path"] = str(video_path)
             entry["video_path"] = str(video_path)
             entry["size_bytes"] = int(frames_path.stat().st_size + video_path.stat().st_size)

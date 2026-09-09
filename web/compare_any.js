@@ -41,6 +41,19 @@ function latestPayload(output) {
     return payload && typeof payload === "object" ? payload : {};
 }
 
+function normaliseViewportLayout(layout) {
+    const value = String(layout || "").toLowerCase();
+    return value === "vertical" || value === "horizontal" || value === "single" ? value : "single";
+}
+
+function defaultComparePosition(layout) {
+    return normaliseViewportLayout(layout) === "single" ? 50 : 0;
+}
+
+function applyComparePosition(state) {
+    state?.compareViewport?.style.setProperty("--compare-position", `${Number(state.comparePosition) || 0}%`);
+}
+
 function mediaUrl(source) {
     const value = String(source?.video_url || "");
     return value ? api.apiURL(`${value}${value.includes("?") ? "&" : "?"}t=${Date.now()}`) : "";
@@ -58,10 +71,12 @@ function addStyles() {
       .cs-compare-any-title{font-weight:600;color:var(--input-text,#e6e9ef)}
       .cs-compare-any-status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:75%;color:var(--descrip-text,#9da5b4)}
       .cs-compare-any-grid{position:relative;display:grid;align-self:start;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:var(--cs-compare-bottom-height,306px);gap:6px;min-height:0}
+      .cs-compare-any-layout-single .cs-compare-any-grid{grid-template-columns:1fr}
       .cs-compare-any-media-layout .cs-compare-any-grid{grid-template-columns:repeat(2,minmax(0,var(--cs-compare-media-width,1fr)));justify-content:center;background:inherit}
       .cs-compare-any-media-layout .cs-compare-any-viewport{width:var(--cs-compare-media-width,100%);height:var(--cs-compare-bottom-height,306px);justify-self:center}
       .cs-compare-any-media-layout.cs-compare-any-layout-vertical .cs-compare-any-grid{grid-template-columns:minmax(0,var(--cs-compare-media-width,1fr));justify-items:center}
       .cs-compare-any-media-layout.cs-compare-any-layout-vertical .cs-compare-any-viewport{grid-column:1}
+      .cs-compare-any-media-layout.cs-compare-any-layout-single .cs-compare-any-grid{grid-template-columns:minmax(0,var(--cs-compare-media-width,1fr));justify-items:center}
       .cs-compare-any-viewport{position:relative;box-sizing:border-box;min-width:0;min-height:0;overflow:hidden;border:1px solid var(--border-color,#3c424d);border-radius:5px;background:#08090b}
       .cs-compare-any-viewport canvas{display:block;width:100%;height:100%;min-height:0}
       .cs-compare-any-source{grid-column:1;grid-row:1}
@@ -69,6 +84,8 @@ function addStyles() {
       .cs-compare-any-layout-vertical .cs-compare-any-grid{grid-template-columns:1fr;grid-template-rows:repeat(2,var(--cs-compare-bottom-height,306px))}
       .cs-compare-any-layout-vertical .cs-compare-any-source{grid-column:1;grid-row:1}
       .cs-compare-any-layout-vertical .cs-compare-any-compare{grid-column:1;grid-row:2}
+      .cs-compare-any-layout-single .cs-compare-any-source{display:none}
+      .cs-compare-any-layout-single .cs-compare-any-compare{grid-column:1;grid-row:1}
       .cs-compare-any-divider{position:absolute;z-index:3;top:0;bottom:0;left:var(--compare-position,0%);width:2px;transform:translateX(-1px);background:#f4f7fb;box-shadow:0 0 0 1px #11141980;cursor:ew-resize;touch-action:none}
       .cs-compare-any-divider::before{content:"";position:absolute;top:50%;left:50%;width:22px;height:22px;transform:translate(-50%,-50%);border:2px solid #f4f7fb;border-radius:50%;background:#20232a;box-shadow:0 2px 8px #000b}
       .cs-compare-any-divider::after{content:"↔";position:absolute;top:50%;left:50%;transform:translate(-50%,-53%);color:#f4f7fb;font-size:13px;line-height:1}
@@ -346,7 +363,7 @@ function attachDiffSplitHandle(state) {
 function mediaAvailableWidth(state) {
     const width = Number(state.grid?.clientWidth) || 0;
     if (width <= 0) return 0;
-    return state.layout === "vertical" ? width : Math.max(0, (width - GRID_GAP) / 2);
+    return state.layout === "vertical" || state.layout === "single" ? width : Math.max(0, (width - GRID_GAP) / 2);
 }
 
 function fitMediaViewport(state, fitOuterHeight = true) {
@@ -410,7 +427,7 @@ function viewportWidth(state) {
     if (viewportClientWidth > 0) return viewportClientWidth;
     const width = Number(state.grid?.clientWidth) || 0;
     if (width <= 0) return 0;
-    return state.layout === "vertical" ? width : Math.max(0, (width - GRID_GAP) / 2);
+    return state.layout === "vertical" || state.layout === "single" ? width : Math.max(0, (width - GRID_GAP) / 2);
 }
 
 function shellChromeHeight(state) {
@@ -613,13 +630,23 @@ function attachHeightHandle(state, handle) {
 }
 
 function setViewportLayout(state, layout) {
-    const next = String(layout || "").toLowerCase() === "vertical" ? "vertical" : "horizontal";
-    if (state.layout !== next) state.splitRatio = 0.5;
+    const next = normaliseViewportLayout(layout);
+    if (state.layout !== next) {
+        state.splitRatio = 0.5;
+        if (!state.comparePositionManual) state.comparePosition = defaultComparePosition(next);
+    }
     state.layout = next;
     state.shell.classList.toggle("cs-compare-any-layout-vertical", next === "vertical");
+    state.shell.classList.toggle("cs-compare-any-layout-single", next === "single");
+    applyComparePosition(state);
     if (state.mode === "diff") state.viewportAspect = textViewportAspect(next);
     applyViewportHeights(state);
-    updateAutoBottomHeight(state);
+    if (state.mode === "media") {
+        const fitted = fitMediaViewport(state, false);
+        if (!fitted && mediaAvailableWidth(state) - 2 <= 0) scheduleMediaFitRetry(state);
+    } else {
+        updateAutoBottomHeight(state);
+    }
     nodeGraphDirty(state.node);
 }
 
@@ -876,6 +903,7 @@ function setMediaSources(state, payload) {
     const timeline = payload.timeline || {};
     state.mode = "media";
     setMediaLayout(state, true);
+    applyComparePosition(state);
     cancelAnimationFrame(state.mediaFitRetryFrame);
     state.mediaFitRetryFrame = null;
     state.mediaViewportWidth = 0;
@@ -1027,7 +1055,8 @@ function updateNode(node, output) {
     const state = node?.[STATE];
     if (!state || !output) return;
     const payload = latestPayload(output);
-    const layout = String(payload.view_port_layout || "").toLowerCase() === "vertical" ? "vertical" : "horizontal";
+    const layout = normaliseViewportLayout(payload.view_port_layout);
+    if (state.layout !== layout && !state.comparePositionManual) state.comparePosition = defaultComparePosition(layout);
     const mode = String(payload.mode || "error").toLowerCase();
     const preserveOuterSize = mode === "diff" && (
         state.preserveOuterSize ||
@@ -1036,6 +1065,8 @@ function updateNode(node, output) {
     );
     state.layout = layout;
     state.shell.classList.toggle("cs-compare-any-layout-vertical", layout === "vertical");
+    state.shell.classList.toggle("cs-compare-any-layout-single", layout === "single");
+    applyComparePosition(state);
     state.bottomHeightManual = false;
     state.displayReady = false;
     state.preserveOuterSize = preserveOuterSize;
@@ -1057,7 +1088,9 @@ function updateNode(node, output) {
 function addViewport(node) {
     addStyles();
     const shell = document.createElement("div");
-    shell.className = "cs-compare-any-shell cs-compare-any-media-only";
+    const configuredLayout = node?.widgets?.find((widget) => widget?.name === "view_port_layout")?.value;
+    const initialLayout = normaliseViewportLayout(configuredLayout);
+    shell.className = `cs-compare-any-shell cs-compare-any-media-only cs-compare-any-layout-${initialLayout}`;
     shell.innerHTML = `
       <div class="cs-compare-any-head"><span class="cs-compare-any-title">CS Compare Any</span><span class="cs-compare-any-status">Waiting for execution...</span></div>
       <div class="cs-compare-any-grid">
@@ -1118,12 +1151,13 @@ function addViewport(node) {
         frames: 1,
         fps: 24,
         playing: false,
-        comparePosition: 0,
+        comparePosition: defaultComparePosition(initialLayout),
+        comparePositionManual: false,
         compareZoom: 1,
         comparePanX: 0,
         comparePanY: 0,
         audioChoice: "A",
-        layout: "horizontal",
+        layout: initialLayout,
         bottomHeight: DEFAULT_BOTTOM_HEIGHT,
         mediaViewportWidth: 0,
         splitRatio: 0.5,
@@ -1173,7 +1207,7 @@ function addViewport(node) {
     state.nextButton.disabled = true;
     state.timeline.disabled = true;
     state.zoomButtons.forEach((button) => { button.disabled = true; });
-    state.compareViewport.style.setProperty("--compare-position", `${state.comparePosition}%`);
+    applyComparePosition(state);
     applyViewportHeights(state);
     updateAutoBottomHeight(state);
     state.shell.querySelectorAll("[data-resize]").forEach((handle) => attachHeightHandle(state, handle));
@@ -1186,7 +1220,7 @@ function addViewport(node) {
         state.divider.parentElement.style.setProperty("--compare-position", `${state.comparePosition}%`);
         drawMedia(state);
     };
-    state.divider.addEventListener("pointerdown", (event) => { if (event.button !== 0) return; event.preventDefault(); dragging = true; state.divider.setPointerCapture?.(event.pointerId); updateDivider(event); });
+    state.divider.addEventListener("pointerdown", (event) => { if (event.button !== 0) return; event.preventDefault(); state.comparePositionManual = true; dragging = true; state.divider.setPointerCapture?.(event.pointerId); updateDivider(event); });
     state.divider.addEventListener("pointermove", (event) => { if (dragging) updateDivider(event); });
     const stopDragging = (event) => { if (!dragging) return; dragging = false; state.divider.releasePointerCapture?.(event.pointerId); forceCompareRefresh(state); };
     state.divider.addEventListener("pointerup", stopDragging);

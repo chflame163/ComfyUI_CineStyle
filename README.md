@@ -531,19 +531,20 @@ Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑�
 
 ### CS Compare Any
 
-对 `source_a` 和 `source_b` 两个输入进行比较。两个输入必须是相同的 ComfyUI 类型；执行后在节点界面中显示比较结果。`view_port_layout` 用于选择 `horizontal` 或 `vertical` 布局。
+对 `source_a` 和 `source_b` 两个输入进行比较。两个输入必须是相同的 ComfyUI 类型；执行后在节点界面中显示比较结果。
+`view_port_layout` 用于选择 `single`、`horizontal` 或 `vertical` 布局。
 
 #### 使用流程
 
 1. 将两个相同类型的节点输出分别连接到 `source_a` 和 `source_b`。
-2. 选择 `view_port_layout`：`horizontal` 横向排列，`vertical` 纵向排列。
+2. 选择 `view_port_layout`：`single` 只显示 A/B 对比视口，`horizontal` 显示横向排列的`source_a`和`source_a/b对比`双视口，`vertical` 显示纵向排列双视口。
 3. 执行工作流，节点会根据输入类型自动选择 media 或 text 模式。
 
 #### 节点输入
 
 - `source_a`：任意类型输入。
 - `source_b`：第二个任意类型输入，必须与 `source_a` 类型相同。
-- `view_port_layout`：视口布局，可选 `horizontal` 或 `vertical`，默认 `horizontal`。
+- `view_port_layout`：视口布局，可选 `single`、`horizontal` 或 `vertical`，默认 `single`。
 
 #### Media 模式
 
@@ -551,9 +552,9 @@ Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑�
 
 ![CS Compare Any media 模式](images/CS_Compare_Any_media_mode.jpg)
 
-- 一个视口单独显示 `source_a`，另一个视口显示 `source_b`，并叠加 `source_a` 作为对比层。
-- 拖动对比条可以查看 A/B 画面的差异；视频输入还支持同步播放、逐帧定位、时间线、音频选择、缩放和平移。
-- `horizontal` 时两个视口左右排列，`vertical` 时上下排列。
+- 对比视口显示 `source_b`，并叠加 `source_a` 作为对比层。
+- 拖动对比条可以查看 A/B 画面的差异；`single` 模式默认居中，`horizontal` 和 `vertical` 模式默认位于最左侧。视频输入还支持同步播放、逐帧定位、时间线、音频选择、缩放和平移。
+- `horizontal` 时两个视口左右排列，`vertical` 时上下排列；节点外框调整大小时，视口保持输入画幅比例。
 
 #### Text 模式
 
@@ -561,8 +562,7 @@ Subtitle Timeline 前端界面由视频预览、时间线、字幕样式编辑�
 
 ![CS Compare Any text 模式](images/CS_Compare_Any_text_mode.jpg)
 
-- `horizontal` 时 A、B 两个完整文本面板左右排列。
-- `vertical` 时 A 在上、B 在下。
+- `single` 时只显示 A/B 对比视口；`horizontal` 时 A、B 两个完整文本面板左右排列；`vertical` 时 A 在上、B 在下。
 - 删除内容、插入内容和替换内容分别使用差异颜色标记；两个面板支持同步滚动。
 
 

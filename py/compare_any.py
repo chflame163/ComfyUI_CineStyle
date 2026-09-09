@@ -114,8 +114,9 @@ def _safe_fps(value: Any) -> float:
 
 def _normalise_view_port_layout(value: Any) -> str:
     if isinstance(value, (list, tuple)):
-        value = value[0] if value else "horizontal"
-    return "vertical" if str(value or "").strip().lower() == "vertical" else "horizontal"
+        value = value[0] if value else "single"
+    value = str(value or "").strip().lower()
+    return value if value in {"single", "horizontal", "vertical"} else "single"
 
 
 def _safe_type_name(value: Any) -> str:
@@ -616,9 +617,9 @@ class CSCompareAny(io.ComfyNode):
                 io.AnyType.Input("source_b", tooltip="Second value to compare."),
                 io.Combo.Input(
                     "view_port_layout",
-                    options=["horizontal", "vertical"],
-                    default="horizontal",
-                    tooltip="Arrange the source A and comparison viewports horizontally or vertically.",
+                    options=["single", "horizontal", "vertical"],
+                    default="single",
+                    tooltip="Show only the comparison viewport, or arrange the source and comparison viewports horizontally or vertically.",
                 ),
             ],
             hidden=[io.Hidden.unique_id, io.Hidden.prompt],
@@ -628,7 +629,7 @@ class CSCompareAny(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, source_a: Any, source_b: Any, view_port_layout: Any = "horizontal") -> io.NodeOutput:
+    def execute(cls, source_a: Any, source_b: Any, view_port_layout: Any = "single") -> io.NodeOutput:
         node_id = str(getattr(getattr(cls, "hidden", None), "unique_id", "") or "compare")
         layout = _normalise_view_port_layout(view_port_layout)
         declared_a = _upstream_output_is_list(cls, "source_a")

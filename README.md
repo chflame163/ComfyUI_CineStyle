@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Video Timeline Edit](#cs-video-timeline-edit) 节点，用于在双轨时间线上编辑标准视频片段，可自动检测片段，手动修剪/合并/移动/删除片段，对片段进行缩放/旋转/镜像/位移等变形操作。
 * 添加 [CS MatAnyone2](#cs-matanyone2) 节点，将 Mask 转换为单目标人物或 union 前景的时序 alpha matte，支持单帧或连续mask，支持在任意位置定义锚定帧，支持多个锚点帧。
 * 添加 [CS Spatial Stabilize](#cs-spatial-stabilize) 和 [CS Spatial Restore](#cs-spatial-restore) 节点，从视频 Mask 稳定并裁切局部区域，处理后可恢复到源视频位置。
 * 添加 [CS Color Match](#cs-color-match) 节点，使用参考图自动匹配 IMAGE 帧批次的整体色调，支持多种颜色传递方法。
@@ -45,6 +46,107 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 
 ## 节点说明
+
+### CS Video Timeline Edit
+
+在标准 ComfyUI `VIDEO` 上进行双视频轨、双音频轨的非破坏式时间线编辑。节点支持片段裁切、移动、分轨、静音、A/V 链接、上下层合成，以及缩放、旋转、平移和镜像等画面变换。编辑器使用低分辨率 Preview Cache 进行交互式拖动和播放，执行节点时再按当前时间线生成最终输出。
+
+![CS Video Timeline Edit 节点](images/CS_Video_Timeline Edit_node.jpg)
+
+#### 使用流程
+
+1. 将 `VIDEO` 输出连接到节点 `video`输入。节点支持接入官方或第三方 `Load Video` 节点；直连 `CS Load Video` 时可直接回溯来源，其他上游输入可通过 `wait_for_input_cache` 建立共享预览缓存。
+2. 点击节点上的 `Edit Timeline`，在时间线中拖动片段边缘调整 In/Out，或使用右键菜单执行切分、合并和删除。
+3. 在 `Video1`/`Video2` 和 `Audio1`/`Audio2` 轨道之间移动片段；选中视频片段后可调整缩放、旋转、平移和镜像。
+4. 使用 `Set In`、`Set Out` 和 `Play` 检查选定范围，确认后点击 `Apply to node` 保存编辑结果。
+5. 执行工作流得到最终 `VIDEO`。如果输入来自上游运行后才生成的视频，首次打开时间线前可开启 `wait_for_input_cache` 并运行一次工作流来建立预览缓存。
+
+#### 节点选项说明
+
+- width：输出画布宽度；`-1` 使用输入尺寸，正数会按 `multiple` 向上取整。
+- height：输出画布高度；`-1` 使用输入尺寸，正数会按 `multiple` 向上取整。
+- multiple：输出宽高取整倍数，默认 `32`。
+- fit_mode：片段适配输出画布的方式，可选 `letterbox`、`crop` 或 `fill`。
+- fill_color：留边、空轨道和空白时间线区域使用的十六进制颜色。
+- in_frame：输出时间线范围的起点帧；`0` 表示时间线首帧。
+- out_frame：输出时间线范围的结束帧；`-1` 表示时间线尾帧。
+- shot_detect_threshold：自动检测镜头切点的阈值。
+- shot_detect_min_scene_sec：自动检测镜头切点的最短镜头时长。
+- wait_for_input_cache：布尔开关，默认关闭。开启后执行节点时，将当前输入节点及其全部上游节点的链路指纹写入公共 Preview cache，然后中断本次 ComfyUI 执行。
+- timeline_json：由 `Edit Timeline` 保存的时间线描述，一般无需手动编辑。
+
+#### Edit Timeline 界面
+
+![CS Video Timeline Edit 时间线界面](images/CS_Video_Timeline Edit_Preview.jpg)
+
+时间线界面包含视频预览、In/Out 控件、当前帧指针、镜头检测、双视频轨、双音频轨、输出画布设置和片段变换参数。编辑操作使用低分辨率缓存提供快速反馈；点击 `Play` 时会在后台生成当前时间线的合成代理视频，执行节点时才进行全分辨率离线渲染。
+
+##### 预览与 In/Out
+
+- 时间线上方的蓝色三角形是当前帧指针。单击或拖动指针可以定位到时间线中的任意帧，`|<` 和 `>|` 用于向前或向后移动一帧。
+- `Set In` 和 `Set Out` 使用当前帧设置 In/Out。In/Out 同时控制 `Play` 的预览区间和节点的最终输出区间；`out_frame` 是不包含在输出内的结束边界，因此最后一帧为 `out_frame - 1`。
+- 点击 `Play` 为当前编辑结果建立预览视频，并播放 In/Out 区间；再次点击可以暂停。
+
+##### Detect Shots
+
+- 点击 `Detect Shots` 自动分析输入视频的镜头切点，并按照检测结果把视频裁成连续片段。生成的画面片段和关联声音默认放在下层的 `Video2` 与 `Audio2`。
+- `Threshold` 对应节点的 `shot_detect_threshold`。数值越高，切点判定越严格，通常得到的片段越少；数值越低，对画面变化越敏感，通常得到的片段越多。
+- `Min scene seconds` 对应节点的 `shot_detect_min_scene_sec`。短于该时长的检测结果会与相邻镜头合并；设置为 `0` 表示不按最短时长合并。
+- 自动检测会使用新的镜头片段替换当前时间线片段，并把 In/Out 恢复为检测后的完整时间范围。如需恢复检测前的编辑，可使用 `Undo`。
+
+##### 时间线轨道与缩放
+
+- `Video1` 是上层视频轨，`Video2` 是下层视频轨。两轨同时有画面时，Video1 覆盖 Video2；同一轨道的片段重叠时，后放置的片段覆盖先放置的片段。两条视频轨均为空白的区域使用 `Fill color`填充。
+- `Audio1` 和 `Audio2` 是两条音频轨。重合的声音会叠加，两条音频轨均为空白的区域输出静音。
+- 按住片段主体并拖动，可以改变片段在时间线中的位置。视频片段可以在 Video1 与 Video2 之间移动；默认关联的音频会同步移动到对应的 Audio1 或 Audio2。
+- 拖动片段左边缘或右边缘，可以逐帧缩短片段，也可以恢复或延长片段使用的源内容。延长不能越过输入源视频的首帧或尾帧，不会生成源范围以外的帧。
+- `+` 和 `-` 分别用于放大和缩小时间线显示范围；鼠标滚轮也可以围绕鼠标所在帧进行缩放。`Fit` 恢复显示完整时间线，使时间线首尾与窗口左右两侧对齐；处于 Fit 状态时不能继续缩小。
+- 放大时间线后，可以在轨道空白处按住鼠标左键并左右拖动，以平移当前显示的时间区间。
+
+##### 时间线右键菜单
+
+在时间线的任意帧位置单击鼠标右键，可以使用以下命令：
+
+- `Split at this frame`：在右键所在帧切开当前片段。切点必须位于片段内部。
+- `Merge Clip to Next`：把当前片段与同轨道的下一个片段合并。两个片段必须在时间线上首尾相接、源帧连续，并使用相同的画面变换。
+- `Delete Clip`：删除当前片段。删除视频片段时，其关联的音频内容也会一并删除。
+- `Reset Clip Transform`：把当前片段的缩放、旋转、位移和镜像恢复为默认状态。
+
+##### Output canvas
+
+- `Width` / `Height`：设置最终输出画布宽度和高度。`-1` 表示使用输入视频对应边的源尺寸；输入正数时会按照 `Multiple` 向上取整。右侧的复位按钮可恢复默认值。
+- `Multiple`：指定输出宽高必须满足的整数倍数，默认 `32`。例如输入 `100` 且 Multiple 为 `32` 时，实际尺寸向上取整为 `128`。
+- `Fit`：设置片段适配输出画布的方式。`letterbox` 保持比例并用 Fill color 填充空边；`crop` 保持比例放大并裁去超出画布的部分；`fill` 不保持原比例，直接拉伸至整个画布。
+- `Fill color`：设置 `letterbox` 的色条颜色，以及两条视频轨均无画面时的空白区域颜色。可以使用取色器或输入 `#RRGGBB` 十六进制色值。
+- Output canvas 的修改会被 `Undo` / `Redo` 记录，最终在节点执行时应用于全部片段。
+
+##### Selected clip
+
+先在时间线上单击一个视频片段，再在 `Selected clip` 区域调整该片段的画面变换：
+
+- `Scale X` / `Scale Y`：分别控制水平和垂直缩放，范围为 `0.1–4`，默认 `1`。中间的 Sync 按钮默认开启，开启时两项会同步变化；关闭后可以分别调整宽高比例。
+- `Translate X` / `Translate Y`：控制片段相对输出画布中心的水平和垂直位移，范围为 `-1~1`，默认 `0`。
+- `Rotation`：控制片段旋转角度，范围为 `-90~90` 度，默认 `0`。
+- `Mirror`：镜像模式可选 `none`、`horizontal` 或 `vertical`，分别表示不镜像、水平镜像和垂直镜像。
+- Scale、Translate 和 Rotation 同时提供滑块与数值输入框。拖动滑块时更新数值，松开后生成当前帧预览；每项右侧的复位按钮可单独恢复默认值。
+
+##### Undo、Redo、Cancel 与 Apply
+
+- `Undo` / `Redo`：撤销或恢复片段切分、移动、边缘修剪/延长、合并、删除、Transform 调整、Detect Shots 和 Output canvas 设置。当前帧移动、In/Out 设置和播放操作不进入历史记录。也可以使用 `Ctrl+Z` 撤销、`Ctrl+Shift+Z` 恢复。
+- 编辑历史保存在 `ComfyUI/temp` 中，供当前节点回溯使用。
+- `Cancel`：关闭窗口，放弃本次打开窗口后尚未应用的修改，并清除本次编辑历史。窗口右上角的关闭按钮行为相同。
+- `Apply to node`：把当前时间线、In/Out、镜头检测参数和 Output canvas 设置写回节点并关闭窗口。再次打开 Edit Timeline 时会恢复已经应用的编辑结果；随后执行工作流才会生成最终全分辨率 `VIDEO`、`IMAGE` 和 `audio` 输出。
+
+#### 输出说明
+
+- `video`：完成时间线合成、画布适配和 In/Out 裁切的标准 ComfyUI `VIDEO`。
+- `IMAGE`：最终输出视频的 RGB 帧批次。
+- `frame_count`：实际输出帧数。
+- `audio`：按时间线轨道混合后的音频；没有音频时为空。
+- `video_info`：包含源视频元数据、时间线范围、输出尺寸、帧率、帧数和时长。
+- `fps`：实际输出帧率。
+
+
 
 
 ### CS VFX Beauty
@@ -733,6 +835,7 @@ Preview Cache 只用于前端窗口播放、预览和波形显示。
 - audio: 选定时间范围内的音频。没有音频轨道时输出为空。
 - video_info: 包含源视频和输出视频的 FPS、帧数、时长、宽高、入点和出点等信息，以及 loader 标识。
 - fps：浮点数，实际输出视频的帧率。未设置目标 FPS 时为源视频帧率，设置目标 FPS 后为重新采样后的输出帧率。
+
 
 
 ### CS Save Video

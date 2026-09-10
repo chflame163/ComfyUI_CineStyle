@@ -18,6 +18,7 @@ iopath
 packaging>=21.0
 numpy>=1.26,<3
 av>=14.0
+tqdm>=4.65.0
 soundfile>=0.12
 soxr>=0.5
 # MatAnyone2 runtime (the model checkpoint is downloaded separately on first use).

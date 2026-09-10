@@ -51,7 +51,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 在标准 ComfyUI `VIDEO` 上进行双视频轨、双音频轨的非破坏式时间线编辑。节点支持片段裁切、移动、分轨、静音、A/V 链接、上下层合成，以及缩放、旋转、平移和镜像等画面变换。编辑器使用低分辨率 Preview Cache 进行交互式拖动和播放，执行节点时再按当前时间线生成最终输出。
 
-![CS Video Timeline Edit 节点](images/CS_Video_Timeline Edit_node.jpg)
+![CS Video Timeline Edit 节点](images/CS_Video_Timeline_Edit_node.jpg)
 
 #### 使用流程
 
@@ -77,7 +77,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 #### Edit Timeline 界面
 
-![CS Video Timeline Edit 时间线界面](images/CS_Video_Timeline Edit_Preview.jpg)
+![CS Video Timeline Edit 时间线界面](images/CS_Video_Timeline_Edit_Preview.jpg)
 
 时间线界面包含视频预览、In/Out 控件、当前帧指针、镜头检测、双视频轨、双音频轨、输出画布设置和片段变换参数。编辑操作使用低分辨率缓存提供快速反馈；点击 `Play` 时会在后台生成当前时间线的合成代理视频，执行节点时才进行全分辨率离线渲染。
 

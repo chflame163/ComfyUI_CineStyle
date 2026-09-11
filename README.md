@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS Image Composite](#cs-image-composite) 节点，将layer 序列帧通过可视化 Timeline 变换编辑器合成到 background 序列帧，支持可选mask输入，支持多种图层混合模式。
 * 添加 [CS Video Timeline Edit](#cs-video-timeline-edit) 节点，用于在双轨时间线上编辑标准视频片段，可自动检测片段，手动修剪/合并/移动/删除片段，对片段进行缩放/旋转/镜像/位移等变形操作。
 * 添加 [CS MatAnyone2](#cs-matanyone2) 节点，将 Mask 转换为单目标人物或 union 前景的时序 alpha matte，支持单帧或连续mask，支持在任意位置定义锚定帧，支持多个锚点帧。
 * 添加 [CS Spatial Stabilize](#cs-spatial-stabilize) 和 [CS Spatial Restore](#cs-spatial-restore) 节点，从视频 Mask 稳定并裁切局部区域，处理后可恢复到源视频位置。
@@ -49,7 +50,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ### CS Video Timeline Edit
 
-在标准 ComfyUI `VIDEO` 上进行双视频轨、双音频轨的非破坏式时间线编辑。节点支持片段裁切、移动、分轨、静音、A/V 链接、上下层合成，以及缩放、旋转、平移和镜像等画面变换。编辑器使用低分辨率 Preview Cache 进行交互式拖动和播放，执行节点时再按当前时间线生成最终输出。
+在标准 ComfyUI `VIDEO` 上进行双视频轨、双音频轨的非破坏式时间线编辑。节点支持片段裁切、移动、分轨、静音、A/V 链接、上下层合成，以及缩放、旋转、平移和镜像等画面变换。
 
 ![CS Video Timeline Edit 节点](images/CS_Video_Timeline_Edit_node.jpg)
 
@@ -145,6 +146,81 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 - `audio`：按时间线轨道混合后的音频；没有音频时为空。
 - `video_info`：包含源视频元数据、时间线范围、输出尺寸、帧率、帧数和时长。
 - `fps`：实际输出帧率。
+
+
+
+### CS Image Composite
+
+将一个 `IMAGE` layer 合成到 background `IMAGE` 上，适合静态图片和视频帧批次。节点使用 GPU 批处理执行图像变换和混合，支持 layer 位置、缩放、旋转、透明度和 Blend Mode。`layer_image` 与 `background_image` 的 batch 数量不一致时，layer 会按 ComfyUI 的单帧广播规则重复或截断到背景帧数。
+
+![CS Image Composite 节点](images/CS_Image_Composite_node.jpg)
+
+#### 使用流程
+
+1. 将背景单帧或序列帧，例如 `CS Load Video` 的 `IMAGE` 输出连接到 `background_image`。输出的图片序列帧长度将与此处输入一致。
+2. 将需要叠加的图片单帧或序列帧连接到 `layer_image`。
+3. 可选地将标准 ComfyUI `MASK` 连接到 `layer_mask`。 mask 白色部分将作为显示区域，黑色作为隐藏区域。
+4. 选择 `blend_mode`，设置固定的 `opacity`，然后直接执行节点；也可以点击节点上的 `Edit Timeline` 编辑 layer 的位置、缩放和旋转。
+5. 在 Timeline 中确认预览结果后点击 `Apply to Node`，再执行工作流得到最终的 IMAGE 和透明 MASK 输出。
+6. 如果输入来自上游运行后才生成的图像或视频，首次打开 `Edit Timeline` 前开启 `wait_for_input_cache` 并运行一次工作流，建立 Preview cache。
+
+#### 节点输入
+
+- background_image：背景 `IMAGE`，作为最终输出画布。支持单张图片或视频帧 batch；输出帧数以 background batch 为准。
+- layer_image：要合成的 layer `IMAGE`。支持单张图片或视频帧 batch；batch 为 1 时会广播到所有背景帧。
+- layer_mask：可选标准 ComfyUI `MASK`。白色区域显示 layer，黑色区域隐藏 layer，灰度区域按覆盖率混合；mask 尺寸会自动适配 layer 尺寸。
+- blend_mode：LayerStyle `ImageBlendAdvance V2` 风格的混合模式。可选 `normal`、`dissolve`、`darken`、`multiply`、`color burn`、`linear burn`、`darker color`、`lighten`、`screen`、`color dodge`、`linear dodge(add)`、`lighter color`、`dodge`、`overlay`、`soft light`、`hard light`、`vivid light`、`linear light`、`pin light`、`hard mix`、`difference`、`exclusion`、`subtract`、`divide`、`hue`、`saturation`、`color`、`luminosity`、`grain extract` 和 `grain merge`。
+- opacity：layer 混合透明度，范围 `0–100`，默认 `100`。
+- X：layer 中心点相对 background 画布的 X 坐标归一化位置，默认为 `0.5`。
+- Y：layer 中心点相对 background 画布的 Y 坐标归一化位置，默认为 `0.5`。
+- Scale_X：相对于 letterbox 适配基准的水平缩放，默认为 `1.0`。
+- Scale_Y：相对于 letterbox 适配基准的垂直缩放，默认为 `1.0`。
+- Sync_Scale：是否同步 Scale X 和 Scale Y，默认开启。
+- Rotation：layer 旋转角度，单位为度，默认 `0`。
+- wait_for_input_cache：布尔开关，默认关闭。开启后执行节点时，会把当前输入及其完整上游链路写入共享 Preview cache，然后中断本次执行，供 Edit Timeline 回溯查看。
+
+#### 节点输出
+
+- image：合成后的 RGB `IMAGE` batch，尺寸和帧数以 background image 为输出基准。
+- composit_mask：合成后的 `MASK`。
+
+#### Edit Timeline 界面
+
+![CS Image Composite Edit Timeline](images/CS_Image_Composite_timeline.jpg)
+
+Edit Timeline 只针对节点输入的 layer 图层，无关键帧。无论当前位于时间线的哪一帧，调整位置、缩放或旋转都应用到整个 layer 序列。
+
+
+##### 时间线、当前帧和 In/Out
+
+- 时间线上方的蓝色三角形是当前帧指针。拖动指针或点击轨道可以定位到任意帧。
+- `|<` 和 `>|` 用于前进或后退一帧。
+- `Set In` 和 `Set Out` 使用当前帧设置预览范围。`Play` 只播放 In/Out 区间。
+- 点击 `Play` 为当前区间生成逐帧合成预览缓存。
+- 修改 In/Out、位置、缩放、旋转、opacity 或 blend mode 后，旧 playback cache 会失效，下次播放时自动重新生成。
+
+##### Blend Mode、Opacity 与变换参数
+
+- `Blend Mode`：选择 layer 混合模式，整段 layer 序列使用同一个模式。可选项为 LayerStyle `ImageBlendAdvance` 风格的混合模式。可选 `normal`、`dissolve`、`darken`、`multiply`、`color burn`、`linear burn`、`darker color`、`lighten`、`screen`、`color dodge`、`linear dodge(add)`、`lighter color`、`dodge`、`overlay`、`soft light`、`hard light`、`vivid light`、`linear light`、`pin light`、`hard mix`、`difference`、`exclusion`、`subtract`、`divide`、`hue`、`saturation`、`color`、`luminosity`、`grain extract` 和 `grain merge`。
+- `Sync Scale`：默认开启。开启时 `Scale X` 和 `Scale Y` 同步，保持 layer 的宽高比例；关闭后可分别改变两个方向的缩放。
+- `Opacity`：整段序列固定的 layer 透明度，范围 `0–100`。滑块右侧的数值框和复位按钮可进行精确输入或恢复默认值。
+- `Rotation`：layer 旋转角度，支持滑块、数值输入和复位按钮。也可以拖动 layer 上方的旋转控制点。
+- `X` / `Y`：layer 中心点相对 background 画布的归一化位置。`0.5, 0.5` 表示画布中心；支持滑块、数值输入和复位按钮。
+- `Scale X` / `Scale Y`：相对于 letterbox 适配基准的水平/垂直缩放。默认基准为 `1.0`，即 layer 按宽高比适配 background 后的尺寸。
+
+
+##### 预览视口中的拖动操作
+
+- 拖动 layer 主体可以实时调整 X/Y 位置。
+- 拖动四角控制点可以调整 Scale X/Scale Y；Sync Scale 开启时保持宽高比，关闭时允许两个方向独立变化。
+- 拖动顶部旋转控制点可以实时调整 Rotation。
+
+##### Apply、Cancel 与恢复默认
+
+- `Reset Transform`：恢复 X、Y、Scale X、Scale Y 和 Rotation 的默认状态。
+- 每个参数右侧的复位按钮只恢复对应参数；Sync Scale 开启时，恢复任一缩放参数会同时恢复两个缩放轴。
+- `Apply to Node`：将当前 Timeline 变换、Blend Mode、Opacity 和 Sync Scale 状态写回节点。
+- `Cancel` 或右上角关闭按钮：关闭窗口并放弃本次尚未应用的修改。
 
 
 

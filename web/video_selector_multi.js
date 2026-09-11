@@ -40,6 +40,7 @@ function nodeTypeName(node) { return String(node?.type || node?.comfyClass || no
 function isAnyRerouter(node) { return /layerutility\s*:\s*any\s+rerouter/i.test(nodeTypeName(node)) || /any\s+rerouter/i.test(String(node?.title || "")); }
 function isCSLoadVideo(node) { const type = nodeTypeName(node); return type === "CS_Load_Video" || type.endsWith(".CS_Load_Video") || type.endsWith("::CS_Load_Video"); }
 function isLoadImage(node) { return /(^|[.:_])load[_-]?image([.:_]|$)/i.test(nodeTypeName(node)) || /image[_-]?loader/i.test(nodeTypeName(node)); }
+function isLoadImageMask(node) { return /load[_-]?image[_-]?mask/i.test(nodeTypeName(node)) || /image[_-]?as[_-]?mask/i.test(nodeTypeName(node)); }
 function sourceFilename(node) {
     const names = isCSLoadVideo(node) ? ["video"] : ["image", "file", "video", "filename", "image_file", "image_path", "input_image", "load_image", "file_path", "filepath", "video_path", "video_file", "video_file_path", "input_path", "path"];
     for (const name of names) { const value = String(widget(node, name)?.value || "").trim(); if (value) return value; }
@@ -75,7 +76,7 @@ function sourceFromOrigin(origin, visited = new Set()) {
     }
     if (isLoadImage(origin) || isImageFilename(filename)) {
         if (!filename) return null;
-        return { filename, kind: "image", startFrame: 0, endFrame: 0, targetFps: 1 };
+        return { filename, kind: "image", startFrame: 0, endFrame: 0, targetFps: 1, channel: isLoadImageMask(origin) ? String(widget(origin, "channel")?.value || "alpha") : "" };
     }
     if (isAnyRerouter(origin)) {
         const input = origin.inputs?.[0];

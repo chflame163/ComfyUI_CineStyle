@@ -3199,6 +3199,9 @@ class CSVideoTimelineEdit(io.ComfyNode):
                     cache_key = _timeline_cache_key(timeline["source_fingerprint"], timeline, proxy_w, proxy_h, fit_mode, color, fps, True)
                     if node_id:
                         _cache_proxy(node_id, proxy_images, proxy_audio, fps, {"proxy": True, "cache_fingerprint": cache_key, "timeline_json": canonical, "width": proxy_w, "height": proxy_h}, cache_key)
+                    preview_cache = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
+                    if preview_cache is not None:
+                        preview_cache.notify_preview_cache_ready(node_id, _NODE_ID)
                 finally:
                     raise InterruptProcessingException()
 

@@ -1592,6 +1592,9 @@ class CSVideoSegmentSeC(io.ComfyNode):
                 ("images", "video_input"),
                 video_input,
             )
+            preview_cache = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
+            if preview_cache is not None:
+                preview_cache.notify_preview_cache_ready(cls.hidden.unique_id, "CS_Video_Segment_SeC")
             from comfy.model_management import InterruptProcessingException
 
             raise InterruptProcessingException()
@@ -1905,6 +1908,9 @@ class CSVideoSegmentSAM3(io.ComfyNode):
                 ("images", "video_input"),
                 video_input,
             )
+            preview_cache = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
+            if preview_cache is not None:
+                preview_cache.notify_preview_cache_ready(cls.hidden.unique_id, NODE_ID)
             from comfy.model_management import InterruptProcessingException
 
             raise InterruptProcessingException()

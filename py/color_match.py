@@ -1116,6 +1116,9 @@ class CSColorMatch(io.ComfyNode):
                 _source_fps_from_prompt(prompt, node_id, "image"),
             )
             _cache_wait_input(node_id, prompt, "reference_image", _first_image(reference_image, "reference_image"), 1.0)
+            preview_cache = sys.modules.get(f"{__name__.rsplit('.', 1)[0]}._py_preview_cache")
+            if preview_cache is not None:
+                preview_cache.notify_preview_cache_ready(node_id, "CS_Color_Match")
             from comfy.model_management import InterruptProcessingException
 
             raise InterruptProcessingException()

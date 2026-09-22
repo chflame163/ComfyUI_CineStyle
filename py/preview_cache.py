@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -32,6 +33,51 @@ _WAIT_INPUT_CACHE_NAMESPACE = "wait_input"
 _WAIT_INPUT_CACHE_STORE = None
 _WAIT_INPUT_CACHE_STORE_LOCK = threading.RLock()
 _WAIT_INPUT_CACHE_ROUTES_REGISTERED = False
+
+_PREVIEW_CACHE_NODE_NAMES = {
+    "CS_Image_Composite": "CS Image Composite",
+    "CS_Video_Timeline_Edit": "CS Video Timeline Edit",
+    "CS_MatAnyone2": "CS MatAnyone2",
+    "CS_Color_Match": "CS Color Match",
+    "CS_Color_Grade": "CS Color Grade",
+    "CS_Video_Subtitle": "CS Video Subtitle",
+    "CS_VFX_Beauty": "CS VFX Beauty",
+    "CS_Video_Segment_SAM3": "CS Video Segment (SAM3.1)",
+    "CS_Video_Segment_SeC": "CS Video Segment (SeC-4B)",
+}
+
+
+def notify_preview_cache_ready(node_id: Any, node_type: str) -> bool:
+    """Notify the connected ComfyUI client that a wait-input cache is ready.
+
+    The notification is deliberately best-effort.  The cache-producing node
+    must still interrupt execution when the browser is unavailable or when a
+    particular ComfyUI build does not expose ``PromptServer.send_sync``.
+    """
+    node_type_key = str(node_type or "").strip()
+    node_name = _PREVIEW_CACHE_NODE_NAMES.get(node_type_key, node_type_key or "CineStyle node")
+    try:
+        from server import PromptServer
+
+        server_instance = getattr(PromptServer, "instance", None)
+        send_sync = getattr(server_instance, "send_sync", None)
+        if not callable(send_sync):
+            return False
+        send_sync(
+            "cinestyle_preview_cache_ready",
+            {
+                "node_id": str(node_id or ""),
+                "node_type": node_type_key,
+                "node_name": node_name,
+            },
+            getattr(server_instance, "client_id", None),
+        )
+        return True
+    except Exception as exc:  # pragma: no cover - server availability is runtime-dependent
+        logging.getLogger("CineStylePreviewCache").debug(
+            "Unable to notify preview cache readiness: %s", exc
+        )
+        return False
 
 
 def _prompt_node(prompt: Any, node_id: Any) -> dict[str, Any] | None:

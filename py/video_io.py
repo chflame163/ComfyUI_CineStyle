@@ -159,7 +159,7 @@ class CSLoadVideo(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "multiple",
-                    default=32,
+                    default=8,
                     min=1,
                     max=1024,
                     step=1,

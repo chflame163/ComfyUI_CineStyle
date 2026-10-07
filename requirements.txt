@@ -23,3 +23,5 @@ soundfile>=0.12
 soxr>=0.5
 # MatAnyone2 runtime (the model checkpoint is downloaded separately on first use).
 imageio>=2.25.0
+# CS VideoMaMa runtime (the VideoMaMa UNet and the SVD VAE are downloaded on first use).
+diffusers>=0.34.0

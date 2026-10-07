@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS VideoMaMa](#cs-videomama) 节点，将逐帧二值 Mask 精修为时序 alpha matte。
 * 添加 [CS ProPainterX Inpaint](#cs-propainterx-inpaint) 节点，用 ProPainterX 配合 MemFOF 光流擦除视频中被 mask 标记的对象，按空闲显存自动分批并交叉淡化拼接，结果贴回源分辨率。
 * 添加 [CS Image Composite](#cs-image-composite) 节点，将layer 序列帧通过可视化 Timeline 变换编辑器合成到 background 序列帧，支持可选mask输入，支持多种图层混合模式。
 * 添加 [CS Video Timeline Edit](#cs-video-timeline-edit) 节点，用于在双轨时间线上编辑标准视频片段，可自动检测片段，手动修剪/合并/移动/删除片段，对片段进行缩放/旋转/镜像/位移等变形操作。
@@ -619,6 +620,55 @@ overlap 过小可能使 Anchor 接缝更明显，过大则会增加重复计算�
 - `Model file`：从 `models/matanyone` 中选择 checkpoint。
 - `Auto unload model`：执行完成后将模型移出显存，默认开启。
 - `wait for input cache`：先缓存输入并暂停执行，使 Matte Preview 前端可以预览视频。
+
+
+
+### CS VideoMaMa
+
+将与视频逐帧匹配的二值粗 `MASK` 精修为 8-bit 时序 alpha matte，补回软边缘与半透明过渡。    
+本节点逻辑源自 [github.com/cvlab-kaist/VideoMaMa](https://github.com/cvlab-kaist/VideoMaMa) 并进行了部分修改。
+
+![CS VideoMaMa](images/CS_VideoMaMa.jpg)
+
+#### 工作流程与注意事项
+
+1. 将源视频帧批次连接到 `image`，把与视频逐帧对应的粗 mask 连接到 `mask`；单帧 mask 会广播到整段。
+2. mask 在 0.5 处二值化，接入前不要做羽化或模糊，中间灰度会被丢弃。需要更大的遮罩范围时先用 `CS Mask Grow` 处理。
+3. 节点按当前空闲显存与推理尺寸自动决定单批次帧数；帧数超出预算时分成多批推理，相邻批次的接缝帧由上一批的软 alpha 结果回灌作为条件重预测，再线性交叉淡化以消除接缝。
+4. 推理在所有帧 mask 并集包围盒内进行，完成后贴回源分辨率；包围盒已接近整帧时自动改为整帧推理。
+5. 输出 `MASK` 的帧数、帧序和尺寸与输入 `image` 完全一致，不裁剪、不补帧、不改序。
+6. 全空或全满的帧不参与推理，直接输出 0 或 1。
+7. 显存估算偏乐观时不会中断执行：节点会清理缓存、把批次减半并从整段开头重跑，最多重试两次。
+
+`Max working resolution` 是速度与质量的第一杠杆：送入模型的像素数直接决定单批次能装下多少帧，批次越少总耗时越低。`Batch overlap` 的代价同样直接，以 350 帧、单批次 10 帧为例，overlap 取 `0` / `2` / `4` 分别需要 35 / 44 / 58 个批次。overlap 超过单批次长度的一半时，一个批次重预测的帧数会多于新推进的帧数，节点会自动收窄。
+
+在 mask 包围盒内推理能显著降低小主体的开销（1920x1080 中一个 200x200 的主体，加缓冲后只占约 3.5% 像素），但会改变模型看到的画面宽高比。竖窄主体如出现边缘质量下降，可提高 `Max working resolution` 或改用整帧推理。
+
+#### 权重与运行
+
+权重目录 `ComfyUI/models/videomama/`，需要 4 个文件：`unet/config.json`、`unet/diffusion_pytorch_model.safetensors`、`vae/config.json`、`vae/diffusion_pytorch_model.fp16.safetensors`，合计约 5.9 GB。    
+首次执行时如果文件缺失或 MD5 不符，节点会从官方源自动下载：UNet 来自 `SammyLim/VideoMaMa`，VAE 来自 `stabilityai/stable-video-diffusion-img2vid-xt`。可用环境变量 `VIDEOMAMA_MODEL_DIR` 指定其他目录，`VIDEOMAMA_HF_ENDPOINT` 或 `HF_ENDPOINT` 设置 Hugging Face 镜像。
+
+VideoMaMa 权重与 SVD 底座各有上游许可，商用或再分发前请自行确认。
+
+
+#### 输入与输出
+
+- image：标准 ComfyUI `IMAGE` 帧批次。
+- mask：标准 ComfyUI `MASK` 帧批次，支持单帧 mask 广播到整段；多帧 mask 的数量和尺寸需与 image 一致。
+- 输出 mask：标准 ComfyUI `MASK` 帧批次，帧数、帧序与尺寸与 image 一致，启用包围盒推理时框外区域为 0。
+
+#### 节点选项说明
+
+![CS VideoMaMa 节点](images/CS_VideoMaMa_node.jpg)
+
+- `Device`：`auto`、`cpu` 或可用 GPU。
+- `Seed`：随机种子，默认 `42`。同时驱动 UNet 噪声和 VAE 后验采样，同一 seed 可逐位复现结果；节点会先快照再还原全局随机状态，不影响工作流中的其他节点。
+- `Batch overlap`：相邻批次共享的接缝帧数，默认 `2`，范围 `0`-`32`。接缝帧只作为上下文重预测、不产出新结果，随后与上一批已提交的结果交叉淡化。因为有软 alpha 回灌，`2` 通常已经足够；设为 `0` 时各批次完全独立，接缝会可见。实际取值不会超过单批次长度的一半。
+- `Max working resolution`：送入模型区域的长边上限，默认 `1280`，范围 `256`-`2048`。这是主要的速度控制项：像素越多，单批次帧数越少、总批次越多。输出始终恢复到源分辨率，该参数只影响内部推理精度。
+- `Motion bucket`：SVD 的运动条件强度，默认 `127`，范围 `1`-`255`，与素材真实运动量无关。偏低（50-100）更平滑保守，偏高（150-200）允许更大的时序变化，边缘抖动时可尝试调低。
+- `CPU offload weights`：默认关闭。开启后权重常驻内存、按阶段搬运到 GPU，可省约 3 GiB 显存，但每个批次都要搬运一次，批次数多时得不偿失，仅在显存极度紧张时开启。
+- `Force unload model`：默认关闭。开启后本次执行结束（含出错与取消）即释放模型并清理显存，便于后续大模型节点接管；代价是下次执行需重新加载约 6 GB 权重。
 
 
 

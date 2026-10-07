@@ -27,6 +27,7 @@ workflow JSON 和示例素材位于插件的 `workflows` 子目录。本文档�
 
 ## 更新说明
 
+* 添加 [CS ProPainterX Inpaint](#cs-propainterx-inpaint) 节点，用 ProPainterX 配合 MemFOF 光流擦除视频中被 mask 标记的对象，按空闲显存自动分批并交叉淡化拼接，结果贴回源分辨率。
 * 添加 [CS Image Composite](#cs-image-composite) 节点，将layer 序列帧通过可视化 Timeline 变换编辑器合成到 background 序列帧，支持可选mask输入，支持多种图层混合模式。
 * 添加 [CS Video Timeline Edit](#cs-video-timeline-edit) 节点，用于在双轨时间线上编辑标准视频片段，可自动检测片段，手动修剪/合并/移动/删除片段，对片段进行缩放/旋转/镜像/位移等变形操作。
 * 添加 [CS MatAnyone2](#cs-matanyone2) 节点，将 Mask 转换为单目标人物或 union 前景的时序 alpha matte，支持单帧或连续mask，支持在任意位置定义锚定帧，支持多个锚点帧。
@@ -619,6 +620,42 @@ overlap 过小可能使 Anchor 接缝更明显，过大则会增加重复计算�
 - `Auto unload model`：执行完成后将模型移出显存，默认开启。
 - `wait for input cache`：先缓存输入并暂停执行，使 Matte Preview 前端可以预览视频。
 
+
+
+### CS ProPainterX Inpaint
+
+将 `IMAGE` 帧批次中被 `MASK` 标记的区域擦除。    
+本节点推理逻辑来源自 [github.com/Zarxrax/ProPainterX](https://github.com/Zarxrax/ProPainterX)，沿用原始项目 [github.com/sczhou/ProPainter](https://github.com/sczhou/ProPainter) 推理代码和权重，用 MemFOF 取代原版的 RAFT 光流，在 24GB 级别显卡上以更高的工作分辨率完成移除。
+
+![CS ProPainterX Inpaint](images/CS_ProPainterX_Inpaint.jpg)
+#### 工作流程与注意事项
+
+1. 将源视频帧批次连接到 `image`，把与视频逐帧对应的移除区域 mask 连接到 `mask`；也支持单帧 mask 广播到整段。
+2. ```Mask dilation```参数可以扩大mask 标记的移除范围。如需要更大的移除范围，可以先用 `CS Mask Grow` 放大 mask区域。
+3. 节点按当前空闲显存自动决定单批次处理的帧数；帧数超出预算时自动分多批次推理，并在 overlap 区间做线性交叉淡化以消除接缝。
+4. 推理在源画面尺寸进行（仅向下对齐到 8 的倍数）。
+
+#### 权重与运行
+
+权重目录 `ComfyUI/models/ProPainter/`，包含 `ProPainter.pth`、`recurrent_flow_completion.pth` 以及 `memfof/config.json`、`memfof/model.safetensors`。    
+首次执行时会从官方源自动下载权重：下载来源分别来自 `sczhou/ProPainter v0.1.0 Release` 和 `egorchistov/optical-flow-MEMFOF-Tartan-T-TSKH`。
+
+ProPainter 许可证为 Apache-2.0，MemFOF 为 BSD-3-Clause，商用或再分发前请确认上游许可。
+
+#### 输入与输出
+
+- image：标准 ComfyUI `IMAGE` 帧批次。
+- mask：标准 ComfyUI `MASK` 帧批次。
+- 输出 image：标准 ComfyUI `IMAGE`帧批次，与输入帧数和尺寸一致。
+
+#### 节点选项说明
+![CS ProPainterX Inpaint 节点](images/CS_ProPainterX_node.jpg)
+- `Device`：`auto`、`cpu` 或可用 GPU。
+- `Sub-video length`：一次推理处理的帧数，默认 `80`。峰值显存主要由它决定（约 `neighbor_length + subvideo / ref_stride` 帧），与总帧数无关；显存不足时节点会自动下调，遇到 OOM 优先降低它。
+- `Neighbor length` / `Reference stride`：推理参考的邻帧数量与参考帧采样间隔，默认 `10` / `10`。
+- `Mask dilation`：ProPainterX 内部对移除区域的膨胀，默认 `4`。
+- `Batch overlap`：相邻批次交叉淡化的帧数，默认 `4`。只有帧数超过单批次数量分成多批推理时才起作用。
+- `Force unload model`：默认关闭；开启后本次执行结束即释放显存，便于与其他大模型节点交替使用。
 
 
 ### CS MOSS Audio Transcribe

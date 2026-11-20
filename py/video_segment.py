@@ -855,16 +855,13 @@ def _sam3_anchor_masks(model: Any, image: torch.Tensor, prompt_data: str | None)
                     coarse_1008 = F.interpolate(coarse, size=(1008, 1008), mode="bilinear", align_corners=False)
                     if mask_inputs is not None:
                         coarse_1008 = (coarse_1008 + F.interpolate(mask_inputs, size=(1008, 1008), mode="bilinear", align_corners=False)) * 0.5
+                    # Refinement passes carry only the mask, like the official Detect node.
                     mask_logits = sam3_model.forward_segment(
                         image_in,
-                        point_inputs=point_inputs,
-                        box_inputs=box_inputs,
                         mask_inputs=coarse_1008,
                     )
                     mask_logits = sam3_model.forward_segment(
                         image_in,
-                        point_inputs=point_inputs,
-                        box_inputs=box_inputs,
                         mask_inputs=mask_logits,
                     )
                 else:
@@ -879,8 +876,6 @@ def _sam3_anchor_masks(model: Any, image: torch.Tensor, prompt_data: str | None)
                 # Match the official Detect node's default interactive refinement pass.
                 mask_logits = sam3_model.forward_segment(
                     image_in,
-                    point_inputs=point_inputs,
-                    box_inputs=box_inputs,
                     mask_inputs=mask_logits,
                 )
         resized = F.interpolate(mask_logits, size=(height, width), mode="bilinear", align_corners=False)
